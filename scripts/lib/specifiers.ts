@@ -70,13 +70,26 @@ function isSpecifierQuote(buf: string[]): boolean {
   return word === "from" || word === "import";
 }
 
-/** Does a `/` at this point open a regex literal (vs being division)? Heuristic: regex when the */
-/** previous significant char is not a value-ender (identifier/number/`)`/`]`/`}`). */
+// Keywords after which a `/` opens a regex literal, not division (`return /re/`, `typeof /re/`, …).
+const REGEX_PRECEDING_KEYWORDS = new Set([
+  "return", "typeof", "case", "yield", "await", "in", "of", "do", "else", "void", "delete",
+  "instanceof", "new", "throw",
+]);
+
+/**
+ * Does a `/` at this point open a regex literal (vs being division)? A `)`/`]`/`}` or a plain
+ * identifier/number before it means division; an operator/punctuation (or start-of-input) means
+ * regex. The one trap: a keyword-led regex (`return /['"]/`) — the char before `/` is an identifier
+ * char, so we read the whole preceding word and treat the known regex-preceding keywords as regex.
+ */
 function regexStarts(buf: string[]): boolean {
   let j = buf.length - 1;
   while (j >= 0 && isWs(buf[j]!)) j--;
   if (j < 0) return true;
-  return !/[A-Za-z0-9_$)\]}]/.test(buf[j]!);
+  const c = buf[j]!;
+  if (c === ")" || c === "]" || c === "}") return false;
+  if (/[A-Za-z0-9_$]/.test(c)) return REGEX_PRECEDING_KEYWORDS.has(wordEndingAt(buf, j));
+  return true;
 }
 
 /**

@@ -43,6 +43,15 @@ test("stripStringsAndComments is not fooled by a regex literal containing quotes
   expect(specs(src)).toEqual(["loom"]);
 });
 
+test("stripStringsAndComments handles a keyword-led regex literal (return /['\"]/ etc.)", () => {
+  // `return /['"]/` — the char before `/` is part of `return`, so a char-only heuristic would treat
+  // it as division and leave the quote visible, swallowing the next import.
+  expect(specs(`function f() { return /['"]/; }\nimport x from "loom";`)).toEqual(["loom"]);
+  expect(specs(`const t = typeof /['"]/;\nimport y from "loom";`)).toEqual(["loom"]);
+  // Division after an identifier/number must still NOT be read as a regex (no false masking).
+  expect(specs(`const r = a / b; import z from "loom";`)).toEqual(["loom"]);
+});
+
 test("stripStringsAndComments preserves newlines so lineOf stays accurate", () => {
   const src = `/*\n long\n banner\n*/\nimport x from "loom";`;
   const clean = stripStringsAndComments(src);
