@@ -161,6 +161,22 @@ describe("load — validates the imported module (fail-closed)", () => {
   });
 });
 
+describe("globalConfigPath — XDG_CONFIG_HOME honored", () => {
+  test("uses XDG_CONFIG_HOME when set, else ~/.config", async () => {
+    const { globalConfigPath } = await import("./index");
+    const prev = process.env.XDG_CONFIG_HOME;
+    try {
+      process.env.XDG_CONFIG_HOME = "/tmp/xdg-test";
+      expect(globalConfigPath()).toBe("/tmp/xdg-test/std/config.ts");
+      delete process.env.XDG_CONFIG_HOME;
+      expect(globalConfigPath().endsWith("/.config/std/config.ts")).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prev;
+    }
+  });
+});
+
 describe("SCHEMA_VERSION", () => {
   test("is the literal 1", () => {
     expect(SCHEMA_VERSION).toBe(1);

@@ -107,22 +107,27 @@ export function validate(raw: unknown): Manifest {
   return manifest;
 }
 
-/** std's OWN global config home — the only sanctioned literal path (no consumer identity, D4). */
+/** std's OWN global config home — the only sanctioned literal path (no consumer identity, D4). Honors
+ *  `XDG_CONFIG_HOME` (the platform convention), falling back to `~/.config`. */
 export function globalConfigPath(): string {
-  return join(homedir(), ".config", "std", "config.ts");
+  const base = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+  return join(base, "std", "config.ts");
 }
 
 /**
  * Zero-config discovery (NFR8): walk UP from `startDir` to the git toplevel, returning the first
  * `std.config.ts` found. Stops at the repo root (a dir containing `.git`) or the filesystem root — it
  * never walks past the repo. Returns null when none is found. Pure dir-tree walk, no consumer identity.
+ *
+ * Note: `.git` is matched by mere existence, NOT `isDirectory()` — a git worktree or submodule has a
+ * `.git` FILE (a gitdir pointer), and that is still a legitimate repo toplevel we must stop at.
  */
 export function discover(startDir: string): string | null {
   let dir = startDir;
   for (;;) {
     const candidate = join(dir, "std.config.ts");
     if (existsSync(candidate)) return candidate;
-    const atToplevel = existsSync(join(dir, ".git"));
+    const atToplevel = existsSync(join(dir, ".git")); // file OR dir — worktrees use a .git file
     const parent = dirname(dir);
     if (atToplevel || parent === dir) return null;
     dir = parent;

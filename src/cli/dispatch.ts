@@ -36,7 +36,16 @@ export function stepVerdict(step: Step, exec: Exec): Verdict {
   switch (step.kind) {
     case "exec":
       return exec(step.run) === 0 ? "pass" : "fail";
+    default:
+      // Unreachable at runtime — validate() rejects any kind outside STEP_KINDS before dispatch. The
+      // `never` assignment makes a missing case a COMPILE error the day Story 4.4 adds the `adapter` kind.
+      return assertNever(step.kind);
   }
+}
+
+/** Exhaustiveness guard: a compile error if a `StepKind` is added without a `stepVerdict` case. */
+function assertNever(kind: never): never {
+  throw new Error(`std: unhandled step kind '${String(kind)}'`);
 }
 
 /**
