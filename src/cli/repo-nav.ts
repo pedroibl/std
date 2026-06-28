@@ -122,8 +122,10 @@ compdef _repo repo 2>/dev/null
 }
 
 /**
- * Generate the `repo-nav.zsh` artifact from the registry. DETERMINISTIC — entries are emitted in sorted
- * key order so regeneration is byte-identical (GIT-SoT reproducibility). Validates first (fail-loud).
+ * Generate the `repo-nav.zsh` artifact from the registry. DETERMINISTIC — entries are emitted in their
+ * `repos.ts` DECLARATION order (object key order is stable, so regeneration is still byte-identical,
+ * GIT-SoT reproducibility) and that order is the user's, preserving their priority. (Runtime listing via
+ * `repos`/completion is independently alphabetical — zsh's `${(ok)…}` sorts on access.) Validates first.
  */
 export function generateRepoNav(
   config: RepoConfig,
@@ -131,7 +133,7 @@ export function generateRepoNav(
 ): string {
   validateRegistry(config, frozenNames);
   const reserved = config.reserved ?? [];
-  const keys = Object.keys(config.entries).sort();
+  const keys = Object.keys(config.entries); // declaration order — the user's priority, preserved
   const width = keys.reduce((w, k) => Math.max(w, k.length), 0);
   const rows = keys.map((k) => `  ${k.padEnd(width)}  "${config.entries[k]}"`).join("\n");
   return `${GENERATED_BANNER}\n\ntypeset -gA ZSH_REPOS=(\n${rows}\n)\n${repoNavBody(reserved)}`;

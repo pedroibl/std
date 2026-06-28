@@ -58,20 +58,20 @@ describe("validateRegistry — fail-loud guards (AC2)", () => {
   });
 });
 
-describe("generateRepoNav — deterministic, sorted, complete (AC1)", () => {
+describe("generateRepoNav — deterministic, declaration-ordered, complete (AC1)", () => {
   const out = generateRepoNav(cfg);
 
   test("is byte-identical on regeneration (GIT-SoT reproducibility)", () => {
     expect(generateRepoNav(cfg)).toBe(out);
   });
 
-  test("emits entries in sorted key order", () => {
+  test("emits entries in repos.ts declaration order (preserves the user's priority)", () => {
     const block = out.slice(out.indexOf("ZSH_REPOS=("), out.indexOf(")", out.indexOf("ZSH_REPOS=(")));
     const keys = block
       .split("\n")
       .map((l) => l.match(/^\s+(\S+)\s+"/)?.[1])
       .filter((k): k is string => Boolean(k));
-    expect(keys).toEqual(["mph", "std", "zp"]); // sorted
+    expect(keys).toEqual(["zp", "mph", "std"]); // declaration order, NOT sorted
   });
 
   test("carries the generated banner + ZSH_REPOS + repo/repos functions", () => {
