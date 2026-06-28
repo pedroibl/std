@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# Repo-level config for CodeRabbit's server-side review (the GitHub App).
+# This governs the auto-review that posts inline comments + a summary on every MR. The
+# in-pipeline `coderabbit-review` job in .gitlab-ci.yml is a separate, advisory CLI pass.
+#
+# Doctrine encoded below mirrors std's enforcement harness so CodeRabbit flags the same
+# invariants the deterministic gates protect (D1/NFR1 core purity, D4/NFR2 dependency root).
+
+language: en-US
+
+reviews:
+  profile: assertive            # std is small + quality-focused; thorough review is cheap here
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+  # Review everything except generated/planning noise and lockfiles.
+  path_filters:
+    - "!_bmad-output/**"
+    - "!node_modules/**"
+    - "!bun.lock"
+    - "!**/*.lock"
+  # Slice-aware guidance — the same rules the CI scanners enforce, stated for the reviewer.
+  path_instructions:
+    - path: "src/core/**"
+      instructions: >-
+        core is runtime-neutral (D1/NFR1/CM3). Flag any node:* / fs / DOM / network import and
+        any reference to `process` or `document`. core must import nothing runtime-specific.
+    - path: "src/**"
+      instructions: >-
+        std is a clean dependency root (D4/NFR2): it imports nothing back — no import of `loom`
+        or `PAI/Tools`, and no import cycle. Tests live beside code as *.test.ts (NFR5/D6).
+    - path: "scripts/**"
+      instructions: >-
+        Enforcement-harness tooling — may freely use Bun/node APIs (only src/core is held to
+        purity). Pure analyzers are unit-tested beside each script; flag logic that drifts from
+        the gate it implements.
+
+chat:
+  auto_reply: true

@@ -1,0 +1,23 @@
+{
+  "name": "std",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pedro's personal standard — shared Bun+TypeScript vocabulary for reports, notes, and CLIs.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./core": "./src/core/index.ts",
+    "./glab": "./src/glab/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check:core-purity": "bun run scripts/check-core-purity.ts",
+    "check:dep-root": "bun run scripts/check-dep-root.ts",
+    "review:cr": "bash scripts/cr-review.sh"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.0"
+  }
+}

@@ -1,0 +1,55 @@
+# std — CI quality pipeline (GitHub Actions · Epic 1: Enforcement Harness).
+#
+# Mirrors the GitLab gate set (.gitlab-ci.yml) on the same invariants, the GitHub-native way.
+# Generated via BMad TEA (bmad-testarch-ci) and adapted down from the npm/Playwright template:
+# std is a pure Bun project (39 fast unit + static gates, no e2e), so the sharding / browser-install
+# / weekly burn-in scaffolding does not apply — removed deliberately, not forgotten.
+#
+# The gates run as ordered steps in one job (install resolves once; each gate is sub-second and
+# fails the build on a non-zero exit). Server-side code review is handled by the CodeRabbit GitHub
+# App, not a CI job — so there is no review step here and no API key in CI.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One in-flight run per ref; a newer push cancels the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: Quality gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Gate 1 — deps resolve exactly from the committed lockfile (frozen).
+      - name: Install (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      # Gate 2 — unit tests green (NFR5/D6: tests beside code).
+      - name: Test
+        run: bun test
+
+      # Gate 3 — TypeScript strict typecheck, no emit (NFR6).
+      - name: Typecheck
+        run: bun run typecheck
+
+      # Gate 4 — core is runtime-neutral: no node:*/fs/DOM/network, no process/document (D1/NFR1/CM3).
+      - name: Core purity
+        run: bun run check:core-purity
+
+      # Gate 5 — std is a clean dependency root: no loom/PAI-Tools back-edge, no import cycle (D4/NFR2/SM2).
+      - name: Dependency root + no cycle
+        run: bun run check:dep-root
