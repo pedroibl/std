@@ -31,6 +31,14 @@ describe("validateRegistry — fail-loud guards (AC2)", () => {
     expect(() => validateRegistry(bad)).toThrow(/'bad name' violates the naming grammar/);
   });
 
+  test("fail-loud on a leading-underscore alias (nav aliases are public)", () => {
+    expect(() => validateRegistry({ entries: { _hidden: "/x" } })).toThrow(/starts with '_'/);
+  });
+
+  test("fail-loud on an alias colliding with the generator's own repo/repos", () => {
+    expect(() => validateRegistry({ entries: { repo: "/x" } })).toThrow(/reserved by the generator/);
+  });
+
   test("fail-loud on a frozen-name collision", () => {
     const frozen = new Set(["forge", "agent"]);
     const collide: RepoConfig = { entries: { forge: "/x", zp: "/y" } };

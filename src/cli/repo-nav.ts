@@ -10,7 +10,7 @@
 //
 // Bun edge — fs/os/path are fine here; core stays pure.
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /** The registry: a map of nav alias → target path (the path string is emitted verbatim into zsh, so a
@@ -53,6 +53,11 @@ export function validateRegistry(
         `repo-nav: alias '${key}' violates the naming grammar ${NAV_NAME_GRAMMAR} (AD-7)`,
       );
     }
+    if (key.startsWith("_")) {
+      throw new RepoNavError(
+        `repo-nav: alias '${key}' starts with '_' — nav aliases are public names (AD-7), not private`,
+      );
+    }
     if ((OWNED_NAMES as readonly string[]).includes(key)) {
       throw new RepoNavError(
         `repo-nav: alias '${key}' is reserved by the generator (it defines ${OWNED_NAMES.join("/")}) — ` +
@@ -76,8 +81,12 @@ const GENERATED_BANNER =
   "# ONE source, TWO outputs. Do NOT hand-edit — edit repos.ts and regenerate. Generated artifacts\n" +
   "# are never frozen (the name surface lives in the source registry).";
 
-// The static behavior (repo/repos/_repo + cd-alias block) is constant — only ZSH_REPOS is data-driven.
-const REPO_NAV_BODY = `
+// The static behavior (repo/repos/_repo + cd-alias block) is constant — only ZSH_REPOS and the reserved
+// skip-list are data-driven. `reserved` is interpolated directly (no placeholder, so nothing in the body
+// can accidentally collide with a magic token).
+function repoNavBody(reserved: readonly string[]): string {
+  const reservedList = reserved.slice().sort().join(" ");
+  return `
 # repo <alias> — cd to a registered repo (never shadows a command; tab-completes)
 repo() {
   emulate -L zsh
@@ -102,7 +111,7 @@ compdef _repo repo 2>/dev/null
 # Direct cd-aliases — generated from the registry, but NEVER shadow a real command.
 () {
   emulate -L zsh
-  local k; local -a reserved=(RESERVED_NAMES)
+  local k; local -a reserved=(${reservedList})
   for k in \${(k)ZSH_REPOS}; do
     (( \${reserved[(I)$k]} )) && continue                 # reserved CLI name → skip
     command -v "$k" >/dev/null 2>&1 && continue          # a real command owns it → skip
@@ -110,6 +119,7 @@ compdef _repo repo 2>/dev/null
   done
 }
 `;
+}
 
 /**
  * Generate the `repo-nav.zsh` artifact from the registry. DETERMINISTIC — entries are emitted in sorted
@@ -124,8 +134,7 @@ export function generateRepoNav(
   const keys = Object.keys(config.entries).sort();
   const width = keys.reduce((w, k) => Math.max(w, k.length), 0);
   const rows = keys.map((k) => `  ${k.padEnd(width)}  "${config.entries[k]}"`).join("\n");
-  const body = REPO_NAV_BODY.replace("RESERVED_NAMES", reserved.slice().sort().join(" "));
-  return `${GENERATED_BANNER}\n\ntypeset -gA ZSH_REPOS=(\n${rows}\n)\n${body}`;
+  return `${GENERATED_BANNER}\n\ntypeset -gA ZSH_REPOS=(\n${rows}\n)\n${repoNavBody(reserved)}`;
 }
 
 /**
@@ -175,6 +184,9 @@ export interface InstallResult {
  * one-way deploy outputs (GIT-SoT) — never a second source.
  */
 export function installAlias(opts: InstallOptions): InstallResult {
+  // Generate BOTH artifacts first — generation fail-closes on a bad registry, so a validation failure
+  // writes nothing. Each file is then written via a temp-file + atomic rename, so a write that fails
+  // mid-way never leaves a half-written artifact in the live shell tree (no partial corruption).
   const repoNav = generateRepoNav(opts.config, opts.frozenNames ?? new Set());
   const completion = generateStdCompletion(opts.commands);
   for (const [path, content] of [
@@ -183,7 +195,9 @@ export function installAlias(opts: InstallOptions): InstallResult {
   ] as const) {
     const dir = dirname(path);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(path, content);
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, content);
+    renameSync(tmp, path); // atomic on the same filesystem
   }
   return { repoNavPath: opts.targets.repoNavPath, completionPath: opts.targets.completionPath };
 }
