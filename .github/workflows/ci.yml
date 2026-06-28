@@ -53,3 +53,9 @@ jobs:
       # Gate 5 — std is a clean dependency root: no loom/PAI-Tools back-edge, no import cycle (D4/NFR2/SM2).
       - name: Dependency root + no cycle
         run: bun run check:dep-root
+
+      # Gate 6 — core is the single source of the shared vocabulary: no duplicate cite/severity/stat/
+      # counts definition outside src/core/** (D2/NFR4/SM1). STD_CONSUMERS is unset in CI, so the
+      # cross-repo consumer scan is SKIP-as-green; the within-std assertion is what gates every PR.
+      - name: Single-source vocabulary
+        run: bun run check:single-source

@@ -9,21 +9,16 @@
 // main() globs src, builds the relative-import graph, scans, and gates CI.
 //
 // Zero new dependency (D4): the cycle detector is a hand-rolled DFS, not a graph library.
+//
+// The import/export specifier regexes + comment/string masking + `specifiers()` live in
+// scripts/lib/specifiers.ts (the Rule-of-Three home, extracted at 1.4's third caller) — imported
+// here, no longer re-declared. Re-export barrels (`export … from "…"`) and dynamic `import("…")`
+// are real compile-time module edges, so `specifiers()` feeds both the back-edge scan AND the cycle
+// graph; a type-only re-export still forms a cycle and is deliberately included.
+
+import { specifiers, stripStringsAndComments, lineOf } from "./lib/specifiers";
 
 export type Violation = { kind: string; detail: string; line?: number };
-
-// Re-declared locally (not exported from check-core-purity.ts): Rule-of-Three extracts to a shared
-// scripts/lib/ only on the THIRD caller (1.4/1.5 may trigger that), not on this second one.
-const FROM_IMPORT = /\bimport\b[^;]*?\bfrom\s*["']([^"']+)["']/g;
-const SIDE_EFFECT_IMPORT = /\bimport\s+["']([^"']+)["']/g;
-const REQUIRE_CALL = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g;
-// Dynamic `import("…")` is a real module edge — a back-edge `import("loom")` must not slip the gate.
-const DYNAMIC_IMPORT = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
-// Re-export barrels (`export { x } from "…"`, `export * from "…"`, `export type { x } from "…"`) are
-// real compile-time module edges — std wires every slice through them, so they must feed both the
-// back-edge scan AND the cycle graph or AC1 ("any cycle within std") is unenforceable. A type-only
-// re-export still forms a cycle, so it is deliberately included.
-const EXPORT_FROM = /\bexport\b[^;]*?\bfrom\s*["']([^"']+)["']/g;
 
 // Segment-aware so `bloomfilter` / `heirloom` / `loomis` do NOT false-positive; a bare substring would.
 const isLoom = (spec: string): boolean => spec.split(/[\\/]/).includes("loom");
@@ -31,33 +26,10 @@ const isLoom = (spec: string): boolean => spec.split(/[\\/]/).includes("loom");
 const isPaiTools = (spec: string): boolean => /PAI[\/-]Tools/.test(spec);
 const isBackEdge = (spec: string): boolean => isLoom(spec) || isPaiTools(spec);
 
-// Blank out block-comment *content* while preserving newlines (and column offsets), so `lineOf`
-// keeps reporting the original line of every later back-edge.
-function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
-    .replace(/(^|[^:])\/\/.*$/gm, "$1");
-}
-
-function lineOf(text: string, index: number): number {
-  return text.slice(0, index).split("\n").length;
-}
-
-/** Every import/require specifier in a source file (comments already strippable by the caller). */
-function specifiers(clean: string): Array<{ spec: string; index: number }> {
-  const out: Array<{ spec: string; index: number }> = [];
-  for (const re of [FROM_IMPORT, SIDE_EFFECT_IMPORT, REQUIRE_CALL, EXPORT_FROM, DYNAMIC_IMPORT]) {
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(clean)) !== null) out.push({ spec: m[1]!, index: m.index });
-  }
-  return out;
-}
-
 /** Pure: flag any import/require specifier in a source file reaching `loom` or `PAI/Tools`. */
 export function scanBackEdges(src: string): Violation[] {
   const out: Violation[] = [];
-  const clean = stripComments(src);
+  const clean = stripStringsAndComments(src);
   for (const { spec, index } of specifiers(clean)) {
     if (isBackEdge(spec)) out.push({ kind: "back-edge", detail: spec, line: lineOf(clean, index) });
   }
@@ -136,7 +108,7 @@ async function main(): Promise<void> {
     const src = await Bun.file(file).text();
     for (const v of scanBackEdges(src)) findings.push({ where: file, v });
 
-    const clean = stripComments(src);
+    const clean = stripStringsAndComments(src);
     const dir = dirname(file);
     for (const { spec } of specifiers(clean)) {
       if (!spec.startsWith(".")) continue; // bare/external specifier → no internal graph edge

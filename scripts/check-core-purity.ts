@@ -5,6 +5,18 @@
 // or `document`. This check is TOOLING (not part of core), so it may use Bun/node APIs freely.
 //
 // Pure scanner (`scanSource`) is unit-tested beside this file; `main()` globs core and gates CI.
+//
+// The import-specifier regexes + comment/string masking live in scripts/lib/specifiers.ts (the
+// Rule-of-Three home, extracted at 1.4's third caller) — imported here, no longer re-declared.
+
+import {
+  FROM_IMPORT,
+  SIDE_EFFECT_IMPORT,
+  REQUIRE_CALL,
+  DYNAMIC_IMPORT,
+  stripStringsAndComments,
+  lineOf,
+} from "./lib/specifiers";
 
 const NODE_BUILTINS = new Set([
   "assert", "buffer", "child_process", "cluster", "console", "crypto", "dgram", "dns",
@@ -21,29 +33,10 @@ const FORBIDDEN_GLOBALS = ["process", "document", "fetch", "XMLHttpRequest", "We
 
 export type Violation = { line: number; kind: string; detail: string };
 
-const FROM_IMPORT = /\bimport\b[^;]*?\bfrom\s*["']([^"']+)["']/g;
-const SIDE_EFFECT_IMPORT = /\bimport\s+["']([^"']+)["']/g;
-const REQUIRE_CALL = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g;
-// Dynamic `import("…")` / `await import("…")` is a real runtime edge too, so it is scanned alongside
-// the static forms — otherwise `await import("node:fs")` slips straight past the gate.
-const DYNAMIC_IMPORT = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
-
-// Blank out the *content* of block comments while preserving their newlines (and column offsets),
-// so `lineOf` keeps reporting the original line of every later violation.
-function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
-    .replace(/(^|[^:])\/\/.*$/gm, "$1");
-}
-
-function lineOf(text: string, index: number): number {
-  return text.slice(0, index).split("\n").length;
-}
-
 /** Pure: return every runtime-purity violation in a core source file's text. */
 export function scanSource(src: string): Violation[] {
   const out: Violation[] = [];
-  const clean = stripComments(src);
+  const clean = stripStringsAndComments(src);
 
   const flag = (spec: string, index: number) => {
     const line = lineOf(clean, index);
