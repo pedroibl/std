@@ -59,7 +59,8 @@ export const STD_CONSUMERS: readonly Consumer[] = [
   },
 ];
 
-/** Consumer basenames (the blast-radius keys). Convenience for tooling that needs just the names. */
-export function consumerNames(): string[] {
+/** Consumer basenames (the blast-radius keys). Convenience for tooling that needs just the names.
+ *  Returns `readonly` — the registry is the single source of truth; callers must not mutate the view. */
+export function consumerNames(): readonly string[] {
   return STD_CONSUMERS.map((c) => c.name);
 }
