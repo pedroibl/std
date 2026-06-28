@@ -28,7 +28,7 @@ export interface MainDeps {
   log?: (line: string) => void;
 }
 
-/** Top-level usage — derived in one place so help text and the command list never drift. */
+/** Top-level usage. A single hand-maintained constant — keep it in sync when commands change. */
 export const HELP = `std — Pedro's standard CLI
 
 usage: std <command> [options]
