@@ -28,14 +28,34 @@ export interface MainDeps {
   log?: (line: string) => void;
 }
 
+/** Top-level usage. A single hand-maintained constant — keep it in sync when commands change. */
+export const HELP = `std — Pedro's standard CLI
+
+usage: std <command> [options]
+
+commands:
+  alias --install   (re)generate repo-nav + the _std completion from ~/.config/std/repos.ts
+
+flags:
+  -h, --help        show this help`;
+
 /**
  * Dispatch `std <command>`. Returns a process exit code (0 ok, 1 fail-loud, 2 usage/unknown). The bin
- * does `process.exit(runMain(...))`. `alias --install` imports the registry, generates repo-nav + the
- * `_std` completion, and deploys them (fail-closed — a bad registry writes nothing).
+ * does `process.exit(runMain(...))`. `-h`/`--help` (or no command) print usage; `alias --install`
+ * imports the registry, generates repo-nav + the `_std` completion, and deploys (fail-closed).
  */
 export async function runMain(argv: string[], deps: MainDeps = {}): Promise<number> {
   const log = deps.log ?? ((l: string) => console.log(l));
   const [cmd, ...rest] = argv;
+
+  if (cmd === "-h" || cmd === "--help") {
+    log(HELP);
+    return 0;
+  }
+  if (cmd === undefined) {
+    log(HELP);
+    return 2; // no command — show help, but signal an incomplete invocation
+  }
 
   if (cmd === "alias") {
     if (!rest.includes("--install")) {

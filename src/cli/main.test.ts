@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { globalReposPath, runMain } from "./main";
+import { HELP, globalReposPath, runMain } from "./main";
 
 /** Write a temp repos.ts (a RepoConfig default export) and return its path. */
 function tempRepos(body: string): { dir: string; path: string } {
@@ -68,7 +68,21 @@ describe("runMain — std alias --install", () => {
 
   test("an unknown command exits 2", async () => {
     expect(await runMain(["bogus"], { log: () => {} })).toBe(2);
-    expect(await runMain([], { log: () => {} })).toBe(2);
+  });
+
+  test("-h / --help print usage, exit 0", async () => {
+    for (const flag of ["-h", "--help"]) {
+      const lines: string[] = [];
+      expect(await runMain([flag], { log: (l) => lines.push(l) })).toBe(0);
+      expect(lines.join("\n")).toContain("usage: std <command>");
+      expect(lines.join("\n")).toContain("alias --install");
+    }
+  });
+
+  test("no command prints help but signals incomplete invocation (exit 2)", async () => {
+    const lines: string[] = [];
+    expect(await runMain([], { log: (l) => lines.push(l) })).toBe(2);
+    expect(lines.join("\n")).toBe(HELP);
   });
 });
 
