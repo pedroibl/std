@@ -1,14 +1,10 @@
 #!/usr/bin/env bun
-// Reference entry point. A per-repo wrapper mirrors this, passing its own repo:
+// Reference entry point. Resolves the repo git-remote-first (the cwd repo's `origin`); set
+// REPO_PATH=<owner/repo> to override. A per-repo wrapper can instead call run() with its own value:
 //   import { run } from "std/glab";
-//   process.exit(run(process.argv.slice(2), { repo: "pedroibl/loom" }));
+//   process.exit(run(process.argv.slice(2), { repo: "owner/repo" }));
 
 import { run } from "./index";
 
-const repo = process.env.REPO_PATH;
-if (!repo) {
-  console.error("set REPO_PATH=<owner/repo>, e.g. REPO_PATH=pedroibl/std");
-  process.exit(2);
-}
-
-process.exit(run(process.argv.slice(2), { repo }));
+const override = process.env.REPO_PATH;
+process.exit(run(process.argv.slice(2), override ? { repo: override } : {}));
