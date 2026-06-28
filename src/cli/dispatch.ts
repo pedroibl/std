@@ -136,11 +136,16 @@ export function jsonResult(command: string, result: DispatchResult): JsonResult 
   };
 }
 
-/** Real executor: `zsh -c` with INHERITED stdio, so a consumer's script output passes through verbatim
- *  (the basis for byte-identical Makefile parity, SM4). */
-function execShell(run: string): number {
-  const r = spawnSync("zsh", ["-c", run], { stdio: "inherit" });
-  return r.status ?? 1;
+/**
+ * Real executor factory: `zsh -c <run>`. In human mode stdio is fully INHERITED, so a consumer's script
+ * output passes through verbatim (the basis for byte-identical Makefile parity, SM4). In `quiet` mode
+ * (used by `--json`) the child's stdout is redirected to the parent's STDERR, so std's final JSON line is
+ * the ONLY thing on stdout — `--json` stays machine-parseable while step diagnostics still surface on
+ * stderr. (Quiet mode never runs on the SM4 path; the shim invokes commands without `--json`.)
+ */
+function makeShellExec(quiet: boolean): Exec {
+  const stdio: Array<"inherit" | number> = quiet ? ["inherit", 2, 2] : ["inherit", "inherit", "inherit"];
+  return (run) => spawnSync("zsh", ["-c", run], { stdio }).status ?? 1;
 }
 
 /**
@@ -149,9 +154,10 @@ function execShell(run: string): number {
  * Otherwise the command runs; with `--json` the machine-readable result is emitted to stdout (the steps
  * still run, so their inherited-stdio output passes through — in human mode that passthrough IS the
  * output, no summary is printed: SM4 byte-parity). Returns the exit code (0/1), or 2 for an unknown
- * command. `exec` is injectable for tests; production uses the inherited-stdio shell runner.
+ * command. `exec` is injectable for tests; in production the shell runner is chosen by `--json` (quiet,
+ * so stdout carries only the JSON) vs human mode (full passthrough).
  */
-export function run(argv: string[], manifest: Manifest, exec: Exec = execShell): number {
+export function run(argv: string[], manifest: Manifest, exec?: Exec): number {
   const { command: name, keepGoing, help, json } = parseArgs(argv);
 
   if (help) {
@@ -166,7 +172,8 @@ export function run(argv: string[], manifest: Manifest, exec: Exec = execShell):
     return 2;
   }
 
-  const result = dispatchSteps(command.steps, exec, { keepGoing });
+  const runner = exec ?? makeShellExec(json);
+  const result = dispatchSteps(command.steps, runner, { keepGoing });
   if (json) console.log(JSON.stringify(jsonResult(command.name, result)));
   return verdictToExit(result.verdict);
 }
