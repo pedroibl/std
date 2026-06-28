@@ -47,6 +47,14 @@ describe("lines() — the p() markdown line-builder (FR7)", () => {
     expect(b.toString()).toBe("from b");
   });
 
+  test("p(undefined) normalizes to a blank line, never the string \"undefined\"", () => {
+    const { p, toString } = lines();
+    p(undefined);
+    p("after");
+    expect(toString()).toBe("\nafter");
+    expect(toString()).not.toContain("undefined");
+  });
+
   test("preserves explicit empty-string pushes verbatim", () => {
     const { p, toString } = lines();
     p("");

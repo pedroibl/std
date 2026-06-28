@@ -32,7 +32,9 @@ export interface Lines {
 export function lines(): Lines {
   const buf: string[] = [];
   return {
-    p: (line = "") => {
+    // `line: string = ""` keeps the buffer strictly string lines: the default fires on both `p()` and
+    // an explicit `p(undefined)`, so neither can push a non-string (it would join as "undefined").
+    p: (line: string = "") => {
       buf.push(line);
     },
     toString: () => buf.join("\n"),
