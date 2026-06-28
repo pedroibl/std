@@ -22,10 +22,15 @@ export {
 
 export {
   dispatchSteps,
+  formatHelp,
+  jsonResult,
+  parseArgs,
   run,
   stepVerdict,
   verdictToExit,
   type DispatchOptions,
   type DispatchResult,
   type Exec,
+  type JsonResult,
+  type ParsedArgs,
 } from "./dispatch";
