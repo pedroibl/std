@@ -10,6 +10,9 @@
     "./glab": "./src/glab/index.ts",
     "./cli": "./src/cli/index.ts"
   },
+  "bin": {
+    "std": "./src/cli/main.ts"
+  },
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",

@@ -22,6 +22,9 @@ export type RepoRegistry = Record<string, string>;
 export interface RepoConfig {
   entries: RepoRegistry;
   reserved?: string[];
+  /** Optional frozen callable names a generated alias must never collide with (the consumer supplies
+   *  these — std bakes in no consumer's frozen set). Absent → only grammar/reserved/owned checks run. */
+  frozen?: string[];
 }
 
 /** zshstd's callable-name grammar (mirrors `fn-names.zsh`: a name matches this, public = not `_`-led).
