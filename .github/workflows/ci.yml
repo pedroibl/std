@@ -59,3 +59,9 @@ jobs:
       # cross-repo consumer scan is SKIP-as-green; the within-std assertion is what gates every PR.
       - name: Single-source vocabulary
         run: bun run check:single-source
+
+      # Gate 7 — std source bakes in no consumer identity: no literal consumer identifier in src/**
+      # outside *.test.ts (D3/D4/NFR3 assertion 2 — the NFR2∩NFR3 collapse). std-local, always
+      # runnable, no SKIP path. Gates Epic 4, where cli core lands.
+      - name: No consumer identifiers
+        run: bun run check:no-consumer-ids

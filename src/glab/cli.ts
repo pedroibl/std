@@ -7,7 +7,7 @@ import { run } from "./index";
 
 const repo = process.env.REPO_PATH;
 if (!repo) {
-  console.error("set REPO_PATH=<owner/repo>, e.g. REPO_PATH=pedroibl/loom");
+  console.error("set REPO_PATH=<owner/repo>, e.g. REPO_PATH=pedroibl/std");
   process.exit(2);
 }
 
