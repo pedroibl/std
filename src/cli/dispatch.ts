@@ -155,7 +155,9 @@ function makeShellExec(quiet: boolean): Exec {
  * still run, so their inherited-stdio output passes through — in human mode that passthrough IS the
  * output, no summary is printed: SM4 byte-parity). Returns the exit code (0/1), or 2 for an unknown
  * command. `exec` is injectable for tests; in production the shell runner is chosen by `--json` (quiet,
- * so stdout carries only the JSON) vs human mode (full passthrough).
+ * so stdout carries only the JSON) vs human mode (full passthrough). If you inject `exec` you own its
+ * stdio discipline — only the built-in runner applies `--json` quiet mode (the production path passes
+ * no `exec`; tests inject pure number-returning fns that write nothing to stdout).
  */
 export function run(argv: string[], manifest: Manifest, exec?: Exec): number {
   const { command: name, keepGoing, help, json } = parseArgs(argv);
