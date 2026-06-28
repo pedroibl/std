@@ -14,6 +14,12 @@
 // node:fs is allowed here (a Bun edge); it is forbidden only in `core`. All paths are caller-supplied
 // arguments — no path/repo identity is baked in (D4/NFR3), the same discipline the future `fsx` slice
 // will inherit.
+//
+// CONCURRENCY SCOPE: these are SINGLE-WRITER helpers for report generation (one process writing its own
+// output). `safeWrite`/`stageWrite`/`commitRename` are torn-write-proof via atomic rename; `appendIfMissing`
+// is idempotent across sequential runs and routed through the same atomic rename. They do NOT add file
+// locking, so they are not safe against a second process writing the SAME path concurrently — out of
+// scope for FR9 (and `appendAudit` is explicitly best-effort and loss-tolerant).
 
 import {
   appendFileSync,
@@ -30,10 +36,20 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 
-/** Create a file's parent directory if missing (recursive). Shared prelude for the writers. */
+/** Create a file's parent directory (recursive). `mkdirSync recursive` is idempotent — no exists-check
+ *  (an exists+mkdir pair is a needless TOCTOU). Shared prelude for the writers. */
 function ensureParent(path: string): void {
-  const dir = dirname(path);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  mkdirSync(dirname(path), { recursive: true });
+}
+
+/** Read a file's text, or `null` if it does not exist. One syscall — no exists/read TOCTOU window. */
+function readOrNull(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
 }
 
 /**
@@ -61,7 +77,7 @@ export function commitRename(tmp: string, path: string): void {
  * and write the result atomically (stage → rename). A failure mid-write leaves the original intact.
  */
 export function safeWrite(path: string, render: (current: string | null) => string): void {
-  const current = existsSync(path) ? readFileSync(path, "utf8") : null;
+  const current = readOrNull(path);
   const next = render(current);
   const tmp = stageWrite(path, next);
   commitRename(tmp, path);
@@ -90,16 +106,20 @@ export function writeIfAbsent(path: string, content: string): boolean {
 }
 
 /**
- * Marker-gated append: append `block` only if `marker` is not already present in the file. Idempotent —
- * a second call with the same marker is a no-op. Returns `true` if it appended. An absent file counts as
- * "marker missing" (the block is the first content). The caller owns any leading/trailing newline in
- * `block` and `marker`.
+ * Marker-gated append: append `block` only if `marker` is not already present in the file. Idempotent
+ * across sequential runs — a second call with the same marker is a no-op. Returns `true` if it appended.
+ * An absent file counts as "marker missing" (the block is the first content). The caller owns any
+ * leading/trailing newline in `block`/`marker`.
+ *
+ * Written atomically (read → check → rewrite via stage+rename), not via `appendFileSync`: a torn append
+ * can't corrupt the file, and two concurrent appends converge to the block present once (a lost update
+ * of identical content), never a duplicated block.
  */
 export function appendIfMissing(path: string, marker: string, block: string): boolean {
-  const current = existsSync(path) ? readFileSync(path, "utf8") : "";
-  if (current.includes(marker)) return false;
-  ensureParent(path);
-  appendFileSync(path, block);
+  const current = readOrNull(path);
+  if (current !== null && current.includes(marker)) return false;
+  const tmp = stageWrite(path, (current ?? "") + block);
+  commitRename(tmp, path);
   return true;
 }
 
