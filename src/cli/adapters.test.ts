@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { adapterVerdict, defaultCapability } from "./index";
+import { adapterVerdict, defaultCapability, makeResolver } from "./index";
 import type { Capability, AdapterExec, ReviewAdapter } from "./index";
 
 const present: Capability = () => true;
@@ -48,5 +48,13 @@ describe("defaultCapability (production probe shape)", () => {
     } finally {
       if (saved !== undefined) process.env.SOURCERY_CLI_TOKEN = saved;
     }
+  });
+});
+
+describe("makeResolver (production wiring — quiet under --json mirrors makeShellExec)", () => {
+  test("produces a working resolver in both modes; 'none' → skip without probing/running", () => {
+    expect(makeResolver(false)("none")).toBe("skip");
+    expect(makeResolver(true)("none")).toBe("skip"); // quiet-mode resolver, same decision
+    // (the quiet path routes a present tool's stdout→stderr, the same mechanism proven for makeShellExec)
   });
 });

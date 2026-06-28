@@ -28,6 +28,8 @@ export {
   adapterVerdict,
   defaultCapability,
   defaultAdapterExec,
+  makeAdapterExec,
+  makeResolver,
   resolveAdapter,
   type AdapterExec,
   type AdapterResolver,

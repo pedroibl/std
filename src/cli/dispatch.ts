@@ -11,7 +11,7 @@
 
 import { spawnSync } from "node:child_process";
 
-import { resolveAdapter as defaultResolveAdapter, type AdapterResolver } from "./adapters";
+import { resolveAdapter as defaultResolveAdapter, makeResolver, type AdapterResolver } from "./adapters";
 import type { Manifest, Step, Verdict } from "./config";
 
 /** Runs a shell command, returns its exit code. Injected in tests so the sequencing logic stays pure. */
@@ -171,12 +171,7 @@ function makeShellExec(quiet: boolean): Exec {
  * stdio discipline — only the built-in runner applies `--json` quiet mode (the production path passes
  * no `exec`; tests inject pure number-returning fns that write nothing to stdout).
  */
-export function run(
-  argv: string[],
-  manifest: Manifest,
-  exec?: Exec,
-  resolve: AdapterResolver = defaultResolveAdapter,
-): number {
+export function run(argv: string[], manifest: Manifest, exec?: Exec, resolve?: AdapterResolver): number {
   const { command: name, keepGoing, help, json } = parseArgs(argv);
 
   if (help) {
@@ -191,8 +186,10 @@ export function run(
     return 2;
   }
 
+  // Both the shell exec and the adapter resolver run quiet under --json, so stdout carries only the JSON.
   const runner = exec ?? makeShellExec(json);
-  const result = dispatchSteps(command.steps, runner, { keepGoing }, resolve);
+  const resolver = resolve ?? makeResolver(json);
+  const result = dispatchSteps(command.steps, runner, { keepGoing }, resolver);
   if (json) console.log(JSON.stringify(jsonResult(command.name, result)));
   return verdictToExit(result.verdict);
 }

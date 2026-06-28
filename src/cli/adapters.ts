@@ -49,9 +49,11 @@ function assertNever(adapter: never): never {
 }
 
 /** Does `bin` resolve to an executable? A missing binary makes spawnSync set `.error` (ENOENT) with a
- *  null status — that's the ABSENT signal. A present binary runs (any exit code) → available. */
+ *  null status — that's the ABSENT signal. A present binary runs (any exit code) → available. The 2s
+ *  timeout makes a misbehaving/hanging `--version` count as unavailable (ETIMEDOUT → error set), never a
+ *  stuck probe. */
 function onPath(bin: string): boolean {
-  const r = spawnSync(bin, ["--version"], { stdio: "ignore" });
+  const r = spawnSync(bin, ["--version"], { stdio: "ignore", timeout: 2000 });
   return !r.error && r.status != null;
 }
 
@@ -65,15 +67,26 @@ export function defaultCapability(adapter: ReviewAdapter): boolean {
   return false;
 }
 
-/** Production adapter exec — the std-OWNED invocation per reviewer (config can't influence it, AC3).
- *  `sourcery`: a non-mutating `review --check` over the repo root. Others never reach here. */
-export function defaultAdapterExec(adapter: ReviewAdapter): number {
-  if (adapter === "sourcery") {
-    return spawnSync("sourcery", ["review", "--check", "."], { stdio: "inherit" }).status ?? 1;
-  }
-  return 0;
+/**
+ * Production adapter-exec factory — the std-OWNED invocation per reviewer (config can't influence it,
+ * AC3). `quiet` (used under `--json`) routes the tool's stdout → the parent's STDERR so std's JSON line
+ * stays the only thing on stdout — mirrors dispatch's `makeShellExec`, the same guarantee for adapters.
+ * `sourcery`: a non-mutating `review --check` over the repo root. Others never reach here.
+ */
+export function makeAdapterExec(quiet: boolean): AdapterExec {
+  const stdio: Array<"inherit" | number> = quiet ? ["inherit", 2, 2] : ["inherit", "inherit", "inherit"];
+  return (adapter) =>
+    adapter === "sourcery" ? (spawnSync("sourcery", ["review", "--check", "."], { stdio }).status ?? 1) : 0;
 }
 
-/** The production resolver: probe + run, wired with the real capability/exec. */
-export const resolveAdapter: AdapterResolver = (adapter) =>
-  adapterVerdict(adapter, defaultCapability, defaultAdapterExec);
+/** The default (human-mode) adapter exec — full inherited-stdio passthrough. */
+export const defaultAdapterExec: AdapterExec = makeAdapterExec(false);
+
+/** Build the production resolver (probe + run) for a given output mode (`quiet` under `--json`). */
+export function makeResolver(quiet: boolean): AdapterResolver {
+  const exec = makeAdapterExec(quiet);
+  return (adapter) => adapterVerdict(adapter, defaultCapability, exec);
+}
+
+/** The default (human-mode) resolver: probe + run, full passthrough. */
+export const resolveAdapter: AdapterResolver = makeResolver(false);
