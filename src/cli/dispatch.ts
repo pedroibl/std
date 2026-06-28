@@ -11,6 +11,7 @@
 
 import { spawnSync } from "node:child_process";
 
+import { resolveAdapter as defaultResolveAdapter, type AdapterResolver } from "./adapters";
 import type { Manifest, Step, Verdict } from "./config";
 
 /** Runs a shell command, returns its exit code. Injected in tests so the sequencing logic stays pure. */
@@ -29,34 +30,45 @@ export interface DispatchOptions {
 
 /**
  * Resolve a single step to a Verdict by branching ONLY on its `kind` enum (NFR3 assertion 3) — the
- * engine never inspects `run`/`label` content to decide control flow. An `exec` step's exit code maps
- * 0 → pass, non-zero → fail. (The `skip` verdict's producer is the adapter kind, Story 4.4.)
+ * engine never inspects `run`/`label`/`adapter` content to decide control flow. An `exec` step's exit
+ * code maps 0 → pass, non-zero → fail; an `adapter` step is handed to the (injectable) adapter resolver,
+ * which is the producer of the first-class `skip` verdict (Story 4.4 — a self-disabled tool stays green).
  */
-export function stepVerdict(step: Step, exec: Exec): Verdict {
+export function stepVerdict(step: Step, exec: Exec, resolve: AdapterResolver = defaultResolveAdapter): Verdict {
   switch (step.kind) {
     case "exec":
       return exec(step.run) === 0 ? "pass" : "fail";
+    case "adapter":
+      return resolve(step.adapter);
     default:
-      // Unreachable at runtime — validate() rejects any kind outside STEP_KINDS before dispatch. The
-      // `never` assignment makes a missing case a COMPILE error the day Story 4.4 adds the `adapter` kind.
-      return assertNever(step.kind);
+      // Unreachable at runtime — validate() rejects any kind outside STEP_KINDS before dispatch. With the
+      // discriminated union exhausted, `step` is `never` here; a 3rd StepKind would make this a COMPILE
+      // error (AD-1 caps it at two — exec + adapter — so this guard should stay a hard wall).
+      return assertNever(step);
   }
 }
 
-/** Exhaustiveness guard: a compile error if a `StepKind` is added without a `stepVerdict` case. */
-function assertNever(kind: never): never {
-  throw new Error(`std: unhandled step kind '${String(kind)}'`);
+/** Exhaustiveness guard: a compile error if a `Step` variant is added without a `stepVerdict` case. */
+function assertNever(step: never): never {
+  throw new Error(`std: unhandled step ${JSON.stringify(step)}`);
 }
 
 /**
  * Run steps in order. Default fail-fast: stop at the first `fail`. With `keepGoing`, run them all and
- * aggregate — overall `fail` if any step failed, else `pass`. SKIP never fails the aggregate (NFR8).
+ * aggregate — overall `fail` if any step failed, else `pass`. SKIP never fails the aggregate (NFR8) — so
+ * a self-disabled `adapter` step (Story 4.4) keeps the run green. `resolve` evaluates `adapter` steps
+ * (injectable for tests; production probes + runs the real tool).
  */
-export function dispatchSteps(steps: Step[], exec: Exec, opts: DispatchOptions = {}): DispatchResult {
+export function dispatchSteps(
+  steps: Step[],
+  exec: Exec,
+  opts: DispatchOptions = {},
+  resolve: AdapterResolver = defaultResolveAdapter,
+): DispatchResult {
   const results: DispatchResult["steps"] = [];
   let overall: Verdict = "pass";
   for (const step of steps) {
-    const verdict = stepVerdict(step, exec);
+    const verdict = stepVerdict(step, exec, resolve);
     results.push({ label: step.label, verdict });
     if (verdict === "fail") {
       overall = "fail";
@@ -159,7 +171,12 @@ function makeShellExec(quiet: boolean): Exec {
  * stdio discipline — only the built-in runner applies `--json` quiet mode (the production path passes
  * no `exec`; tests inject pure number-returning fns that write nothing to stdout).
  */
-export function run(argv: string[], manifest: Manifest, exec?: Exec): number {
+export function run(
+  argv: string[],
+  manifest: Manifest,
+  exec?: Exec,
+  resolve: AdapterResolver = defaultResolveAdapter,
+): number {
   const { command: name, keepGoing, help, json } = parseArgs(argv);
 
   if (help) {
@@ -175,7 +192,7 @@ export function run(argv: string[], manifest: Manifest, exec?: Exec): number {
   }
 
   const runner = exec ?? makeShellExec(json);
-  const result = dispatchSteps(command.steps, runner, { keepGoing });
+  const result = dispatchSteps(command.steps, runner, { keepGoing }, resolve);
   if (json) console.log(JSON.stringify(jsonResult(command.name, result)));
   return verdictToExit(result.verdict);
 }

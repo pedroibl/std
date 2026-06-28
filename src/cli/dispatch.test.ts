@@ -9,7 +9,7 @@ import {
   stepVerdict,
   verdictToExit,
 } from "./index";
-import type { Manifest, Step } from "./index";
+import type { Exec, Manifest, Step } from "./index";
 
 /** Build exec steps whose `run` equals the label, so an injected exec can branch on it. */
 const steps = (...labels: string[]): Step[] => labels.map((l) => ({ kind: "exec", label: l, run: l }));
@@ -242,6 +242,56 @@ describe("jsonResult (pure shape builder)", () => {
       verdict: "pass",
       exit: 0,
     });
+  });
+});
+
+describe("adapter steps through dispatch (Story 4.4 — SKIP stays green via the injected resolver)", () => {
+  const adapterStep = (label: string, adapter: "sourcery" | "none"): Step => ({ kind: "adapter", label, adapter });
+  const noExec: Exec = () => {
+    throw new Error("exec must not run for an adapter step");
+  };
+
+  test("an adapter resolving to SKIP keeps the aggregate green (exit 0), not 127/fail", () => {
+    const result = dispatchSteps([adapterStep("review", "sourcery")], noExec, {}, () => "skip");
+    expect(result.verdict).toBe("pass"); // SKIP never reds the aggregate
+    expect(result.steps).toEqual([{ label: "review", verdict: "skip" }]);
+    expect(verdictToExit(result.verdict)).toBe(0);
+  });
+
+  test("an exec step branches on `kind` to exec; an adapter step to the resolver — never crossed", () => {
+    const seen: string[] = [];
+    const mixed: Step[] = [
+      { kind: "exec", label: "build", run: "build" },
+      adapterStep("review", "sourcery"),
+      { kind: "exec", label: "test", run: "test" },
+    ];
+    const result = dispatchSteps(
+      mixed,
+      (r) => {
+        seen.push(r);
+        return 0;
+      },
+      { keepGoing: true },
+      () => "skip",
+    );
+    expect(seen).toEqual(["build", "test"]); // exec ran only the exec steps
+    expect(result.steps.map((s) => s.verdict)).toEqual(["pass", "skip", "pass"]);
+    expect(result.verdict).toBe("pass");
+  });
+
+  test("an adapter resolving to fail reds the aggregate (a real review failure ≠ absent)", () => {
+    const result = dispatchSteps([adapterStep("review", "sourcery")], noExec, {}, () => "fail");
+    expect(result.verdict).toBe("fail");
+    expect(verdictToExit(result.verdict)).toBe(1);
+  });
+
+  test("run() dispatches an adapter command with the injected resolver", () => {
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      commands: [{ name: "review", steps: [adapterStep("review", "sourcery")] }],
+    };
+    expect(run(["review"], manifest, noExec, () => "skip")).toBe(0); // absent tool → SKIP → green
+    expect(run(["review"], manifest, noExec, () => "fail")).toBe(1); // review failed → red
   });
 });
 

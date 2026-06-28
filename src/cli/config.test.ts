@@ -63,6 +63,49 @@ describe("validate — whole-at-load, fail-closed (AC1)", () => {
   });
 });
 
+describe("validate — adapter kind (Story 4.4 AC3 — closed std-owned set, config selects not supplies)", () => {
+  const withStep = (step: unknown) => ({ schemaVersion: 1, commands: [{ name: "review", steps: [step] }] });
+
+  test("accepts an adapter step naming a member of the closed set", () => {
+    const m = validate(withStep({ kind: "adapter", label: "review", adapter: "sourcery" }));
+    expect(m.commands[0].steps[0]).toEqual({ kind: "adapter", label: "review", adapter: "sourcery" });
+  });
+
+  test("accepts every named member (incl. deferred + none)", () => {
+    for (const a of ["sourcery", "coderabbit", "none"]) {
+      expect(() => validate(withStep({ kind: "adapter", label: "r", adapter: a }))).not.toThrow();
+    }
+  });
+
+  test("'loom' is NOT a member (it's the local reviewer, not a hosted adapter) → rejected", () => {
+    expect(() => validate(withStep({ kind: "adapter", label: "r", adapter: "loom" }))).toThrow(
+      /\.adapter must be one of/,
+    );
+  });
+
+  test("rejects an adapter name OUTSIDE the closed set (fail-closed), naming the path", () => {
+    expect(() => validate(withStep({ kind: "adapter", label: "r", adapter: "semgrep" }))).toThrow(
+      /commands\[0\]\.steps\[0\]\.adapter must be one of/,
+    );
+  });
+
+  test("rejects config trying to SUPPLY an adapter (a function/command, not a name) — no logic backdoor", () => {
+    // a function as the adapter value: not a string → fail-closed
+    expect(() => validate(withStep({ kind: "adapter", label: "r", adapter: () => 0 }))).toThrow(
+      /\.adapter must be one of/,
+    );
+    // an arbitrary command string masquerading as an adapter: not in the closed set → rejected
+    expect(() => validate(withStep({ kind: "adapter", label: "r", adapter: "rm -rf /" }))).toThrow(
+      /\.adapter must be one of/,
+    );
+  });
+
+  test("an adapter step's `run` (if smuggled) is dropped — the projection carries only {kind,label,adapter}", () => {
+    const m = validate(withStep({ kind: "adapter", label: "r", adapter: "none", run: "evil" }));
+    expect(m.commands[0].steps[0]).not.toHaveProperty("run");
+  });
+});
+
 describe("validate — NFR3 assertion 1: round-trips as serializable data", () => {
   test("the validated projection equals its JSON round-trip", () => {
     const m = validate(good);

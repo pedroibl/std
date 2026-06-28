@@ -5,6 +5,7 @@
 // `load` find and reduce it; `run`/`dispatchSteps` branch only on the `kind`/`verdict` enums.
 
 export {
+  REVIEW_ADAPTERS,
   SCHEMA_VERSION,
   STEP_KINDS,
   defineConfig,
@@ -13,12 +14,33 @@ export {
   load,
   resolveConfigPath,
   validate,
+  type AdapterStep,
   type Command,
+  type ExecStep,
   type Manifest,
+  type ReviewAdapter,
   type Step,
   type StepKind,
   type Verdict,
 } from "./config";
+
+export {
+  adapterVerdict,
+  defaultCapability,
+  defaultAdapterExec,
+  resolveAdapter,
+  type AdapterExec,
+  type AdapterResolver,
+  type Capability,
+} from "./adapters";
+
+export {
+  HOSTS,
+  detectHost,
+  hostFromRemoteUrl,
+  type DetectHostOptions,
+  type Host,
+} from "./host";
 
 export {
   dispatchSteps,
