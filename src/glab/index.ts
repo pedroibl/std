@@ -4,9 +4,9 @@
 // bun/TypeScript-first estate and (b) brittle — the nested quoting + line continuations error out.
 // This owns the JSON parsing in TS so each Makefile target is a one-liner.
 //
-// Ported from loom's scripts/glab.ts. The one per-repo value (the GitLab project path) used to be
-// a module constant; here it is the `repo` option, so one copy lives in std and each repo passes
-// its own value through a thin wrapper.
+// CONSUMER-AGNOSTIC (D4): the GitLab project path is never baked in. It resolves git-remote-first
+// (the `origin` URL of whatever repo glab runs in), with an explicit `repo` option as override — so
+// no consumer's identity lives in std source (FR13).
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -35,8 +35,22 @@ interface Pipeline {
   web_url?: string;
 }
 
-/** Run `glab api <path>` and parse the JSON body. Empty/non-JSON → null (caller decides). */
-function api<T = unknown>(path: string): T | null {
+/**
+ * Parse a `glab api` stdout body into `T`. Pure (no I/O) so the fail-soft contract is unit-testable:
+ * empty/whitespace → null, non-JSON → null, valid JSON → `T`. Never throws (Story 3.1).
+ */
+export function parseApiOutput<T = unknown>(raw: string): T | null {
+  const t = raw.trim();
+  if (!t) return null;
+  try {
+    return JSON.parse(t) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** Run `glab api <path>` and parse the JSON body. Empty/non-JSON/failure → null — never throws. */
+export function api<T = unknown>(path: string): T | null {
   let out: string;
   try {
     out = execFileSync("glab", ["api", path], {
@@ -46,16 +60,11 @@ function api<T = unknown>(path: string): T | null {
   } catch {
     return null; // glab failed (auth/network/404) — degrade, never crash the Makefile target
   }
-  const t = out.trim();
-  if (!t) return null;
-  try {
-    return JSON.parse(t) as T;
-  } catch {
-    return null;
-  }
+  return parseApiOutput<T>(out);
 }
 
-function currentBranch(): string {
+/** The current git branch name, or "" if it can't be resolved (detached HEAD, not a repo). */
+export function currentBranch(): string {
   try {
     return execFileSync("git", ["branch", "--show-current"], { encoding: "utf-8" }).trim();
   } catch {
@@ -80,17 +89,63 @@ function glabRun(args: string[]): number {
 }
 
 export interface GlabOptions {
-  /** GitLab project path, e.g. "pedroibl/loom". */
-  repo: string;
+  /** GitLab project path (e.g. "owner/repo"). Optional — resolves git-remote-first when omitted. */
+  repo?: string;
+}
+
+/**
+ * Parse an `owner/repo` slug out of a git remote URL. Pure (Story 3.4): handles both SSH
+ * (`git@host:owner/repo.git`) and HTTP(S) (`https://host/owner/repo.git`) forms, tolerates nested
+ * groups, strips a trailing `.git`. Anything without an `owner/repo` shape → null.
+ */
+export function parseRemoteUrl(url: string): string | null {
+  const u = url.trim();
+  if (!u) return null;
+  const ssh = u.match(/^[^@\s]+@[^:\s]+:(.+)$/); //  git@host:owner/repo.git
+  const http = u.match(/^[a-z][a-z0-9+.-]*:\/\/[^/\s]+\/(.+)$/i); //  scheme://host/owner/repo.git
+  const path = ssh?.[1] ?? http?.[1];
+  if (!path) return null;
+  const slug = path.replace(/\.git$/, "").replace(/\/+$/, "");
+  return slug.includes("/") ? slug : null;
+}
+
+/** The `origin` remote URL of the cwd repo, or null if there's no git/origin. */
+function gitRemoteUrl(): string | null {
+  try {
+    const out = execFileSync("git", ["remote", "get-url", "origin"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the GitLab project path: explicit `opts.repo` wins; otherwise git-remote-first off
+ * `origin`. No hardcoded default — std bakes in no consumer identity (D4/FR13). Null ⇒ unresolvable.
+ */
+export function resolveRepo(opts: GlabOptions = {}): string | null {
+  if (opts.repo) return opts.repo;
+  const url = gitRemoteUrl();
+  return url ? parseRemoteUrl(url) : null;
 }
 
 /**
  * Run a glab subcommand. `argv` is the command + its args (i.e. process.argv.slice(2)).
- * Returns the process exit code; the per-repo wrapper does `process.exit(run(...))`.
+ * Returns the process exit code; the wrapper does `process.exit(run(...))`.
  */
-export function run(argv: string[], opts: GlabOptions): number {
-  const REPO = opts.repo;
-  const ENC = encodeURIComponent(REPO); // pedroibl/loom → pedroibl%2Floom
+export function run(argv: string[], opts: GlabOptions = {}): number {
+  const resolved = resolveRepo(opts);
+  if (!resolved) {
+    console.error(
+      "glab: could not resolve repo — pass { repo } or run inside a repo with an 'origin' remote",
+    );
+    return 2;
+  }
+  const REPO = resolved; // narrowed to string — captured by the nested handlers below
+  const ENC = encodeURIComponent(REPO); // owner/repo → owner%2Frepo
 
   /** The open MR iid for a branch, or null. */
   function openMrIid(branch: string): number | null {
