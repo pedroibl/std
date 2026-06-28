@@ -41,6 +41,11 @@ export function hostFromRemoteUrl(url: string): Host | null {
  * (`<provider>.company.com`). A provider name in a MIDDLE label is NOT a match — `mirror.github.example.com`
  * and `proxy.gitlab.internal` are some other host that merely mentions the provider (→ null), not the
  * provider itself (tightened per CodeRabbit on PR #9).
+ *
+ * Three deliberate rules (kept zero-dep — no `tldts`/PSL, per std's Tier-1 ethos, D4): a bare
+ * `=== provider` matches an SSH host alias (`git@github:owner/repo` from ~/.ssh/config); `<provider>.com`
+ * is the SaaS domain (both forges ARE `.com`); leading-label / `.com`-subdomain cover self-hosted + SaaS
+ * subdomains. Best-effort by design — anything unrecognized is null (a non-fatal, overridable fallback).
  */
 function isProviderHost(hostname: string, provider: string): boolean {
   return (
