@@ -21,19 +21,7 @@
 // locking, so they are not safe against a second process writing the SAME path concurrently — out of
 // scope for FR9 (and `appendAudit` is explicitly best-effort and loss-tolerant).
 
-import {
-  appendFileSync,
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-  writeSync,
-} from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** Create a file's parent directory (recursive). `mkdirSync recursive` is idempotent — no exists-check
@@ -90,19 +78,13 @@ export function safeWrite(path: string, render: (current: string | null) => stri
  */
 export function writeIfAbsent(path: string, content: string): boolean {
   ensureParent(path);
-  let fd: number;
   try {
-    fd = openSync(path, "wx"); // wx = O_CREAT | O_EXCL | O_WRONLY
+    writeFileSync(path, content, { flag: "wx" }); // wx = O_CREAT | O_EXCL — fails if the file exists
+    return true;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw err;
   }
-  try {
-    writeSync(fd, content);
-  } finally {
-    closeSync(fd);
-  }
-  return true;
 }
 
 /**
