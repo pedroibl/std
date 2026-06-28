@@ -21,17 +21,38 @@ export const SCHEMA_VERSION = 1 as const;
  *  (its producer is the adapter self-disable in Story 4.4; `exec` steps yield only pass/fail today). */
 export type Verdict = "pass" | "fail" | "skip";
 
-/** The closed set of step kinds the runner dispatches on (NFR3 assertion 3). One member today; the
- *  `adapter` kind is the sanctioned 2nd member, added by Story 4.4 via the Rule-of-Three move (AD-1). */
-export const STEP_KINDS = ["exec"] as const;
+/** The closed set of step kinds the runner dispatches on (NFR3 assertion 3). `adapter` is the sanctioned
+ *  2nd (and final) member — AD-1's "two logic homes": a native script (`exec`) or a named std adapter.
+ *  Rule-of-Three met: `review` + `host` are the two real consumers of the adapter concept (Story 4.4). */
+export const STEP_KINDS = ["exec", "adapter"] as const;
 export type StepKind = (typeof STEP_KINDS)[number];
 
-/** One step: a kind the runner branches on + a human label + the shell command. Data, never a function. */
-export interface Step {
-  kind: StepKind;
+/** The CLOSED, std-owned review-adapter set (AC3): config SELECTS a member by name, it can never supply
+ *  a module/command. `sourcery` + `none` are live; `coderabbit` is a member (stable contract) that
+ *  resolves to SKIP until its own story — no faked behavior. Any name outside this set fails validation.
+ *  NOTE: `loom` (the estate's LOCAL primary reviewer) is deliberately NOT a member — it's a command, not a
+ *  hosted/CI adapter, and the literal would breach the no-consumer-ids invariant (loom is a std consumer).
+ *  It's wired separately (likely an `exec` step) in its own story. [Pedro's call, 2026-06-28] */
+export const REVIEW_ADAPTERS = ["sourcery", "coderabbit", "none"] as const;
+export type ReviewAdapter = (typeof REVIEW_ADAPTERS)[number];
+
+/** An `exec` step: shells a command line (`run`). The `run` means exactly one thing (AD-1 Rule 6). */
+export interface ExecStep {
+  kind: "exec";
   label: string;
   run: string;
 }
+
+/** An `adapter` step: NAMES a std-owned adapter (data, not a command — the "no logic backdoor", AC3). */
+export interface AdapterStep {
+  kind: "adapter";
+  label: string;
+  adapter: ReviewAdapter;
+}
+
+/** One step — discriminated on `kind`. The runner branches on `kind` ONLY (NFR3 assertion 3), never on
+ *  the entry's content. Both variants are inert serializable data; neither is ever a function. */
+export type Step = ExecStep | AdapterStep;
 
 /** A named command = an ordered list of steps. */
 export interface Command {
@@ -77,8 +98,18 @@ function validateStep(raw: unknown, path: string): Step {
     throw new Error(`std.config: ${path}.kind must be one of ${STEP_KINDS.join(" | ")} — got ${String(raw.kind)}`);
   }
   if (typeof raw.label !== "string") throw new Error(`std.config: ${path}.label must be a string`);
+  // Rebuild per kind from ONLY the validated fields — fail-closed. An `adapter` step names a member of
+  // the closed std-owned set (AC3); anything else (incl. a smuggled `run` command) is rejected.
+  if (raw.kind === "adapter") {
+    if (typeof raw.adapter !== "string" || !(REVIEW_ADAPTERS as readonly string[]).includes(raw.adapter)) {
+      throw new Error(
+        `std.config: ${path}.adapter must be one of ${REVIEW_ADAPTERS.join(" | ")} — got ${String(raw.adapter)} (config selects an adapter, it cannot supply one)`,
+      );
+    }
+    return { kind: "adapter", label: raw.label, adapter: raw.adapter as ReviewAdapter };
+  }
   if (typeof raw.run !== "string") throw new Error(`std.config: ${path}.run must be a string`);
-  return { kind: raw.kind as StepKind, label: raw.label, run: raw.run };
+  return { kind: "exec", label: raw.label, run: raw.run };
 }
 
 function validateCommand(raw: unknown, path: string): Command {
