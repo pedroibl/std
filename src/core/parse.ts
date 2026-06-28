@@ -36,15 +36,16 @@ function unquote(s: string): string {
 
 /**
  * Parse a leading YAML frontmatter block (`---` … `---`) into a flat record. Returns `{}` when there
- * is no block. Each line splits on its FIRST `:` (so a value may contain colons); an `[a, b]` value
- * becomes a `string[]`, and surrounding quotes are stripped from scalars and array elements. Lines
- * without a key are skipped. Only this flat array/quote heuristic — richer YAML stays in the caller.
+ * is no block. Tolerates both LF and CRLF line endings. Each line splits on its FIRST `:` (so a value
+ * may contain colons); an `[a, b]` value becomes a `string[]`, and surrounding quotes are stripped
+ * from scalars and array elements. Lines without a key are skipped. Only this flat array/quote
+ * heuristic — richer YAML (quoted commas inside arrays, nesting) stays in the caller.
  */
 export function parseFrontmatter(text: string): Record<string, string | string[]> {
-  const match = text.match(/^---\n([\s\S]*?)\n---/);
+  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!match) return {};
   const result: Record<string, string | string[]> = {};
-  for (const line of match[1].split("\n")) {
+  for (const line of match[1].split(/\r?\n/)) {
     const colon = line.indexOf(":");
     if (colon <= 0) continue; // no key → skip
     const key = line.slice(0, colon).trim();
@@ -63,15 +64,23 @@ export function parseFrontmatter(text: string): Record<string, string | string[]
 }
 
 /**
- * Pull the first balanced JSON value out of noisy text (LLM prose, markdown fences, CLI banners).
- * Tries the first `{…}` then the first `[…]`, returning whichever `JSON.parse`s first; `null` if
- * neither parses. Caller asserts the result type. (Greedy match favours an object when both are
- * present — give it object-or-array-shaped output, not both interleaved.)
+ * Pull a JSON value out of noisy text (LLM prose, markdown fences, CLI banners). Each candidate is a
+ * greedy outermost match — the first `{` to the last `}`, and the first `[` to the last `]`. The
+ * candidate whose opening bracket appears FIRST in the text is tried first, so an array-of-objects
+ * `[{…}]` yields the array rather than its inner object; the other candidate is the fallback. Returns
+ * whichever `JSON.parse`s first, else `null`. Caller asserts the result type. (Because the match is
+ * greedy-outermost, two separate top-level blobs in one string won't both parse — pass one value's
+ * worth of output.)
  */
 export function extractJson<T = unknown>(text: string): T | null {
-  const objectMatch = text.match(/\{[\s\S]*\}/);
-  const arrayMatch = text.match(/\[[\s\S]*\]/);
-  for (const candidate of [objectMatch?.[0], arrayMatch?.[0]]) {
+  const objectMatch = text.match(/\{[\s\S]*\}/)?.[0];
+  const arrayMatch = text.match(/\[[\s\S]*\]/)?.[0];
+  const firstObject = text.indexOf("{");
+  const firstArray = text.indexOf("[");
+  // Try the bracket type that opens first, so `[{…}]` resolves to the array, not the inner object.
+  const arrayLeadsOff = firstArray !== -1 && (firstObject === -1 || firstArray < firstObject);
+  const order = arrayLeadsOff ? [arrayMatch, objectMatch] : [objectMatch, arrayMatch];
+  for (const candidate of order) {
     if (!candidate) continue;
     try {
       return JSON.parse(candidate) as T;

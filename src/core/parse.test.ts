@@ -61,6 +61,11 @@ describe("parseFrontmatter", () => {
     const text = "---\njust-a-line-no-colon\nkey: val\n---";
     expect(parseFrontmatter(text)).toEqual({ key: "val" });
   });
+
+  test("tolerates CRLF (\\r\\n) line endings", () => {
+    const text = "---\r\nname: leo-tan\r\ntags: [ai, edge]\r\n---\r\nbody";
+    expect(parseFrontmatter(text)).toEqual({ name: "leo-tan", tags: ["ai", "edge"] });
+  });
 });
 
 describe("extractJson", () => {
@@ -77,6 +82,21 @@ describe("extractJson", () => {
       x: 1,
       y: 2,
     });
+  });
+
+  test("resolves an array-of-objects to the array, not the inner object", () => {
+    expect(extractJson<Array<{ a: number }>>('[{"a":1}]')).toEqual([{ a: 1 }]);
+  });
+
+  test("still resolves a bare object when it leads the text", () => {
+    expect(extractJson<{ a: number }>('noise {"a":1} more [x]')).toEqual({ a: 1 });
+  });
+
+  test("resolves an array-of-objects embedded in prose", () => {
+    expect(extractJson<Array<{ id: number }>>('rows: [{"id":1},{"id":2}] done')).toEqual([
+      { id: 1 },
+      { id: 2 },
+    ]);
   });
 
   test("returns null when nothing balanced parses", () => {
