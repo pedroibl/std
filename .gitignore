@@ -7,3 +7,7 @@ dist/
 
 # Claude Code per-machine local settings (permissions allowlist) — not shared
 .claude/settings.local.json
+
+# std-cli consumer registry (Story 1.4) — opt-in, per-machine; never committed (D4/NFR3: std
+# source names no consumer). The check:single-source gate reads it when present, SKIPs when absent.
+scripts/std.consumers.local
