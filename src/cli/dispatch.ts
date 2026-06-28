@@ -71,26 +71,111 @@ export function verdictToExit(verdict: Verdict): number {
   return verdict === "fail" ? 1 : 0;
 }
 
-/** Real executor: `zsh -c` with INHERITED stdio, so a consumer's script output passes through verbatim
- *  (the basis for byte-identical Makefile parity, SM4). */
-function execShell(run: string): number {
-  const r = spawnSync("zsh", ["-c", run], { stdio: "inherit" });
-  return r.status ?? 1;
+/** The parsed argv: the (first) command name + the recognized flags. Story 4.3 extends 4.2's lone
+ *  `--keep-going` to `--help`/`--json`, stripped here so they can never be mistaken for a command. */
+export interface ParsedArgs {
+  command: string;
+  keepGoing: boolean;
+  help: boolean;
+  json: boolean;
 }
 
 /**
- * Dispatch `argv` against the manifest. Parses `--keep-going` (override fail-fast), then the first
- * non-flag token is the command name. Returns the command's exit code (0/1), or 2 for an unknown command.
- * `exec` is injectable for tests; production uses the inherited-stdio shell runner.
+ * Parse argv into a command + flags. The first non-`--` token is the command; recognized flags are
+ * stripped (Task 2.2). Unknown `--flags` are ignored (forward-compatible, and keeps the SM4 parity
+ * surface stable — the engine never branches on a flag it doesn't know).
  */
-export function run(argv: string[], manifest: Manifest, exec: Exec = execShell): number {
-  const keepGoing = argv.includes("--keep-going");
-  const name = argv.find((a) => !a.startsWith("--")) ?? "";
+export function parseArgs(argv: string[]): ParsedArgs {
+  let command = "";
+  let keepGoing = false;
+  let help = false;
+  let json = false;
+  for (const a of argv) {
+    if (a === "--keep-going") keepGoing = true;
+    else if (a === "--help") help = true;
+    else if (a === "--json") json = true;
+    else if (!a.startsWith("--") && command === "") command = a;
+  }
+  return { command, keepGoing, help, json };
+}
+
+/**
+ * Render `--help` PURELY from the validated manifest (AC2) — no hand-kept command text. With no (or an
+ * unknown) command name: the full menu of command names. With a known command: its name + ordered step
+ * labels. A short flag footer is the only static text (it documents the engine's flags, not the menu).
+ */
+export function formatHelp(manifest: Manifest, name?: string): string {
+  const command = name ? manifest.commands.find((c) => c.name === name) : undefined;
+  if (command) {
+    const lines = [`std ${command.name} — ${command.steps.length} step(s):`];
+    for (const s of command.steps) lines.push(`  ${s.label}`);
+    return lines.join("\n");
+  }
+  const lines = ["std — commands:"];
+  for (const c of manifest.commands) lines.push(`  ${c.name}`);
+  lines.push("", "flags: --keep-going  --json  --help");
+  return lines.join("\n");
+}
+
+/** The `--json` payload shape (AC2): command name, per-step results, overall verdict, and exit code. */
+export interface JsonResult {
+  command: string;
+  steps: Array<{ label: string; verdict: Verdict }>;
+  verdict: Verdict;
+  exit: number;
+}
+
+/** Build the `--json` payload from a dispatch result. Pure — kept separate from `run` so the stable
+ *  output SHAPE is unit-testable without capturing stdout. */
+export function jsonResult(command: string, result: DispatchResult): JsonResult {
+  return {
+    command,
+    steps: result.steps,
+    verdict: result.verdict,
+    exit: verdictToExit(result.verdict),
+  };
+}
+
+/**
+ * Real executor factory: `zsh -c <run>`. In human mode stdio is fully INHERITED, so a consumer's script
+ * output passes through verbatim (the basis for byte-identical Makefile parity, SM4). In `quiet` mode
+ * (used by `--json`) the child's stdout is redirected to the parent's STDERR, so std's final JSON line is
+ * the ONLY thing on stdout — `--json` stays machine-parseable while step diagnostics still surface on
+ * stderr. (Quiet mode never runs on the SM4 path; the shim invokes commands without `--json`.)
+ */
+function makeShellExec(quiet: boolean): Exec {
+  const stdio: Array<"inherit" | number> = quiet ? ["inherit", 2, 2] : ["inherit", "inherit", "inherit"];
+  return (run) => spawnSync("zsh", ["-c", run], { stdio }).status ?? 1;
+}
+
+/**
+ * Dispatch `argv` against the manifest. Parses flags (`--keep-going`/`--help`/`--json`), then the first
+ * non-flag token is the command name. `--help` prints the menu (or a command's steps) and exits 0.
+ * Otherwise the command runs; with `--json` the machine-readable result is emitted to stdout (the steps
+ * still run, so their inherited-stdio output passes through — in human mode that passthrough IS the
+ * output, no summary is printed: SM4 byte-parity). Returns the exit code (0/1), or 2 for an unknown
+ * command. `exec` is injectable for tests; in production the shell runner is chosen by `--json` (quiet,
+ * so stdout carries only the JSON) vs human mode (full passthrough). If you inject `exec` you own its
+ * stdio discipline — only the built-in runner applies `--json` quiet mode (the production path passes
+ * no `exec`; tests inject pure number-returning fns that write nothing to stdout).
+ */
+export function run(argv: string[], manifest: Manifest, exec?: Exec): number {
+  const { command: name, keepGoing, help, json } = parseArgs(argv);
+
+  if (help) {
+    console.log(formatHelp(manifest, name || undefined));
+    return 0;
+  }
+
   const command = manifest.commands.find((c) => c.name === name);
   if (!command) {
     const known = manifest.commands.map((c) => c.name).join(", ");
     console.error(`std: unknown command '${name}'. Known: ${known || "(none)"}`);
     return 2;
   }
-  return verdictToExit(dispatchSteps(command.steps, exec, { keepGoing }).verdict);
+
+  const runner = exec ?? makeShellExec(json);
+  const result = dispatchSteps(command.steps, runner, { keepGoing });
+  if (json) console.log(JSON.stringify(jsonResult(command.name, result)));
+  return verdictToExit(result.verdict);
 }
