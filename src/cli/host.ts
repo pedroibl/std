@@ -21,8 +21,7 @@ export type Host = (typeof HOSTS)[number];
 /**
  * Map a git remote URL to its host CLI, or null if it's neither known forge. Pure (unit-testable).
  * Handles SSH (`git@gitlab.com:owner/repo.git`) and HTTP(S) (`https://github.com/owner/repo.git`).
- * Matches the hostname segment only — `gitlab.*` → `glab`, `github.*` → `gh` (covers self-hosted
- * `gitlab.example.com` / GitHub Enterprise-style `github.example.com`). Anything else → null.
+ * Matches the hostname segment only. Anything else → null.
  */
 export function hostFromRemoteUrl(url: string): Host | null {
   const u = url.trim();
@@ -31,9 +30,29 @@ export function hostFromRemoteUrl(url: string): Host | null {
   const http = u.match(/^[a-z][a-z0-9+.-]*:\/\/(?:[^@/\s]+@)?([^/:\s]+)/i); //  scheme://[user@]HOST/...
   const hostname = (ssh?.[1] ?? http?.[1])?.toLowerCase();
   if (!hostname) return null;
-  if (/(^|\.)gitlab\./.test(hostname) || hostname === "gitlab.com") return "glab";
-  if (/(^|\.)github\./.test(hostname) || hostname === "github.com") return "gh";
+  if (isProviderHost(hostname, "gitlab")) return "glab";
+  if (isProviderHost(hostname, "github")) return "gh";
   return null;
+}
+
+/**
+ * Does `hostname` belong to `provider`? Accepts the SaaS domain (`<provider>.com`), a subdomain of it
+ * (`*.<provider>.com`), or a self-hosted install whose LEADING label is the provider
+ * (`<provider>.company.com`). A provider name in a MIDDLE label is NOT a match — `mirror.github.example.com`
+ * and `proxy.gitlab.internal` are some other host that merely mentions the provider (→ null), not the
+ * provider itself (tightened per CodeRabbit on PR #9).
+ *
+ * Three deliberate rules (kept zero-dep — no `tldts`/PSL, per std's Tier-1 ethos, D4): a bare
+ * `=== provider` matches an SSH host alias (`git@github:owner/repo` from ~/.ssh/config); `<provider>.com`
+ * is the SaaS domain (both forges ARE `.com`); leading-label / `.com`-subdomain cover self-hosted + SaaS
+ * subdomains. Best-effort by design — anything unrecognized is null (a non-fatal, overridable fallback).
+ */
+function isProviderHost(hostname: string, provider: string): boolean {
+  return (
+    hostname === provider ||
+    hostname.startsWith(`${provider}.`) ||
+    hostname.endsWith(`.${provider}.com`)
+  );
 }
 
 /** The `origin` remote URL of the cwd repo, or null if there's no git/origin (non-fatal). */

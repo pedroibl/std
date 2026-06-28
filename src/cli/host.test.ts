@@ -22,6 +22,16 @@ describe("hostFromRemoteUrl (Story 4.4 AC2 — map remote → host CLI)", () => 
     expect(hostFromRemoteUrl("https://user:tok@gitlab.com/pedro/repo.git")).toBe("glab");
   });
 
+  test("a provider name in a MIDDLE label is NOT a match → null (CodeRabbit PR #9)", () => {
+    expect(hostFromRemoteUrl("https://mirror.github.example.com/p/r.git")).toBeNull();
+    expect(hostFromRemoteUrl("git@proxy.gitlab.internal:p/r.git")).toBeNull();
+  });
+
+  test("a subdomain of the SaaS host still matches", () => {
+    expect(hostFromRemoteUrl("https://foo.gitlab.com/p/r.git")).toBe("glab");
+    expect(hostFromRemoteUrl("git@pages.github.com:p/r.git")).toBe("gh");
+  });
+
   test("unknown forge or empty → null (no guess)", () => {
     expect(hostFromRemoteUrl("git@bitbucket.org:pedro/repo.git")).toBeNull();
     expect(hostFromRemoteUrl("")).toBeNull();
