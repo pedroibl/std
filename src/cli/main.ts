@@ -45,6 +45,8 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     const reposPath = deps.reposPath ?? globalReposPath();
     let config: RepoConfig | undefined;
     try {
+      // Import the user's OWN config (the standard TS-config pattern, like vite/eslint configs and
+      // std's own config.load) — trusted input from their XDG home, not external/untrusted data.
       const mod = (await import(reposPath)) as { default?: RepoConfig; config?: RepoConfig };
       config = mod.default ?? mod.config;
     } catch {
