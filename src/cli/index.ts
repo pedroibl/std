@@ -58,3 +58,20 @@ export {
   type JsonResult,
   type ParsedArgs,
 } from "./dispatch";
+
+export {
+  NAV_NAME_GRAMMAR,
+  RepoNavError,
+  defaultTargets,
+  generateRepoNav,
+  generateStdCompletion,
+  installAlias,
+  runAlias,
+  validateRegistry,
+  type AliasDeps,
+  type InstallOptions,
+  type InstallResult,
+  type InstallTargets,
+  type RepoConfig,
+  type RepoRegistry,
+} from "./repo-nav";
