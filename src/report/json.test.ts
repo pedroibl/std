@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 
 import { emitJson, jsonOutput, log } from "./json";
 
-/** Capture raw writes to BOTH process streams (so nothing leaks to the test console), restoring after. */
+/** Capture raw writes to BOTH process streams (so nothing leaks to the test console), restoring after.
+ *  The mock covers the string `write(chunk)` path — the only signature `emitJson`/`log` ever call. */
 function capture(fn: () => void): { out: string; err: string } {
   const originals = { stdout: process.stdout.write, stderr: process.stderr.write };
   const buf = { out: "", err: "" };
@@ -47,13 +48,17 @@ describe("emitJson / log — the stdout/stderr stream split (FR8)", () => {
   });
 
   test("under --json, stdout carries only the JSON even while logs fire", () => {
+    const payload = { result: "done" };
     const { out, err } = capture(() => {
       log("step 1");
-      emitJson({ result: "done" });
+      emitJson(payload);
       log("step 2");
     });
-    expect(out).toBe('{\n  "result": "done"\n}\n'); // ONLY the payload
-    expect(err).toBe("step 1\nstep 2\n"); // all diagnostics
-    expect(JSON.parse(out)).toEqual({ result: "done" }); // stdout is machine-parseable
+    // stdout is EXACTLY the serialized payload + one trailing newline — nothing else (no logs).
+    expect(out).toBe(`${jsonOutput(payload)}\n`);
+    expect(err).toBe("step 1\nstep 2\n"); // all diagnostics on stderr
+    // and the payload portion (sans the writer's newline) round-trips — machine-parseable for jq/grep.
+    expect(out.trimEnd()).toBe(jsonOutput(payload));
+    expect(JSON.parse(out)).toEqual(payload);
   });
 });
