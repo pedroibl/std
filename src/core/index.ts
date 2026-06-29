@@ -17,3 +17,14 @@ export {
   slugify,
   truncate,
 } from "./text";
+export {
+  type Chunk,
+  chunkContent,
+  extractRelated,
+  extractSection,
+  extractWikilinks,
+  findSection,
+  insertInSection,
+  type Related,
+  type SectionBounds,
+} from "./markdown";
