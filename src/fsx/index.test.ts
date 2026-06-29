@@ -264,12 +264,13 @@ describe("fail-loud contract (FR5) — the loud half of Decision 2", () => {
     });
   });
 
-  test("loadJson stays SOFT on the very same I/O error (returns fallback)", () => {
+  test("loadJson SURFACES a genuine fs error (only missing/corrupt soften to fallback)", () => {
     inTmp((dir) => {
       const blocker = join(dir, "blocker");
       writeFileSync(blocker, "file");
-      // The loud/soft contrast: same ENOTDIR, but loadJson swallows ALL read/parse errors → fallback.
-      expect(loadJson(join(blocker, "child.json"), { fallback: true })).toEqual({ fallback: true });
+      // Reading UNDER a file is ENOTDIR — a real fs fault, not absence or bad JSON — so it must throw,
+      // not masquerade as an empty state. (Decision 2 amendment, Sourcery review 2026-06-29.)
+      expect(() => loadJson(join(blocker, "child.json"), { fallback: true })).toThrow();
     });
   });
 });

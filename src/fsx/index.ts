@@ -17,11 +17,15 @@
 // own filesystem-axis edge: NOT built on `proc`/`http`.
 //
 // ERROR CONTRACT, split per-helper (Decision 2), grounded in how consumers behave:
-//   - FAIL-SOFT (return null/fallback/partial): `readIfExists` (missing→null), `loadJson`
-//     (missing-or-corrupt→fallback), `walkFiles` (unreadable dir→skip) — every consumer treats these as
-//     "absent → default / keep going".
-//   - FAIL-LOUD (re-throw real I/O errors, FR5): `ensureDir`, `atomicWrite`, `saveJson` — a write that
-//     can't complete must surface, not silently lose data (the `report/write.ts` discipline).
+//   - FAIL-SOFT on EXPECTED absence/corruption: `readIfExists` (missing→null), `loadJson`
+//     (missing→fallback, unparseable→fallback), `walkFiles` (unreadable dir→skip) — every consumer
+//     treats "not there yet / bad content" as "start from default / keep going".
+//   - FAIL-LOUD on genuine I/O faults (FR5): `ensureDir`, `atomicWrite`, `saveJson` always; and the
+//     read helpers re-throw a REAL fs error (permission, not-a-directory) rather than masking it —
+//     `readIfExists` softens only ENOENT, and `loadJson` (built on `readIfExists`) softens only a
+//     missing file or a JSON parse error. A broken filesystem must not look like an empty state
+//     (Decision 2 amended 2026-06-29 per Sourcery review). A write that can't complete must surface,
+//     not silently lose data (the `report/write.ts` discipline).
 //
 // node:fs is allowed here (a Bun edge); it is forbidden only in `core`.
 
@@ -146,15 +150,21 @@ export function atomicWrite(path: string, content: string): void {
 }
 
 /**
- * Read + `JSON.parse` `path` and return the typed result. On a **missing file OR a parse error** return
- * `fallback` — fail-soft-with-fallback: every JSON-state consumer treats a missing or corrupt state file
- * as "start from the default". The caller owns the shape via `T`; no validation beyond a successful parse.
+ * Read + `JSON.parse` `path` and return the typed result. The two EXPECTED failures soften to
+ * `fallback`: a **missing file** and **unparseable contents** (a JSON parse error) — every JSON-state
+ * consumer treats "not there yet / corrupt" as "start from the default". A GENUINE fs fault (permission,
+ * not-a-directory, …) is NOT masked — it surfaces (fail-loud, FR5), so a real environment problem is not
+ * silently swallowed as an empty state. Composed on `readIfExists`, so the read half shares its discipline
+ * (ENOENT→soft, real error→throw); only the `JSON.parse` step adds the corrupt→fallback softening.
+ * The caller owns the shape via `T`; no validation beyond a successful parse.
  */
 export function loadJson<T>(path: string, fallback: T): T {
+  const raw = readIfExists(path); // ENOENT→null; a real fs error (EACCES/ENOTDIR/…) re-throws here
+  if (raw === null) return fallback;
   try {
-    return JSON.parse(readFileSync(path, "utf-8")) as T;
+    return JSON.parse(raw) as T;
   } catch {
-    return fallback;
+    return fallback; // unparseable JSON → start from default
   }
 }
 
