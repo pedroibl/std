@@ -1,6 +1,7 @@
 // core — pure, runtime-agnostic vocabulary. No Bun-only or Obsidian-only imports here.
 // Both `report` (Bun → markdown string) and `cn` (Obsidian → DOM) build on this.
 
+export { dispatch, flagValue, hasFlag, positional } from "./args";
 export { cite } from "./cite";
 export { GLYPH, NO_ACTION, severity, type Severity } from "./severity";
 export { shouldColorize } from "./colorize";
