@@ -54,3 +54,19 @@ describe("dateParts", () => {
     expect(`${p.year}-${pad(p.month)}-${pad(p.day)}`).toBe(p.iso);
   });
 });
+
+describe("invalid-input contract (fail-loud, FR5)", () => {
+  // An Invalid Date or a non-IANA tz is a caller precondition violation — these surface RangeError
+  // (the stdlib failure), never a swallowed/wrong-but-silent date. Validation belongs at the edge.
+  test("isoDate throws RangeError on an Invalid Date", () => {
+    expect(() => isoDate(new Date("garbage"))).toThrow(RangeError);
+  });
+
+  test("dateParts throws RangeError on an invalid IANA tz", () => {
+    expect(() => dateParts(new Date("2026-06-29T12:00:00Z"), "Not/AZone")).toThrow(RangeError);
+  });
+
+  test("dateParts throws RangeError on an Invalid Date", () => {
+    expect(() => dateParts(new Date("garbage"), "UTC")).toThrow(RangeError);
+  });
+});
