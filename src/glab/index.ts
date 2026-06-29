@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 
-import { flagValue, hasFlag, positional } from "./args";
+import { dispatch, flagValue, hasFlag, positional } from "../core/args";
 
 interface Note {
   body?: string;
@@ -285,7 +285,7 @@ export function run(argv: string[], opts: GlabOptions = {}): number {
 
   // ── dispatch ────────────────────────────────────────────────────────────────
   const [cmd, ...rest] = argv;
-  const dispatch: Record<string, () => number> = {
+  const handlers: Record<string, () => number> = {
     "mr-threads": () => mrThreads(),
     pipeline: () => pipeline(rest[0]),
     "ci-stats": () => ciStats(rest[0] ?? "main", rest[1] ?? ""),
@@ -302,12 +302,12 @@ export function run(argv: string[], opts: GlabOptions = {}): number {
     "issue-close": () => issueClose(positional(rest)),
   };
 
-  const handler = dispatch[cmd ?? ""];
-  if (!handler) {
+  const code = dispatch(cmd ?? "", handlers);
+  if (code === undefined) {
     console.error(
       `glab: unknown command '${cmd ?? ""}'. Use: mr-threads | pipeline [ref] | ci-stats <ref> <sinceIso> | issue-list [--all] | issue-view <n> [--web] | issue-new --title <t> [--file <f> | --body <b>] [--label <l>] | issue-edit <n> | issue-close <n>`,
     );
     return 2;
   }
-  return handler();
+  return code;
 }
