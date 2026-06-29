@@ -7,6 +7,7 @@ export { shouldColorize } from "./colorize";
 export { emptyCounts, statusLine, type Counts } from "./status";
 export { classify, toResult, type Classified, type Result } from "./result";
 export { configValue, tryParse } from "./config";
+export { dateParts, type DateParts, daysSince, isoDate } from "./date";
 export { extractJson, parseFrontmatter, parseNdjson } from "./parse";
 export {
   collapse,
@@ -28,3 +29,11 @@ export {
   type Related,
   type SectionBounds,
 } from "./markdown";
+export {
+  charOverlap,
+  jaccard,
+  type ScoreResult,
+  type ScoreRule,
+  scoreRules,
+  tokenize,
+} from "./similarity";
