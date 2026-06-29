@@ -37,6 +37,10 @@ export function git(repo: string, args: string[]): string {
       stdio: ["ignore", "pipe", "ignore"], // ignore child stdin + stderr; capture stdout only
     }).trim();
   } catch {
+    // Every failure funnels here identically: nonzero git exit, missing/non-repo path, `git` not on
+    // PATH (ENOENT), and the timeout. The nonzero-exit and missing-repo paths are unit-tested; the
+    // timeout (no deterministic >5s hang fixture) and the ENOENT path (git is always on CI's PATH)
+    // are covered structurally by this single catch rather than by a dedicated test (AC6).
     return "";
   }
 }

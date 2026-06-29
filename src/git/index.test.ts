@@ -14,7 +14,13 @@ function inRepo(fn: (repo: string) => void): void {
     execFileSync("git", ["-C", repo, "init", "-q"], { stdio: "ignore" });
     fn(repo);
   } finally {
-    rmSync(repo, { recursive: true, force: true });
+    // Best-effort cleanup — never let an rmSync error (locked dir, race) shadow a real assertion
+    // failure thrown from fn().
+    try {
+      rmSync(repo, { recursive: true, force: true });
+    } catch {
+      /* ignore cleanup failure */
+    }
   }
 }
 
