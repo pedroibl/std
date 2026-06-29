@@ -11,6 +11,12 @@
  * Lowercase kebab slug: lowercase, drop everything but `[a-z0-9]`/space/hyphen, spaces → `-`,
  * collapse runs of `-`, trim leading/trailing `-`, then cap to `maxLen`. The trailing-`-` trim runs
  * AFTER the length cap, so a cut landing mid-separator never leaves a dangling `-`.
+ *
+ * ASCII-only by design: non-ASCII letters are DROPPED, not transliterated (`"São Paulo"` →
+ * `"so-paulo"`, `"Tomé"` → `"tom"`). This is the faithful behavior of the six PAI/Tools copies this
+ * collapses, kept so the Epic 11/12 call-site swaps are pure substitutions with no slug drift. A
+ * Unicode-preserving or transliterating variant is a separate, clearly-named function to add when a
+ * consumer actually needs accented/CJK slugs — not a change to this one.
  */
 export function slugify(text: string, maxLen = 60): string {
   const slug = text
@@ -68,10 +74,11 @@ function unquote(s: string): string {
 /**
  * Normalize a tag input to a trimmed, lowercased `string[]` with empties dropped. Accepts the three
  * shapes seen across callers: an actual `string[]`, a comma string `"a, b"`, or a bracketed string
- * `"[a, b]"`. This is the tag normalizer only — it does no frontmatter parsing (see parseFrontmatter)
- * and no domain/quality logic (that stays in the caller, D4).
+ * `"[a, b]"`; nullish/empty input yields `[]` (loose, unvalidated data degrades, never throws). This
+ * is the tag normalizer only — it does no frontmatter parsing (see parseFrontmatter) and no
+ * domain/quality logic (that stays in the caller, D4).
  */
-export function normalizeTags(input: string[] | string): string[] {
+export function normalizeTags(input: string[] | string | null | undefined): string[] {
   if (!input) return []; // nullish/empty from loose, unvalidated data → [] (AC #7: no throw)
   let parts: string[];
   if (Array.isArray(input)) {

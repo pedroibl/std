@@ -34,6 +34,11 @@ describe("slugify", () => {
     expect(slugify("")).toBe("");
     expect(slugify("!!!@@@")).toBe("");
   });
+
+  test("non-ASCII letters are dropped (documented ASCII-only behavior, not transliterated)", () => {
+    expect(slugify("São Paulo")).toBe("so-paulo");
+    expect(slugify("Tomé")).toBe("tom");
+  });
 });
 
 describe("truncate", () => {
@@ -125,8 +130,8 @@ describe("normalizeTags", () => {
   });
 
   test("nullish or missing input returns empty array", () => {
-    expect(normalizeTags(null as unknown as string)).toEqual([]);
-    expect(normalizeTags(undefined as unknown as string)).toEqual([]);
+    expect(normalizeTags(null)).toEqual([]);
+    expect(normalizeTags(undefined)).toEqual([]);
   });
 });
 
