@@ -53,6 +53,23 @@ describe("spawnCapture — timeout → SIGTERM → sentinel 124", () => {
     expect(r.stdout).toBe("done\n");
     expect(r.code).toBe(0);
   });
+
+  test("resolves AT the timeout even when the child ignores SIGTERM (never hangs)", async () => {
+    // The child traps+ignores SIGTERM and sleeps far past the timeout. The call must still resolve
+    // promptly with 124 — proving resolution is decoupled from the child actually dying.
+    const t0 = Date.now();
+    const r = await spawnCapture("sh", ["-c", "trap '' TERM; sleep 2"], { timeout: 150 });
+    const elapsed = Date.now() - t0;
+    expect(r.code).toBe(124);
+    expect(elapsed).toBeLessThan(1500); // well under the child's 2000ms sleep → resolved via timeout
+  });
+});
+
+describe("spawnCapture — signal-terminated exit codes (128 + signo)", () => {
+  test("a child killed by a signal reports 128 + signal number (SIGINT → 130)", async () => {
+    const r = await spawnCapture("sh", ["-c", "kill -INT $$"]);
+    expect(r.code).toBe(130);
+  });
 });
 
 describe("spawnCapture — never rejects (the linchpin)", () => {

@@ -6,9 +6,19 @@
 // handling. Some never reject; one rejects on launch-failure and nonzero exit. `spawnCapture`
 // unifies them on a single **never-reject** contract: the caller inspects `code`, never a catch.
 //
+// RUNTIME: `node:child_process` (not `Bun.spawn`), the same primitive `glab` uses and the exact
+// pattern the three target consumers use — so this is a true superset. The choice is load-bearing,
+// not stylistic: the contract demands (a) the call RESOLVES at the timeout even if the child traps
+// SIGTERM (a `Bun.spawn` read-stream-to-EOF model HANGS there — verified), and (b) signal-aware exit
+// codes (`128 + signo`), which Bun reports as a flat `128`. The EventEmitter model — accumulate via
+// `data`, resolve once on the first of {close, timeout, error} — gives both for free.
+//
 // CONSUMER-AGNOSTIC (D4): the command, args, env, and timeout are all caller-supplied. No model
 // names, no `ANTHROPIC_*` env-scrub, no baked binary names or timeouts live here — that identity
 // stays in the callers. This edge only spawns and captures.
+
+import { spawn, type SpawnOptionsWithoutStdio } from "node:child_process";
+import { constants } from "node:os";
 
 /** What `spawnCapture` resolves with. `code` is always a `number` — never `null`. */
 export interface SpawnResult {
@@ -23,7 +33,7 @@ export interface SpawnOptions {
   stdin?: string;
   /** Milliseconds before the child is SIGTERM'd and the call resolves with `code: 124`. */
   timeout?: number;
-  /** Replaces the child's environment verbatim (Bun semantics). Omit to inherit the parent's. */
+  /** Sets the child's environment (node semantics). Omit to inherit the parent's. */
   env?: Record<string, string>;
 }
 
@@ -31,69 +41,94 @@ export interface SpawnOptions {
 const TIMEOUT_CODE = 124;
 /** Conventional "command not found" code — used when the spawn itself fails to launch. */
 const SPAWN_FAILURE_CODE = 127;
-/** Generic "terminated by a signal we didn't send" sentinel (128 + signal, collapsed to 128). */
-const SIGNALED_CODE = 128;
+/** Base for "terminated by a signal" exit codes — the shell `128 + signal-number` convention. */
+const SIGNAL_BASE = 128;
+
+const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/** Map a node `close` `(code, signal)` pair to a single numeric exit code (`128 + signo` for signals). */
+function exitCodeOf(code: number | null, signal: NodeJS.Signals | null): number {
+  if (code !== null) return code;
+  if (signal !== null) return SIGNAL_BASE + (constants.signals[signal] ?? 0);
+  return SIGNAL_BASE;
+}
 
 /**
- * Run `cmd` with `args`, capturing stdout/stderr and the exit code. Bun-edge.
+ * Run `cmd` with `args`, capturing stdout/stderr and the exit code.
  *
- * **Never rejects (the contract).** The returned promise always resolves — for a clean exit, a
- * nonzero exit, a timeout, AND a launch failure (e.g. the binary is missing). The caller branches
- * on `code`; it never needs a try/catch around this call. Sentinels:
- *   - `124` — the child ran past `opts.timeout` and was SIGTERM'd (stdout/stderr captured so far).
+ * **Never rejects, never hangs (the contract).** The returned promise always resolves — for a clean
+ * exit, a nonzero exit, a timeout, a launch failure, or a signal kill. The caller branches on `code`;
+ * it never needs a try/catch around this call. Sentinels:
+ *   - `124` — the child ran past `opts.timeout` and was SIGTERM'd. Resolves AT the timeout with the
+ *     output captured so far, even if the child ignores SIGTERM (it is then left to the OS).
  *   - `127` — the spawn failed to launch (e.g. `ENOENT`); `stderr` holds the error message.
- *   - `128` — the child was terminated by a signal we didn't send (no clean exit code).
+ *   - `128 + signo` — the child was terminated by a signal with no clean exit code (e.g. `130` for
+ *     SIGINT, `143` for SIGTERM).
  * Real process exit codes (including app-specific ones) pass through verbatim.
  *
  * SIGTERM only on timeout — no SIGKILL escalation; a child that ignores SIGTERM is left to the OS.
  */
-export async function spawnCapture(
+export function spawnCapture(
   cmd: string,
   args: string[],
   opts: SpawnOptions = {},
 ): Promise<SpawnResult> {
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
-  try {
-    // Bun.spawn throws SYNCHRONOUSLY on a missing binary (unlike node's async 'error' event), so the
-    // never-reject launch-failure path lives in this catch, not in a stream/exit handler.
-    proc = Bun.spawn([cmd, ...args], {
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-      ...(opts.env ? { env: opts.env } : {}),
-    });
-  } catch (err) {
-    return {
-      stdout: "",
-      stderr: err instanceof Error ? err.message : String(err),
-      code: SPAWN_FAILURE_CODE,
+  return new Promise<SpawnResult>((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    // The single resolution point. Guarded so the FIRST of {close, timeout, error} wins atomically —
+    // a later callback is a no-op. This closes the timeout-vs-completion race and the timer leak:
+    // every terminal path goes through here, and here always clears the timer.
+    const finish = (result: SpawnResult): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(result);
     };
-  }
 
-  // Feed stdin (if any) and always close it, so a reader like `cat` sees EOF and exits instead of
-  // blocking forever on an open pipe.
-  if (opts.stdin !== undefined) proc.stdin.write(opts.stdin);
-  proc.stdin.end();
+    const options: SpawnOptionsWithoutStdio = opts.env ? { env: opts.env } : {};
+    let child;
+    try {
+      child = spawn(cmd, args, options);
+    } catch (err) {
+      // node usually defers ENOENT to the async 'error' event, but bad args can throw synchronously.
+      finish({ stdout: "", stderr: message(err), code: SPAWN_FAILURE_CODE });
+      return;
+    }
 
-  let timedOut = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  if (opts.timeout !== undefined) {
-    timer = setTimeout(() => {
-      timedOut = true;
-      proc.kill("SIGTERM");
-    }, opts.timeout);
-  }
+    // Launch failure (ENOENT / EACCES …) arrives here, asynchronously. Never reject — resolve 127.
+    child.on("error", (err) => {
+      finish({ stdout, stderr: stderr + message(err), code: SPAWN_FAILURE_CODE });
+    });
 
-  // Draining both streams to text waits for the process to finish writing (i.e. to exit).
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  await proc.exited;
-  if (timer !== undefined) clearTimeout(timer);
+    // Accumulate continuously so a timeout can resolve IMMEDIATELY with whatever has arrived, without
+    // waiting for stream EOF (the read-to-EOF approach hangs when a child ignores SIGTERM).
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
 
-  // exitCode is null when the process was terminated by a signal; coalesce to a numeric sentinel so
-  // the `code: number` contract holds (124 if WE timed it out, 128 for any other signal kill).
-  const code = timedOut ? TIMEOUT_CODE : (proc.exitCode ?? SIGNALED_CODE);
-  return { stdout, stderr, code };
+    child.on("close", (code, signal) => {
+      finish({ stdout, stderr, code: exitCodeOf(code, signal) });
+    });
+
+    // stdin: an 'error' listener is REQUIRED — an EPIPE on a child that already closed its stdin is
+    // emitted as an unhandled stream error (which would crash/reject) unless caught here; the sync
+    // write/end can also throw EPIPE. Both are swallowed: a vanished stdin is not our failure.
+    child.stdin.on("error", () => {});
+    try {
+      if (opts.stdin !== undefined) child.stdin.write(opts.stdin);
+      child.stdin.end();
+    } catch {
+      /* child closed stdin early — ignore, never reject */
+    }
+
+    if (opts.timeout !== undefined) {
+      timer = setTimeout(() => {
+        child.kill("SIGTERM"); // SIGTERM only, no SIGKILL escalation (AC4)
+        finish({ stdout, stderr, code: TIMEOUT_CODE });
+      }, opts.timeout);
+    }
+  });
 }
