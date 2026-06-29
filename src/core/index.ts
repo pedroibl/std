@@ -8,3 +8,12 @@ export { emptyCounts, statusLine, type Counts } from "./status";
 export { classify, toResult, type Classified, type Result } from "./result";
 export { configValue, tryParse } from "./config";
 export { extractJson, parseFrontmatter, parseNdjson } from "./parse";
+export {
+  collapse,
+  contentHash,
+  escapeHtml,
+  escapeRegExp,
+  normalizeTags,
+  slugify,
+  truncate,
+} from "./text";
