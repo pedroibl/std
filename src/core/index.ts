@@ -29,3 +29,11 @@ export {
   type Related,
   type SectionBounds,
 } from "./markdown";
+export {
+  charOverlap,
+  jaccard,
+  type ScoreResult,
+  type ScoreRule,
+  scoreRules,
+  tokenize,
+} from "./similarity";
