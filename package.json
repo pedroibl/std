@@ -9,7 +9,8 @@
     "./core": "./src/core/index.ts",
     "./report": "./src/report/index.ts",
     "./glab": "./src/glab/index.ts",
-    "./cli": "./src/cli/index.ts"
+    "./cli": "./src/cli/index.ts",
+    "./proc": "./src/proc/index.ts"
   },
   "bin": {
     "std": "./src/cli/main.ts"
