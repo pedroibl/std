@@ -302,9 +302,9 @@ export function run(argv: string[], opts: GlabOptions = {}): number {
     "issue-close": () => issueClose(positional(rest)),
   };
 
-  return dispatch(cmd ?? "", handlers, () => {
+  return dispatch(cmd ?? "", handlers, (unknown) => {
     console.error(
-      `glab: unknown command '${cmd ?? ""}'. Use: mr-threads | pipeline [ref] | ci-stats <ref> <sinceIso> | issue-list [--all] | issue-view <n> [--web] | issue-new --title <t> [--file <f> | --body <b>] [--label <l>] | issue-edit <n> | issue-close <n>`,
+      `glab: unknown command '${unknown}'. Use: mr-threads | pipeline [ref] | ci-stats <ref> <sinceIso> | issue-list [--all] | issue-view <n> [--web] | issue-new --title <t> [--file <f> | --body <b>] [--label <l>] | issue-edit <n> | issue-close <n>`,
     );
     return 2;
   });

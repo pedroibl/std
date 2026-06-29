@@ -57,6 +57,11 @@ describe("dispatch", () => {
   test("routes an unknown command to onUnknown (the edge decides)", () => {
     expect(dispatch("nope", handlers, onUnknown)).toBe(2);
   });
+  test("passes the unknown command name into onUnknown", () => {
+    let seen = "";
+    dispatch("nope", handlers, (cmd) => ((seen = cmd), 2));
+    expect(seen).toBe("nope");
+  });
   test("a handler returning 0 is NOT mistaken for unknown (no undefined collision)", () => {
     let unknownRan = false;
     expect(dispatch("build", handlers, () => ((unknownRan = true), 2))).toBe(0);
