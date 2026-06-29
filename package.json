@@ -12,7 +12,8 @@
     "./cli": "./src/cli/index.ts",
     "./proc": "./src/proc/index.ts",
     "./git": "./src/git/index.ts",
-    "./http": "./src/http/index.ts"
+    "./http": "./src/http/index.ts",
+    "./fsx": "./src/fsx/index.ts"
   },
   "bin": {
     "std": "./src/cli/main.ts"

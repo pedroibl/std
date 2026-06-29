@@ -12,8 +12,12 @@
 // an audit log must never take down the operation it records — so it (and only it) swallows its errors.
 //
 // node:fs is allowed here (a Bun edge); it is forbidden only in `core`. All paths are caller-supplied
-// arguments — no path/repo identity is baked in (D4/NFR3), the same discipline the future `fsx` slice
-// will inherit.
+// arguments — no path/repo identity is baked in (D4/NFR3), the same discipline the `fsx` slice carries.
+//
+// CONVERGENCE (Story 10.5 / AD-9): the atomic stage+rename core is now `fsx.atomicWrite` — the shared
+// plumbing slice (the Rule-of-Three was met by `safeWrite`/`appendIfMissing` here + `cli/repo-nav`'s
+// inline temp+rename). `safeWrite` and `appendIfMissing` route through it; `stageWrite`/`commitRename`
+// stay as the exported FR9 split-pair surface (an unchanged public API).
 //
 // CONCURRENCY SCOPE: these are SINGLE-WRITER helpers for report generation (one process writing its own
 // output). `safeWrite`/`stageWrite`/`commitRename` are torn-write-proof via atomic rename; `appendIfMissing`
@@ -21,13 +25,15 @@
 // locking, so they are not safe against a second process writing the SAME path concurrently — out of
 // scope for FR9 (and `appendAudit` is explicitly best-effort and loss-tolerant).
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-/** Create a file's parent directory (recursive). `mkdirSync recursive` is idempotent — no exists-check
- *  (an exists+mkdir pair is a needless TOCTOU). Shared prelude for the writers. */
+import { atomicWrite, ensureDir } from "../fsx";
+
+/** Create a file's parent directory (recursive) via the shared `fsx.ensureDir`. Idempotent — no
+ *  exists-check (an exists+mkdir pair is a needless TOCTOU). Shared prelude for the writers. */
 function ensureParent(path: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+  ensureDir(dirname(path));
 }
 
 /** Read a file's text, or `null` if it does not exist. One syscall — no exists/read TOCTOU window. */
@@ -42,11 +48,8 @@ function readOrNull(path: string): string | null {
 
 /**
  * Stage `content` to a temp sibling (`<path>.tmp`) and return its path. Creates parent dirs. The first
- * half of the atomic pair — pair with `commitRename`.
- *
- * NOTE (Epic 10 / AD-9): `stageWrite`+`commitRename` here and the inline temp+rename in
- * `src/cli/repo-nav.ts` are the ≥2 consumers that justify a shared `fsx.atomicWrite`. Converge THERE
- * (the plumbing slice), not here — don't build `fsx` speculatively from one story (D2).
+ * half of the atomic pair — pair with `commitRename`. Retained as the exported FR9 split-pair surface;
+ * the combined stage+rename is now `fsx.atomicWrite` (used by `safeWrite`/`appendIfMissing`).
  */
 export function stageWrite(path: string, content: string): string {
   ensureParent(path);
@@ -67,8 +70,7 @@ export function commitRename(tmp: string, path: string): void {
 export function safeWrite(path: string, render: (current: string | null) => string): void {
   const current = readOrNull(path);
   const next = render(current);
-  const tmp = stageWrite(path, next);
-  commitRename(tmp, path);
+  atomicWrite(path, next); // shared fsx plumbing: ensureDir → temp → rename
 }
 
 /**
@@ -100,8 +102,7 @@ export function writeIfAbsent(path: string, content: string): boolean {
 export function appendIfMissing(path: string, marker: string, block: string): boolean {
   const current = readOrNull(path);
   if (current !== null && current.includes(marker)) return false;
-  const tmp = stageWrite(path, (current ?? "") + block);
-  commitRename(tmp, path);
+  atomicWrite(path, (current ?? "") + block); // shared fsx plumbing: ensureDir → temp → rename
   return true;
 }
 
