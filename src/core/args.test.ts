@@ -45,17 +45,25 @@ describe("hasFlag", () => {
 });
 
 describe("dispatch", () => {
+  const handlers = { build: () => 0, test: () => 1 };
+  const onUnknown = () => 2;
+
   test("runs the matching handler and returns its code", () => {
-    expect(dispatch("build", { build: () => 0, test: () => 1 })).toBe(0);
+    expect(dispatch("build", handlers, onUnknown)).toBe(0);
   });
   test("returns the handler's non-zero code unchanged", () => {
-    expect(dispatch("test", { build: () => 0, test: () => 1 })).toBe(1);
+    expect(dispatch("test", handlers, onUnknown)).toBe(1);
   });
-  test("unknown command returns undefined (the edge decides what that means)", () => {
-    expect(dispatch("nope", { build: () => 0 })).toBeUndefined();
+  test("routes an unknown command to onUnknown (the edge decides)", () => {
+    expect(dispatch("nope", handlers, onUnknown)).toBe(2);
   });
-  test("does not resolve inherited Object.prototype keys as handlers", () => {
-    expect(dispatch("constructor", { build: () => 0 })).toBeUndefined();
-    expect(dispatch("toString", {})).toBeUndefined();
+  test("a handler returning 0 is NOT mistaken for unknown (no undefined collision)", () => {
+    let unknownRan = false;
+    expect(dispatch("build", handlers, () => ((unknownRan = true), 2))).toBe(0);
+    expect(unknownRan).toBe(false);
+  });
+  test("does not run inherited Object.prototype keys as handlers — falls through to onUnknown", () => {
+    expect(dispatch("constructor", handlers, onUnknown)).toBe(2);
+    expect(dispatch("toString", {}, onUnknown)).toBe(2);
   });
 });

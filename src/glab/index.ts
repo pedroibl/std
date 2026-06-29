@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 
-import { dispatch, flagValue, hasFlag, positional } from "../core/args";
+import { dispatch, flagValue, hasFlag, positional } from "../core";
 
 interface Note {
   body?: string;
@@ -302,12 +302,10 @@ export function run(argv: string[], opts: GlabOptions = {}): number {
     "issue-close": () => issueClose(positional(rest)),
   };
 
-  const code = dispatch(cmd ?? "", handlers);
-  if (code === undefined) {
+  return dispatch(cmd ?? "", handlers, () => {
     console.error(
       `glab: unknown command '${cmd ?? ""}'. Use: mr-threads | pipeline [ref] | ci-stats <ref> <sinceIso> | issue-list [--all] | issue-view <n> [--web] | issue-new --title <t> [--file <f> | --body <b>] [--label <l>] | issue-edit <n> | issue-close <n>`,
     );
     return 2;
-  }
-  return code;
+  });
 }
