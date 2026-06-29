@@ -10,7 +10,8 @@
     "./report": "./src/report/index.ts",
     "./glab": "./src/glab/index.ts",
     "./cli": "./src/cli/index.ts",
-    "./proc": "./src/proc/index.ts"
+    "./proc": "./src/proc/index.ts",
+    "./git": "./src/git/index.ts"
   },
   "bin": {
     "std": "./src/cli/main.ts"
