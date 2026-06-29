@@ -10,8 +10,9 @@
 //
 // Bun edge — fs/os/path are fine here; core stays pure.
 
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+
+import { atomicWrite } from "../fsx";
 
 /** The registry: a map of nav alias → target path (the path string is emitted verbatim into zsh, so a
  *  consumer may use `$HOME`/`~` and zsh expands it at source time). */
@@ -190,19 +191,15 @@ export interface InstallResult {
  */
 export function installAlias(opts: InstallOptions): InstallResult {
   // Generate BOTH artifacts first — generation fail-closes on a bad registry, so a validation failure
-  // writes nothing. Each file is then written via a temp-file + atomic rename, so a write that fails
-  // mid-way never leaves a half-written artifact in the live shell tree (no partial corruption).
+  // writes nothing. Each file is then written via the shared `fsx.atomicWrite` (ensureDir → temp →
+  // rename), so a write that fails mid-way never leaves a half-written artifact in the live shell tree.
   const repoNav = generateRepoNav(opts.config, opts.frozenNames ?? new Set());
   const completion = generateStdCompletion(opts.commands);
   for (const [path, content] of [
     [opts.targets.repoNavPath, repoNav],
     [opts.targets.completionPath, completion],
   ] as const) {
-    const dir = dirname(path);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const tmp = `${path}.tmp`;
-    writeFileSync(tmp, content);
-    renameSync(tmp, path); // atomic on the same filesystem
+    atomicWrite(path, content);
   }
   return { repoNavPath: opts.targets.repoNavPath, completionPath: opts.targets.completionPath };
 }
