@@ -89,6 +89,14 @@ describe("insertInSection", () => {
     expect(out).not.toContain("added## B");
     expect(out).toContain("- added\n## B");
   });
+
+  test("does not split a CRLF sequence when inserting", () => {
+    const crlf = "## A\r\nalpha\r\n## B\r\nbeta\r\n";
+    const out = insertInSection(crlf, "## A", "\r\n- added");
+    expect(out).toBe("## A\r\nalpha\r\n- added\r\n## B\r\nbeta\r\n");
+    expect(out).not.toContain("\r\r");
+    expect(out).not.toContain("added\r## B");
+  });
 });
 
 describe("chunkContent", () => {
@@ -128,6 +136,11 @@ describe("chunkContent", () => {
     expect(chunks[0].heading).toBe("p1");
   });
 
+  test("preamble-only document with a single paragraph yields one p1 chunk", () => {
+    const md = "Just one paragraph of prose, no headings at all, comfortably over thirty chars.";
+    expect(chunkContent(md)).toEqual([{ heading: "p1", body: md }]);
+  });
+
   test("empty content yields no chunks", () => {
     expect(chunkContent("")).toEqual([]);
   });
@@ -153,6 +166,14 @@ describe("extractWikilinks", () => {
   test("ignores wikilinks inside frontmatter", () => {
     const note = "---\ntitle: [[not-a-body-link]]\n---\nbody [[real-link]]\n";
     expect(extractWikilinks(note)).toEqual(["real-link"]);
+  });
+
+  test("keeps spaces in multi-word slugs", () => {
+    expect(extractWikilinks("[[My Great Idea]]")).toEqual(["My Great Idea"]);
+  });
+
+  test("an unclosed wikilink does not swallow the next line", () => {
+    expect(extractWikilinks("[[unclosed\n[[real]]")).toEqual(["real"]);
   });
 
   test("returns [] when there are no links", () => {
@@ -190,6 +211,11 @@ describe("extractRelated", () => {
   test("stops the block at the next top-level key", () => {
     const note = "---\nrelated:\n  - slug: foo\ntags: [x]\n---\n";
     expect(extractRelated(note)).toEqual([{ slug: "foo", type: "related" }]);
+  });
+
+  test("handles type-before-slug key order within an item", () => {
+    const note = "---\nrelated:\n  - type: depends-on\n    slug: foo\n---\n";
+    expect(extractRelated(note)).toEqual([{ slug: "foo", type: "depends-on" }]);
   });
 
   test("returns [] when there is no frontmatter", () => {

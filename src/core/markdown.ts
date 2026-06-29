@@ -14,6 +14,7 @@
 // section (`## Cross-Frame`, `## Predictive`, …) are all the caller's job. These helpers take the
 // heading as an argument and never invent one.
 
+import { parseFrontmatter } from "./parse";
 import { escapeRegExp } from "./text";
 
 /** Byte offsets of a located section: the heading itself, its body, and the boundary. */
@@ -70,8 +71,12 @@ export function extractSection(content: string, heading: string): string | null 
 export function insertInSection(content: string, heading: string, text: string): string {
   const bounds = findSection(content, heading);
   if (!bounds) return content;
-  const at =
-    bounds.bodyEnd > 0 && content[bounds.bodyEnd - 1] === "\n" ? bounds.bodyEnd - 1 : bounds.bodyEnd;
+  // Back up over the boundary heading's preceding newline so a `\n`-led entry lands on its own line
+  // rather than gluing to the next heading — and over a CRLF `\r\n` as a unit, never splitting it.
+  let at = bounds.bodyEnd;
+  if (at > 0 && content[at - 1] === "\n") {
+    at = at > 1 && content[at - 2] === "\r" ? at - 2 : at - 1;
+  }
   return content.slice(0, at) + text + content.slice(at);
 }
 
@@ -120,7 +125,9 @@ function stripFrontmatter(content: string): string {
 export function extractWikilinks(content: string): string[] {
   const body = stripFrontmatter(content);
   const links: string[] = [];
-  const re = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
+  // Newlines are excluded from both classes so an unclosed `[[` can't greedily swallow following
+  // lines; spaces stay allowed (multi-word slugs like `[[My Great Idea]]` are valid Obsidian links).
+  const re = /\[\[([^\r\n\]|]+)(?:\|[^\r\n\]]+)?\]\]/g;
   let match: RegExpExecArray | null;
   while ((match = re.exec(body)) !== null) {
     const raw = match[1].trim();
@@ -151,54 +158,59 @@ export interface Related {
 export function extractRelated(content: string): Related[] {
   const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!fm) return [];
+
+  // Flat shape (`related: foo` / `related: [a, b]`) — reuse 9.1's parseFrontmatter, the single source
+  // of the frontmatter flat-parse, rather than re-rolling it. A nested object-list leaves `related`
+  // empty/absent here, so it falls through to the block-walk below.
+  const flat = parseFrontmatter(content).related;
+  if (typeof flat === "string" && flat) {
+    return [{ slug: flat.replace(/['"]/g, ""), type: "related" }];
+  }
+  if (Array.isArray(flat) && flat.length > 0) {
+    return flat.map((v) => ({ slug: v.replace(/['"]/g, ""), type: "related" }));
+  }
+
+  // Nested object-list shape: walk the `related:` block, accumulating slug + type per list item. Both
+  // are tracked independently and flushed at each item boundary, so either key order works and a slug
+  // with no type defaults to "related".
   const related: Related[] = [];
   let inRelated = false;
   let currentSlug: string | null = null;
+  let currentType: string | null = null;
+  const flush = () => {
+    if (currentSlug) related.push({ slug: currentSlug, type: currentType ?? "related" });
+    currentSlug = null;
+    currentType = null;
+  };
   for (const line of fm[1].split(/\r?\n/)) {
-    const relMatch = line.match(/^related\s*:(.*)$/);
-    if (relMatch) {
-      const inline = relMatch[1].trim();
-      if (inline) {
-        // Flat shape on the same line: `related: foo` or `related: [a, b]`.
-        const items =
-          inline.startsWith("[") && inline.endsWith("]")
-            ? inline.slice(1, -1).split(",")
-            : [inline];
-        for (const item of items) {
-          const slug = item.trim().replace(/['"]/g, "");
-          if (slug) related.push({ slug, type: "related" });
-        }
-        inRelated = false; // consumed inline; no nested block follows
-      } else {
-        inRelated = true; // nested block follows
-      }
+    if (/^related\s*:/.test(line)) {
+      inRelated = true;
       continue;
     }
-    if (inRelated) {
-      // End of block: a non-indented, non-list, non-empty line (the next top-level key).
-      if (
-        !line.startsWith(" ") &&
-        !line.startsWith("\t") &&
-        !line.startsWith("-") &&
-        line.trim().length > 0
-      ) {
-        inRelated = false;
-        continue;
-      }
-      const slugMatch = line.match(/^[\s-]*slug\s*:\s*(.+)/);
-      if (slugMatch) {
-        if (currentSlug) related.push({ slug: currentSlug, type: "related" }); // flush prior slug-only
-        currentSlug = slugMatch[1].trim().replace(/['"]/g, "");
-        continue;
-      }
-      const typeMatch = line.match(/^\s*type\s*:\s*(.+)/);
-      if (typeMatch && currentSlug) {
-        related.push({ slug: currentSlug, type: typeMatch[1].trim().replace(/['"]/g, "") });
-        currentSlug = null;
-        continue;
-      }
+    if (!inRelated) continue;
+    // End of block: a non-indented, non-list, non-empty line (the next top-level key).
+    if (
+      !line.startsWith(" ") &&
+      !line.startsWith("\t") &&
+      !line.startsWith("-") &&
+      line.trim().length > 0
+    ) {
+      flush();
+      inRelated = false;
+      continue;
+    }
+    if (line.trim().startsWith("-")) flush(); // new list item → flush the previous one
+    const slugMatch = line.match(/^[\s-]*slug\s*:\s*(.+)/);
+    if (slugMatch) {
+      currentSlug = slugMatch[1].trim().replace(/['"]/g, "");
+      continue;
+    }
+    const typeMatch = line.match(/^[\s-]*type\s*:\s*(.+)/);
+    if (typeMatch) {
+      currentType = typeMatch[1].trim().replace(/['"]/g, "");
+      continue;
     }
   }
-  if (currentSlug) related.push({ slug: currentSlug, type: "related" }); // trailing slug-only entry
+  flush(); // trailing item
   return related;
 }
