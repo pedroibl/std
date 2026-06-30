@@ -55,6 +55,12 @@ or `workspace:*` (CI), and import nothing back (clean dependency root).
   native scripts.
 - **sesh-harvest** — `bun link`-ed today (distribution proven); first in-code consumer once `core`/`cli` export.
 - **note-report vault** — live consumer of std's `sprint-status.yaml` via `dashkit` (the slice above).
+- **PAI Inference** (`~/.claude/PAI/TOOLS/Inference.ts`) — a future **`http`-slice** consumer. It
+  migrated off the subprocess pattern (it was one of `proc`'s three Rule-of-Five witnesses, "an LLM
+  inference call") to a direct HTTP call — Anthropic Messages API primary + OpenRouter fallback —
+  which open-codes exactly `http`'s `fetchWithTimeout` envelope. The E11–E14 PAI/Tools extraction
+  rewrites it to import `std/http`; until then it is a **pattern** consumer, not a `bun link` one, so
+  it is intentionally **not** in `scripts/STD_CONSUMERS.ts` (that registry's test enforces `bun link`).
 
 ## Status
 
