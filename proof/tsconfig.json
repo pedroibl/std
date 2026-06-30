@@ -1,0 +1,6 @@
+{
+  "extends": "../tsconfig.json",
+  "include": ["**/*.ts"],
+  "//": "harvester.generated.ts is the VERBATIM Task-0 capture (Story 11.1) — it preserves the generator's 3 wrong imports on purpose as the Story-11.3 improvement-note input, so it is excluded from typecheck.",
+  "exclude": ["harvester.generated.ts"]
+}
