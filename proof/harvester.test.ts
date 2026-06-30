@@ -8,13 +8,23 @@
 // per-session >0.8-overlap dedup, and the dormant provenance seam.
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   discoverSessions,
   harvestSession,
+  main,
   reduceLearnings,
   runHarvest,
   runMine,
@@ -235,7 +245,7 @@ test("per-project --recent keeps the newest N per project, not N globally", () =
     const p = writeSession("proj-alpha", `aaaaaaaa-0000-0000-0000-00000000000${i}`, jsonl([{ type: "user", content: CORRECTION, timestamp: "2026-06-01T10:00:00.000Z" }]));
     // stagger mtime so "newest 2" is deterministic
     const t = new Date(2026, 5, i).getTime() / 1000;
-    require("node:fs").utimesSync(p, t, t);
+    utimesSync(p, t, t);
   }
   writeSession("proj-beta", "bbbbbbbb-0000-0000-0000-000000000009", jsonl([{ type: "user", content: CORRECTION, timestamp: "2026-06-02T10:00:00.000Z" }]));
 
@@ -248,6 +258,19 @@ test("per-project --recent keeps the newest N per project, not N globally", () =
 
 test("discoverSessions on a missing root is fail-soft (empty), not a throw", () => {
   expect([...discoverSessions(join(root, "does-not-exist"), {})].length).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// CLI guards — both branches return BEFORE any harvest, so these are hermetic.
+// ---------------------------------------------------------------------------
+
+test("main(--help) returns 0", () => {
+  expect(main(["--help"])).toBe(0);
+});
+
+test("main rejects an unknown flag with exit code 2", () => {
+  expect(main(["--bogus"])).toBe(2);
+  expect(main(["--recent", "5", "--nope=1"])).toBe(2);
 });
 
 // ---------------------------------------------------------------------------
@@ -266,7 +289,7 @@ function allLearningFiles(r: Roots): Array<{ name: string; path: string }> {
     }
     for (const e of entries) {
       const full = join(dir, e);
-      if (require("node:fs").statSync(full).isDirectory()) walk(full);
+      if (statSync(full).isDirectory()) walk(full);
       else if (e.endsWith(".md")) out.push({ name: e, path: full });
     }
   }

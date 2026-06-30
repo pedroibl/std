@@ -254,11 +254,18 @@ export function projectLabel(slug: string): string {
 
 export function* discoverSessions(root: string, sel: Selection): Iterable<SessionRef> {
   // walkFiles → absolute .jsonl paths (fail-soft on a missing root → []).
-  const all: SessionRef[] = walkFiles(root, (p) => p.endsWith(".jsonl")).map((p) => ({
-    path: p,
-    project: basename(dirname(p)),
-    mtime: statSync(p).mtimeMs, // gap #5 — fsx has no stat/mtime helper; edge stat.
-  }));
+  const all: SessionRef[] = walkFiles(root, (p) => p.endsWith(".jsonl")).map((p) => {
+    // gap #5 — fsx has no stat/mtime helper; read mtime at the edge. Guarded so a
+    // file that vanishes between walk and stat (TOCTOU) or an unreadable one is
+    // fail-soft (mtime 0 → sorts last), matching walkFiles' own fail-soft contract.
+    let mtime = 0;
+    try {
+      mtime = statSync(p).mtimeMs;
+    } catch {
+      // unstatable — keep it, just unranked
+    }
+    return { path: p, project: basename(dirname(p)), mtime };
+  });
 
   const pool = sel.project ? all.filter((r) => r.project.includes(sel.project!)) : all;
 
@@ -725,10 +732,26 @@ Output (tagged by project of origin):
   Mine:    MEMORY/KNOWLEDGE/_harvest-queue/ (review queue)
 `;
 
+const KNOWN_FLAGS = new Set(["recent", "all", "session", "project", "dry-run", "mine", "help"]);
+
+/** Tokens starting with `--` whose name isn't a known flag (gap #4: core/args is
+ *  per-flag and does not reject unknowns the way the originals' strict parseArgs did,
+ *  so the tool restores that guard itself). Values never start with `--`. */
+function unknownFlags(argv: string[]): string[] {
+  return argv.filter((t) => t.startsWith("--") && !KNOWN_FLAGS.has(t.slice(2).split("=")[0]));
+}
+
 export function main(argv: string[]): number {
   if (hasFlag(argv, "help")) {
     console.log(HELP);
     return 0;
+  }
+
+  const unknown = unknownFlags(argv);
+  if (unknown.length > 0) {
+    console.error(`Unknown flag(s): ${unknown.join(", ")}`);
+    console.error(HELP);
+    return 2; // usage error — non-zero, like the originals' strict parseArgs
   }
 
   const recentRaw = flagValue(argv, "recent");
