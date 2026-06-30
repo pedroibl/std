@@ -1,8 +1,9 @@
 // fsx — the Bun-edge filesystem helper set (AD-9 plumbing topology), sibling to glab/proc/git/http.
 //
-// WHY: across the estate every tool re-hand-rolls the same six fs moves — a recursive file walk, an
-// idempotent mkdir, an absent-tolerant read, a torn-write-proof write, and a typed JSON load/save. This
-// slice is the one tested edge they collapse onto. The atomic-write half (`atomicWrite`/`saveJson`) is
+// WHY: across the estate every tool re-hand-rolls the same fs moves — a recursive file walk, an
+// idempotent mkdir, an absent-tolerant read, a fail-soft mtime read, a torn-write-proof write, and a typed
+// JSON load/save. This slice is the one tested edge they collapse onto. The atomic-write half
+// (`atomicWrite`/`saveJson`) is
 // the Rule-of-Three trigger: it is already needed by `report` (stage+rename) and `cli` (repo-nav inline
 // temp+rename) *in this repo*, so those two converge onto `fsx.atomicWrite` here (the AD-3 proof). The
 // other four helpers ship + are tested now; their external PAI/Tools call-sites migrate in Epic 12.
@@ -130,6 +131,23 @@ export function readIfExists(path: string): string | null {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err; // a real read error on an existing file surfaces (fail-loud, FR5)
+  }
+}
+
+/**
+ * Modification time of `path` in milliseconds since the epoch (`statSync(path).mtimeMs`), or `0` when the
+ * file is missing or unstatable. Fail-soft by design (mirrors `readIfExists`/`walkFiles`): the estate's
+ * mtime readers use it to rank files by recency, and `0` sorts a vanished/unreadable file LAST (oldest)
+ * rather than aborting the scan — the same `mtime 0 → sorts last` contract the harvester reads at its edge.
+ * It softens ANY stat error (ENOENT, a broken symlink, an unreadable parent), because for a recency rank
+ * "can't tell when" and "not there" are the same answer: unranked. A caller that must distinguish a real
+ * fs fault from absence should `statSync` directly.
+ */
+export function statMtime(path: string): number {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return 0; // missing / unstatable → sorts last under a recency rank
   }
 }
 
