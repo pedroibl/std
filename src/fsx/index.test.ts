@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 
-import { atomicWrite, ensureDir, loadJson, readIfExists, saveJson, walkFiles } from "./index";
+import { atomicWrite, ensureDir, loadJson, readIfExists, saveJson, statMtime, walkFiles } from "./index";
 
 /** Run `fn` against a throwaway temp dir, cleaned up after. */
 function inTmp(fn: (dir: string) => void): void {
@@ -38,6 +38,44 @@ describe("atomicWrite — tmp+rename torn-write-proof writer (FR5 fail-loud)", (
       const path = join(dir, "out.txt");
       atomicWrite(path, "x");
       expect(existsSync(`${path}.tmp`)).toBe(false);
+    });
+  });
+});
+
+describe("statMtime — fail-soft mtime read (0 on absent/unreadable)", () => {
+  test("returns the real mtimeMs for an existing file", () => {
+    inTmp((dir) => {
+      const path = join(dir, "f.txt");
+      writeFileSync(path, "x");
+      const mtime = statMtime(path);
+      expect(mtime).toBeGreaterThan(0);
+      expect(mtime).toBe(statSync(path).mtimeMs);
+    });
+  });
+
+  test("a more-recently-written file has a >= mtime (sorts newer)", () => {
+    inTmp((dir) => {
+      const older = join(dir, "older.txt");
+      writeFileSync(older, "a");
+      const omt = statMtime(older);
+      const newer = join(dir, "newer.txt");
+      writeFileSync(newer, "b");
+      // same-second writes can tie at ms granularity; never older
+      expect(statMtime(newer)).toBeGreaterThanOrEqual(omt);
+    });
+  });
+
+  test("returns 0 for a missing path (fail-soft → sorts last)", () => {
+    inTmp((dir) => {
+      expect(statMtime(join(dir, "does-not-exist.txt"))).toBe(0);
+    });
+  });
+
+  test("returns 0 for a broken symlink (unstatable → fail-soft)", () => {
+    inTmp((dir) => {
+      const link = join(dir, "dangling");
+      symlinkSync(join(dir, "no-target"), link);
+      expect(statMtime(link)).toBe(0);
     });
   });
 });

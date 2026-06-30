@@ -34,6 +34,11 @@ export function slugify(text: string, maxLen = 60): string {
  * toward the limit). Character-boundary, ported verbatim from `AnvilProgress.ts:121` ≡
  * `ForgeProgress.ts:165` — the two byte-identical copies this primitive collapses. With `limit < 3`
  * the visible text is empty and only the (clamped) ellipsis remains.
+ *
+ * This is display-oriented: it appends an ellipsis and clamps on a character boundary, so it is NOT a
+ * verbatim cut. For byte-exact / verbatim content (a raw slice of a transcript, a content hash input,
+ * anything that must round-trip unchanged) use `String.prototype.slice` directly — `truncate` is for
+ * human-facing previews, not for content you intend to re-parse or compare.
  */
 export function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 3))}...`;

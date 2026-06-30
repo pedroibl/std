@@ -11,6 +11,12 @@
  * Parse newline-delimited JSON: one value per line, blank lines skipped, a line that fails
  * `JSON.parse` skipped (never thrown). Returns the values that parsed, in order. The element type is
  * the caller's to assert — this primitive is shape-agnostic; filter on shape after parsing.
+ *
+ * NOTE: the **raw source-line index is not preserved** — because blank/unparseable lines are dropped,
+ * a value's position in the returned array is NOT its line number in `text`. A caller that needs to stamp
+ * each value with its originating line (e.g. a `sourceLine` provenance field) must count lines itself
+ * rather than rely on the array index. A line-preserving sibling (`parseNdjsonIndexed → {value, line}[]`)
+ * would be added only on a real 2nd consumer — never by breaking this graceful-skip contract.
  */
 export function parseNdjson<T = unknown>(text: string): T[] {
   const out: T[] = [];
