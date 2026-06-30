@@ -11,3 +11,6 @@ dist/
 # std-cli consumer registry (Story 1.4) — opt-in, per-machine; never committed (D4/NFR3: std
 # source names no consumer). The check:single-source gate reads it when present, SKIPs when absent.
 scripts/std.consumers.local
+
+# local-only: agy agent rules symlinked to the planning repo project-context (not for the public repo)
+.agents/

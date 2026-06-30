@@ -28,6 +28,13 @@
 //     (Decision 2 amended 2026-06-29 per Sourcery review). A write that can't complete must surface,
 //     not silently lose data (the `report/write.ts` discipline).
 //
+// CONCURRENCY & SINGLE-WRITER BOUNDARY (Epic-10 AI#3 / Epic-11 retro AI#4):
+// These filesystem edges (atomicWrite/saveJson) guarantee safety against torn writes by writing
+// to a sibling temp file and renameSync-ing. They operate under a SINGLE-WRITER scope (one CLI invocation
+// or one bot execution runs at a time per workspace/backup). At this concurrency scale, they do NOT require
+// unique random temp paths or locking primitives; a fixed sibling ".tmp" filename/directory is safe and
+// simplifies state-cleanup. Later tool migrations and bot passes must accept this design constraint.
+//
 // node:fs is allowed here (a Bun edge); it is forbidden only in `core`.
 
 import {
