@@ -101,11 +101,18 @@ repo() {
   cd "\${ZSH_REPOS[$key]}"
 }
 
-# repos — list the registry (alias → path)
+# repos — list the registry (alias · name · path). The name is the path basename; it is colorized on a
+# TTY only (plain when piped/headless, so the listing stays byte-identical in a pipe). Path is \$HOME-shortened.
 repos() {
   emulate -L zsh
-  local k
-  for k in \${(ok)ZSH_REPOS}; do printf '  %-7s %s\\n' "$k" "\${ZSH_REPOS[$k]}"; done
+  local k name disp col='' rst=''; local -i w=0
+  [[ -t 1 && -z \${NO_COLOR:-} ]] && { col=$'\\e[36m'; rst=$'\\e[0m'; }
+  for k in \${(ok)ZSH_REPOS}; do name="\${ZSH_REPOS[$k]:t}"; (( \${#name} > w )) && w=\${#name}; done
+  for k in \${(ok)ZSH_REPOS}; do
+    name="\${ZSH_REPOS[$k]:t}"
+    disp="\${ZSH_REPOS[$k]/#\$HOME/~}"   # quoted: unquoted, zsh re-tilde-expands ~ back to \$HOME
+    printf '  %-7s %s%-*s%s  %s\\n' "$k" "$col" "$w" "$name" "$rst" "$disp"
+  done
 }
 
 # tab-completion for \`repo\`
