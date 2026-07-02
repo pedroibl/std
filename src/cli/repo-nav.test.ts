@@ -86,6 +86,14 @@ describe("generateRepoNav — deterministic, declaration-ordered, complete (AC1)
     expect(out).toContain("local -a reserved=(std)");
   });
 
+  test("repos() lists 3 columns — derived name, colorized TTY-only, $HOME-shortened path", () => {
+    expect(out).toContain("${ZSH_REPOS[$k]:t}"); // name = path basename (derived, no registry field)
+    expect(out).toContain("[[ -t 1 && -z ${NO_COLOR:-} ]]"); // color gate: plain when piped/headless
+    expect(out).toContain("\\e[36m"); // cyan on the name column only
+    expect(out).toContain('disp="${ZSH_REPOS[$k]/#$HOME/~}"'); // $HOME → ~; QUOTED (else zsh re-expands ~)
+    expect(out).toContain("printf '  %-7s %s%-*s%s  %s\\n'"); // 3 fields, dynamically aligned
+  });
+
   test("a bad registry throws before producing any output (fail-closed)", () => {
     expect(() => generateRepoNav({ entries: { "x y": "/z" } })).toThrow(RepoNavError);
   });
