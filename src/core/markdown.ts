@@ -80,6 +80,62 @@ export function insertInSection(content: string, heading: string, text: string):
   return content.slice(0, at) + text + content.slice(at);
 }
 
+/** A section-root binding: the char offset where it takes effect and its resolved root prefix. */
+export interface SectionRoot {
+  /** Char offset (into `content`) of the heading line that established this root. */
+  pos: number;
+  /** The root prefix (trailing-slashed), or `""` for the default / a non-hinting heading. */
+  root: string;
+}
+
+/**
+ * Parse `## … (paths under \`X\`)` headings and build a sorted list of `{ pos, root }` bindings. The
+ * default empty root applies before any heading is seen; each `## ` heading whose text carries a
+ * `paths under \`X\`` hint pushes that root (a trailing slash is added when absent), and any other `## `
+ * heading resets to the empty root. This is a generic markdown routing-section convention (the same
+ * heuristic `findSection`'s matcher is — no PAI identity), so it lives in `core`: it lets a relative path
+ * written under a routing section resolve against that section's declared root. Pure string→structure;
+ * the caller owns what the roots resolve against.
+ *
+ * (Promoted verbatim from the byte-identical `extractSectionRoots` in DocCheck.ts / ReferenceCheck.ts —
+ * Story 12.3. Char offsets accumulate as `line.length + 1` per line, i.e. an LF terminator.)
+ */
+export function sectionRoots(content: string): SectionRoot[] {
+  const out: SectionRoot[] = [{ pos: 0, root: "" }];
+  const headingPathHint = /paths under\s+`?([A-Za-z_/.0-9-]+?)`?(?:\s|\)|$)/;
+  const lines = content.split("\n");
+  let pos = 0;
+  for (const line of lines) {
+    const h2 = line.match(/^##\s+(.+)$/);
+    if (h2) {
+      const hint = h2[1].match(headingPathHint);
+      if (hint) {
+        let root = hint[1];
+        if (!root.endsWith("/")) root += "/";
+        out.push({ pos, root });
+      } else {
+        out.push({ pos, root: "" });
+      }
+    }
+    pos += line.length + 1;
+  }
+  return out;
+}
+
+/**
+ * Return the section root active at char position `charPos` — the root of the last binding whose `pos`
+ * is `<= charPos` (bindings are in ascending `pos` order, so the scan stops at the first later one).
+ * `""` when no hinted section is in effect. Companion to {@link sectionRoots}.
+ */
+export function sectionRootAt(roots: SectionRoot[], charPos: number): string {
+  let active = "";
+  for (const r of roots) {
+    if (r.pos <= charPos) active = r.root;
+    else break;
+  }
+  return active;
+}
+
 /** A chunk of a document: a heading label and its trimmed body. */
 export interface Chunk {
   heading: string;

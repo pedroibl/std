@@ -30,6 +30,9 @@ export {
   insertInSection,
   type Related,
   type SectionBounds,
+  type SectionRoot,
+  sectionRootAt,
+  sectionRoots,
 } from "./markdown";
 export {
   charOverlap,

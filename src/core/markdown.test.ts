@@ -7,6 +7,8 @@ import {
   extractWikilinks,
   findSection,
   insertInSection,
+  sectionRootAt,
+  sectionRoots,
 } from "./markdown";
 
 describe("findSection", () => {
@@ -224,5 +226,68 @@ describe("extractRelated", () => {
 
   test("returns [] when frontmatter has no related field", () => {
     expect(extractRelated("---\ntitle: x\n---\nbody\n")).toEqual([]);
+  });
+});
+
+// Story 12.3 — section-root matcher promoted from DocCheck.ts:61-90 / ReferenceCheck.ts:297-326
+// (byte-identical across both). Parity oracle: the output must reproduce the originals char-for-char.
+describe("sectionRoots — `## … (paths under \\`X\\`)` heading-hint parser", () => {
+  test("seeds a default empty root at pos 0 before any heading", () => {
+    expect(sectionRoots("plain body, no headings\n")).toEqual([{ pos: 0, root: "" }]);
+  });
+
+  test("a `(paths under \\`X/\\`)` heading pushes its root at the heading's char offset", () => {
+    const doc = "# Title\n\n## Routing (paths under `PAI/USER/`)\nbody\n";
+    const at = doc.indexOf("## Routing");
+    expect(sectionRoots(doc)).toEqual([
+      { pos: 0, root: "" },
+      { pos: at, root: "PAI/USER/" },
+    ]);
+  });
+
+  test("appends a trailing slash when the hinted root lacks one", () => {
+    const doc = "## Section (paths under `PAI/DOCUMENTATION`)\n";
+    expect(sectionRoots(doc)[1]).toEqual({ pos: 0, root: "PAI/DOCUMENTATION/" });
+  });
+
+  test("a heading with no `paths under` hint pushes an empty root (resets to default)", () => {
+    const doc = "## Alpha (paths under `PAI/`)\nx\n## Beta\ny\n";
+    const beta = doc.indexOf("## Beta");
+    const roots = sectionRoots(doc);
+    expect(roots).toEqual([
+      { pos: 0, root: "" },
+      { pos: doc.indexOf("## Alpha"), root: "PAI/" },
+      { pos: beta, root: "" },
+    ]);
+  });
+
+  test("accumulates char offsets as line.length + 1 (LF)", () => {
+    // Two headings; the second's pos must equal the byte offset of its line start.
+    const doc = "## One (paths under `a/`)\n## Two (paths under `b/`)\n";
+    const roots = sectionRoots(doc);
+    expect(roots[1].pos).toBe(0);
+    expect(roots[2].pos).toBe("## One (paths under `a/`)\n".length);
+  });
+});
+
+describe("sectionRootAt — active root at a char position", () => {
+  const doc = "# Title\n\n## R (paths under `PAI/USER/`)\nrel/path.md\n## Plain\nx\n";
+  const roots = sectionRoots(doc);
+
+  test("returns the default empty root before the first hinted heading", () => {
+    expect(sectionRootAt(roots, 0)).toBe("");
+  });
+
+  test("returns the section root for a position inside the routing section", () => {
+    expect(sectionRootAt(roots, doc.indexOf("rel/path.md"))).toBe("PAI/USER/");
+  });
+
+  test("returns to empty once a non-hinting heading resets the root", () => {
+    expect(sectionRootAt(roots, doc.indexOf("x\n"))).toBe("");
+  });
+
+  test("a position exactly on the heading offset activates that root (pos <= charPos)", () => {
+    const at = doc.indexOf("## R");
+    expect(sectionRootAt(roots, at)).toBe("PAI/USER/");
   });
 });
