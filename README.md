@@ -13,13 +13,15 @@ The same vocabulary, rendered several ways. The runtime boundary **is** the modu
 
 | Slice | Runtime | Produces | Consumed by |
 |-------|---------|----------|-------------|
-| `core` | none (pure) | vocabulary: `cite`, severity, stat, counts, `parseSprint`/`summarize`/bar | everything |
-| `report` | Bun | markdown **string** | loom, sesh-harvest, scripts, functions |
+| `core` | none (pure) | vocabulary: `cite`, severity, stat, counts, `parseSprint`/`summarize`, **`bar`**; plus the extraction kits — `parse`, `text`, `markdown`, `date`, `similarity`, `args`/`dispatch` | everything |
+| `report` | Bun | markdown **string** (`p()`, `--json`, atomic safe-write) | loom, sesh-harvest, scripts, functions |
+| `cli` | Bun | manifest-driven gate dispatcher (`std` on PATH) | zsh-planning, loom |
+| `glab` | Bun | `glab api` wrapper + git-remote-first repo resolution | per-repo Makefiles |
+| `proc`·`git`·`http`·`fsx` | Bun | plumbing edges: `spawnCapture` · `git(repo,args)` · `fetchWithTimeout`/`httpJson` · `walkFiles`/`atomicWrite`/`loadJson` | PAI/Tools rewrites |
 | `cn` | Obsidian (**zDrafts** vault) | **DOM** (JS Engine + CSS tokens, `cn-`) | zDrafts creative notes |
 | `dashkit` | Obsidian (**note-report** vault) | **DOM** (dashboards, `dk-`) | note-report progress dashboards |
-| `glab` | Bun | `glab api` wrapper | per-repo Makefiles |
 
-`core` holds *what a citation / severity / stat / sprint-summary is*. `report`, `cn`, and `dashkit`
+`core` holds *what a citation / severity / stat / sprint-summary / progress-bar is*. `report`, `cn`, and `dashkit`
 are renderers of that same vocabulary — one becomes a string, the other two become live DOM. `cn` and
 `dashkit` are **two vault-pinned Obsidian edges** — sibling slices that never cross, because each is
 tied to a different vault's plugin contract.
@@ -56,12 +58,22 @@ or `workspace:*` (CI), and import nothing back (clean dependency root).
 
 ## Status
 
-- **Slice 0** ✅ scaffold + `core/cite` (the trust primitive) + passing `bun test`.
-- Slice 1 — `glab` (move loom's `glab.ts` logic here, leave a 3-line per-repo wrapper).
-- Slice 2 — `report` primitives (`cite` is the first; add `p`, `statusLine`).
-- Slice 3 — `cn` (zDrafts vault: CSS-snippet tokens + glue over JS Engine / CodeScript).
-- Slice 4 — `dashkit` (note-report vault: dashboards; promotes `core`'s sprint/summary vocabulary,
-  then extracted from the vault into `src/dashkit/`). Sibling of `cn`, never crossing.
+Enforcement harness + `core` + the Bun edges are **live and green** (493 tests, 4 CI gates + typecheck).
+Canonical repo: **github.com/pedroibl/std**; merge on green GitHub Actions gates.
+
+- **Phase 1 ✅** — Epic 1 CI gates (core-purity · dep-root+no-cycle · single-source · no-consumer-ids),
+  Epic 2 `core` vocabulary, Epic 3 `glab`, Epic 4 `std-cli` (manifest-driven dispatcher on PATH).
+- **Phase 2 ✅** — Epic 5 second-caller rollout (the AD-3 promotion: zsh-planning + loom on `std-cli`).
+- **Phase 3 ✅** — Epic 6 `report` (FR7/8/9), **Epic 9 core extraction kit** (`parse`/`text`/`markdown`/
+  `date`/`similarity`), **Epic 10 Bun-edge plumbing** (`core/args`·`proc`·`git`·`http`·`fsx`, AD-9).
+- **Phase 4 ✅** — Epic 11 mutual proof gate (collapsed the harvester clone-pair onto the substrate while
+  grounding the `_CreateStdTool` generator). Survived contact.
+- **Phase 5 (Epic 12, tool sweep) — in progress.** 12.1 backup-harvester pair ✅ · **12.2 ✅** —
+  `core.bar` promoted from 4 re-rolled progress bars + three self-contained CLIs rewritten onto the
+  substrate into `proof/`; the live `~/.claude/PAI/TOOLS/algorithm.ts` swap is deferred to the **AD-9.2**
+  vendored-submodule batch cutover (byte-certified in advance by `proof/algorithm-bar-parity.test.ts`).
+- **Last (Phases 8/9)** — the two Obsidian edges `cn` (zDrafts) and `dashkit` (note-report), siblings that
+  never cross.
 
 Plugin baseline: each Obsidian edge pins **its own** vault's plugin set — `dashkit`'s is
 `note-report/CLAUDE.md` §Plugins (the version SoT, formerly `PLUGINS.md`); `cn`'s lives with the
