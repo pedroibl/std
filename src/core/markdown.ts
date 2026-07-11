@@ -61,6 +61,32 @@ export function extractSection(content: string, heading: string): string | null 
 }
 
 /**
+ * Read the value of an inline `**Label:** value` bold-meta field — the read-half of the
+ * `content.match(/\*\*Field:\*\*\s*(…)/)` idiom re-rolled across the Wisdom/telos tools
+ * (WisdomFrameUpdater `parseObservationCount`, WisdomCrossFrameSynthesizer's three-field parse,
+ * WisdomDomainClassifier, OpinionTracker's `**Confidence:**`). Locates the FIRST `**{label}:**` in
+ * `content` (label matched literally via `escapeRegExp`) and returns the trimmed **remainder of that
+ * line** — the raw string the caller then applies its own typed parse to (`Number(...)`, percent-strip,
+ * first-token). `null` when the label is absent.
+ *
+ * It returns the STRING after the label, not a witness's captured sub-pattern: `getMetaField(·,
+ * "Confidence")` on `**Confidence:** 85%` yields `"85%"`, and the caller strips to `85` if it wants a
+ * number. The value stops at the newline (it never spills into the next line), and a label present with
+ * nothing after it yields `""` (not `null`) — the field exists, its value is empty.
+ *
+ * This is NOT `parseFrontmatter` (that reads a YAML `---` block); this reads inline bold-meta anywhere
+ * in the body. It is a read-only GETTER — the `content.replace(…)` writers that update these same
+ * fields (WisdomFrameUpdater's `incrementObservationCount`/`updateCrystallizedDate`) stay caller-local.
+ * Identity stays in the caller (D4): the label string is an argument, never baked in here.
+ */
+export function getMetaField(content: string, label: string): string | null {
+  // `[^\S\n]*` swallows the horizontal gap after the label without crossing a newline, then `(.*)`
+  // captures to end-of-line (`.` excludes `\n`) — so the value is strictly remainder-of-line.
+  const match = new RegExp(`\\*\\*${escapeRegExp(label)}:\\*\\*[^\\S\\n]*(.*)`).exec(content);
+  return match ? match[1].trim() : null;
+}
+
+/**
  * Splice `text` in at the end of a section (just before the boundary heading), returning the new
  * document. `text` is inserted verbatim — the caller pre-formats it (leading `\n`, list marker, table
  * row, …); this never invents the entry shape. When the section is absent the content is returned
