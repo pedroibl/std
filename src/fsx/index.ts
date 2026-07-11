@@ -36,8 +36,8 @@
 // simplifies state-cleanup. Later tool migrations and bot passes must accept this design constraint.
 //
 // node:fs is allowed here (a Bun edge); it is forbidden only in `core`.
-
 import {
+  existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -156,7 +156,7 @@ export function readIfExists(path: string): string | null {
 }
 
 /**
- * Whether `path` exists (any type — file, directory, or other), via a fail-soft `statSync`. Returns
+ * Whether `path` exists (any type — file, directory, or other), via a fail-soft `existsSync`. Returns
  * `false` for a missing path OR any unstatable one (a broken symlink, an unreadable parent): for an
  * existence probe "can't tell" and "not there" are the same answer. The sibling to {@link statMtime} —
  * the resolution ladders across the estate probe candidate paths dozens of times, and this is the one
@@ -165,12 +165,7 @@ export function readIfExists(path: string): string | null {
  * should `statSync` directly.)
  */
 export function exists(path: string): boolean {
-  try {
-    statSync(path);
-    return true;
-  } catch {
-    return false; // missing / unstatable → treated as absent
-  }
+  return existsSync(path);
 }
 
 /**
