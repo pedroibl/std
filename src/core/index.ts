@@ -2,6 +2,7 @@
 // Both `report` (Bun → markdown string) and `cn` (Obsidian → DOM) build on this.
 
 export { dispatch, flagValue, hasFlag, positional } from "./args";
+export { bar, type BarOpts } from "./bar";
 export { cite } from "./cite";
 export { GLYPH, NO_ACTION, severity, type Severity } from "./severity";
 export { shouldColorize } from "./colorize";
