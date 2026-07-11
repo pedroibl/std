@@ -211,6 +211,10 @@ export function cmdSummary(ctx: Ctx): void {
 }
 
 export function cmdApprove(ctx: Ctx, id: string): void {
+  if (!id) {
+    console.error("Error: Approve command requires an ID.");
+    return;
+  }
   const queue = loadQueue(ctx);
   const idx = queue.findIndex((p) => p.id.startsWith(id) && p.status === "pending");
   if (idx === -1) {
@@ -224,6 +228,14 @@ export function cmdApprove(ctx: Ctx, id: string): void {
 }
 
 export function cmdModify(ctx: Ctx, id: string, newTarget: string): void {
+  if (!id) {
+    console.error("Error: Modify command requires an ID.");
+    return;
+  }
+  if (!newTarget) {
+    console.error("Error: Modify command requires a target.");
+    return;
+  }
   const queue = loadQueue(ctx);
   const idx = queue.findIndex((p) => p.id.startsWith(id) && p.status === "pending");
   if (idx === -1) {
@@ -239,6 +251,10 @@ export function cmdModify(ctx: Ctx, id: string, newTarget: string): void {
 }
 
 export function cmdReject(ctx: Ctx, id: string): void {
+  if (!id) {
+    console.error("Error: Reject command requires an ID.");
+    return;
+  }
   const queue = loadQueue(ctx);
   const idx = queue.findIndex((p) => p.id.startsWith(id) && p.status === "pending");
   if (idx === -1) {
@@ -251,6 +267,10 @@ export function cmdReject(ctx: Ctx, id: string): void {
 }
 
 export function cmdApproveTarget(ctx: Ctx, target: string): void {
+  if (!target) {
+    console.error("Error: Approve-target command requires a target.");
+    return;
+  }
   const queue = loadQueue(ctx);
   const matching = queue.filter((p) => p.proposed_target === target && p.status === "pending");
   if (matching.length === 0) {
@@ -339,17 +359,31 @@ export function main(argv: string[] = process.argv.slice(2), ctx: Ctx = defaultC
         return 0;
       },
       "--approve-target": () => {
-        cmdApproveTarget(ctx, args[args.indexOf("--approve-target") + 1]);
+        const target = args[args.indexOf("--approve-target") + 1];
+        if (!target || target.startsWith("-")) {
+          console.error("Error: --approve-target requires a target parameter.");
+          return 1;
+        }
+        cmdApproveTarget(ctx, target);
         return 0;
       },
       "--approve": () => {
-        cmdApprove(ctx, args[args.indexOf("--approve") + 1]);
+        const id = args[args.indexOf("--approve") + 1];
+        if (!id || id.startsWith("-")) {
+          console.error("Error: --approve requires an id parameter.");
+          return 1;
+        }
+        cmdApprove(ctx, id);
         return 0;
       },
       "--modify": () => {
         const id = args[args.indexOf("--modify") + 1];
         const target = args[args.indexOf("--target") + 1];
-        if (!target) {
+        if (!id || id.startsWith("-")) {
+          console.error("Error: --modify requires an id parameter.");
+          return 1;
+        }
+        if (!target || target.startsWith("-")) {
           console.error("--modify requires --target <new_target>");
           return 1;
         }
@@ -357,7 +391,12 @@ export function main(argv: string[] = process.argv.slice(2), ctx: Ctx = defaultC
         return 0;
       },
       "--reject": () => {
-        cmdReject(ctx, args[args.indexOf("--reject") + 1]);
+        const id = args[args.indexOf("--reject") + 1];
+        if (!id || id.startsWith("-")) {
+          console.error("Error: --reject requires an id parameter.");
+          return 1;
+        }
+        cmdReject(ctx, id);
         return 0;
       },
       "--reset": () => {
