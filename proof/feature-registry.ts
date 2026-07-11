@@ -75,7 +75,9 @@ export function getRegistryPath(project: string, dir = REGISTRY_DIR): string {
 // Corrupt→null is fsx.loadJson's graceful-degrade contract (the original threw on corrupt); every caller
 // already branches on a null registry, so this is a safe convergence, not a behavior regression.
 export function loadRegistry(project: string, dir = REGISTRY_DIR): FeatureRegistry | null {
-  return loadJson<FeatureRegistry | null>(getRegistryPath(project, dir), null);
+  const loaded = loadJson<FeatureRegistry | null>(getRegistryPath(project, dir), null);
+  if (!loaded || !loaded.features) return null;
+  return loaded;
 }
 
 // writeFileSync(JSON.stringify(...,2)) → fsx.saveJson: same content, now ATOMIC + a trailing "\n".

@@ -62,7 +62,9 @@ export function getProgressPath(project: string, dir = PROGRESS_DIR): string {
 
 // existsSync→readFileSync+JSON.parse→null collapses onto fsx.loadJson (missing OR corrupt → null).
 export function loadProgress(project: string, dir = PROGRESS_DIR): SessionProgress | null {
-  return loadJson<SessionProgress | null>(getProgressPath(project, dir), null);
+  const loaded = loadJson<SessionProgress | null>(getProgressPath(project, dir), null);
+  if (!loaded || !loaded.status || !loaded.objectives) return null;
+  return loaded;
 }
 
 // writeFileSync(JSON.stringify(...,2)) → fsx.saveJson: same content, now atomic + trailing "\n".
