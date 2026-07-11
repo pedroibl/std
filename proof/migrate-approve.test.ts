@@ -290,6 +290,17 @@ describe("main dispatch", () => {
     expect(main(["--approve", "mainapp1"], ctx)).toBe(0);
     expect(loadQueue(ctx)).toEqual([]);
   });
+
+  test("valueless CLI flags exit 1", () => {
+    expect(main(["--approve"], ctx)).toBe(1);
+    expect(main(["--approve", "--another-flag"], ctx)).toBe(1);
+    expect(main(["--approve-target"], ctx)).toBe(1);
+    expect(main(["--approve-target", "--another-flag"], ctx)).toBe(1);
+    expect(main(["--reject"], ctx)).toBe(1);
+    expect(main(["--reject", "--another-flag"], ctx)).toBe(1);
+    expect(main(["--modify", "abc"], ctx)).toBe(1);
+    expect(main(["--modify", "abc", "--target", "--another-flag"], ctx)).toBe(1);
+  });
 });
 
 // ─── defaultCtx sanity (no real ~/.claude read) ───
