@@ -66,11 +66,25 @@ import { dirname, join, resolve } from "node:path";
  * file, a missing path, a broken symlink) yields `[]` by the same fail-soft rule — `walkFiles` walks a
  * directory TREE; it does not special-case a file handed in as the root (no consumer needs that, D2).
  * `root` is caller-supplied; no path is baked in.
+ *
+ * **Directory pruning (`opts.prune`):** a subtree whose directory satisfies `prune(dir)` is NOT descended
+ * — the walk never reads its entries. This is a strict superset of the predicate: `pred` filters which
+ * FILES are RETURNED (but every dir is still descended); `prune` stops whole DIRECTORY TREES from being
+ * walked at all. It exists because folding a dir-exclusion into `pred` would keep correctness (excluded
+ * files aren't returned) yet still descend `node_modules`/`.git`/… — a real perf regression on a
+ * full-tree walk. The exclusion LISTS stay in the caller (identity, D4); `prune` is just the mechanism.
+ * `prune` receives the absolute directory path; the root itself is a caller-chosen scan boundary and is
+ * not prune-tested (a caller that wants to exclude the root simply passes a different one).
  */
-export function walkFiles(root: string, pred?: (path: string) => boolean): string[] {
+export function walkFiles(
+  root: string,
+  pred?: (path: string) => boolean,
+  opts?: { prune?: (dir: string) => boolean },
+): string[] {
   const out: string[] = [];
   const stack: string[] = [resolve(root)];
   const visited = new Set<string>();
+  const prune = opts?.prune;
 
   while (stack.length > 0) {
     const dir = stack.pop()!;
@@ -104,7 +118,7 @@ export function walkFiles(root: string, pred?: (path: string) => boolean): strin
         continue; // unstatable entry (e.g. broken symlink) — skip
       }
       if (isDir) {
-        stack.push(full);
+        if (!prune || !prune(full)) stack.push(full); // pruned subtree is never descended
       } else if (isFile && (!pred || pred(full))) {
         out.push(full);
       }
@@ -138,6 +152,24 @@ export function readIfExists(path: string): string | null {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err; // a real read error on an existing file surfaces (fail-loud, FR5)
+  }
+}
+
+/**
+ * Whether `path` exists (any type — file, directory, or other), via a fail-soft `statSync`. Returns
+ * `false` for a missing path OR any unstatable one (a broken symlink, an unreadable parent): for an
+ * existence probe "can't tell" and "not there" are the same answer. The sibling to {@link statMtime} —
+ * the resolution ladders across the estate probe candidate paths dozens of times, and this is the one
+ * tested primitive they collapse onto instead of a raw `existsSync` at each edge. `path` is
+ * caller-supplied; no path is baked in. (A caller that must distinguish a real fs fault from absence
+ * should `statSync` directly.)
+ */
+export function exists(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false; // missing / unstatable → treated as absent
   }
 }
 

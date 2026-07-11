@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 
-import { atomicWrite, ensureDir, loadJson, readIfExists, saveJson, statMtime, walkFiles } from "./index";
+import { atomicWrite, ensureDir, exists, loadJson, readIfExists, saveJson, statMtime, walkFiles } from "./index";
 
 /** Run `fn` against a throwaway temp dir, cleaned up after. */
 function inTmp(fn: (dir: string) => void): void {
@@ -135,6 +135,40 @@ describe("saveJson — atomic, pretty-printed, trailing newline", () => {
   });
 });
 
+describe("exists — fail-soft existence probe (sibling to statMtime)", () => {
+  test("returns true for an existing file", () => {
+    inTmp((dir) => {
+      const path = join(dir, "f.txt");
+      writeFileSync(path, "x");
+      expect(exists(path)).toBe(true);
+    });
+  });
+
+  test("returns true for an existing directory", () => {
+    inTmp((dir) => {
+      expect(exists(dir)).toBe(true);
+    });
+  });
+
+  test("returns false for a missing path", () => {
+    inTmp((dir) => {
+      expect(exists(join(dir, "nope.txt"))).toBe(false);
+    });
+  });
+
+  test("returns false for a broken symlink (unstatable → fail-soft)", () => {
+    inTmp((dir) => {
+      const link = join(dir, "dangling");
+      try {
+        symlinkSync(join(dir, "no-target"), link);
+      } catch {
+        return; // platform can't create symlinks — skip
+      }
+      expect(exists(link)).toBe(false);
+    });
+  });
+});
+
 describe("readIfExists — contents when present, null when absent", () => {
   test("returns contents when the file exists", () => {
     inTmp((dir) => {
@@ -231,6 +265,41 @@ describe("walkFiles — recursive, predicate-filtered, files-not-dirs, cycle-saf
       writeFileSync(join(dir, "file.txt"), "");
       const found = walkFiles(dir);
       expect(found).toEqual([join(dir, "file.txt")]);
+    });
+  });
+
+  test("prune skips a whole subtree — the directory is never descended (Story 12.3 AC4)", () => {
+    inTmp((dir) => {
+      mkdirSync(join(dir, "keep"), { recursive: true });
+      mkdirSync(join(dir, "node_modules", "deep"), { recursive: true });
+      writeFileSync(join(dir, "keep", "a.md"), "");
+      writeFileSync(join(dir, "node_modules", "b.md"), "");
+      writeFileSync(join(dir, "node_modules", "deep", "c.md"), "");
+      const found = walkFiles(dir, undefined, {
+        prune: (d) => d.split("/").pop() === "node_modules",
+      }).sort();
+      expect(found).toEqual([join(dir, "keep", "a.md")]);
+    });
+  });
+
+  test("prune composes with the file predicate", () => {
+    inTmp((dir) => {
+      mkdirSync(join(dir, "skipme"), { recursive: true });
+      writeFileSync(join(dir, "keep.md"), "");
+      writeFileSync(join(dir, "keep.txt"), "");
+      writeFileSync(join(dir, "skipme", "x.md"), "");
+      const found = walkFiles(dir, (p) => p.endsWith(".md"), {
+        prune: (d) => d.endsWith("/skipme"),
+      });
+      expect(found).toEqual([join(dir, "keep.md")]);
+    });
+  });
+
+  test("no prune (opts omitted) descends everything, as before", () => {
+    inTmp((dir) => {
+      mkdirSync(join(dir, "sub"), { recursive: true });
+      writeFileSync(join(dir, "sub", "x.md"), "");
+      expect(walkFiles(dir)).toEqual([join(dir, "sub", "x.md")]);
     });
   });
 
