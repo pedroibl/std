@@ -64,7 +64,7 @@ or `workspace:*` (CI), and import nothing back (clean dependency root).
 
 ## Status
 
-Enforcement harness + `core` + the Bun edges are **live and green** (518 tests on `main`, 4 CI gates + typecheck).
+Enforcement harness + `core` + the Bun edges are **live and green** (759 tests on `main`, 4 CI gates + typecheck).
 Canonical repo: **github.com/pedroibl/std**; merge on green GitHub Actions gates.
 
 - **Phase 1 ✅** — Epic 1 CI gates (core-purity · dep-root+no-cycle · single-source · no-consumer-ids),
@@ -79,9 +79,9 @@ Canonical repo: **github.com/pedroibl/std**; merge on green GitHub Actions gates
   substrate into `proof/`; the live `~/.claude/PAI/TOOLS/algorithm.ts` swap is deferred to the **AD-9.2**
   vendored-submodule batch cutover (byte-certified in advance by `proof/algorithm-bar-parity.test.ts`).
   **12.3 ✅** — `DocCheck`/`ReferenceCheck` collapsed onto ONE injected-config engine in `proof/` +
-  `core.sectionRoots`/`sectionRootAt` + `fsx.exists` + `walkFiles` `opts.prune` promoted (PR #35). **12.4 —
-  in review** — `core.getMetaField` promoted + the 12 telos/wisdom/DA/migrate tools rewritten onto the
-  substrate in `proof/` (759 tests on the branch); the `core.bar` FR21 promotion is now complete (last 2 of
+  `core.sectionRoots`/`sectionRootAt` + `fsx.exists` + `walkFiles` `opts.prune` promoted (PR #35). **12.4 ✅**
+  (PR #37) — `core.getMetaField` promoted + the 12 telos/wisdom/DA/migrate tools rewritten onto the
+  substrate in `proof/`; the `core.bar` FR21 promotion is now complete (last 2 of
   4 sites byte-certified by `proof/telos-bar-parity.test.ts`).
 - **Last (Phases 8/9)** — the two Obsidian edges `cn` (zDrafts) and `dashkit` (note-report), siblings that
   never cross.
