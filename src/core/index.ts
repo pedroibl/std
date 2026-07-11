@@ -27,6 +27,7 @@ export {
   extractSection,
   extractWikilinks,
   findSection,
+  getMetaField,
   insertInSection,
   type Related,
   type SectionBounds,

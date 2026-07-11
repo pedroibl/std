@@ -6,6 +6,7 @@ import {
   extractSection,
   extractWikilinks,
   findSection,
+  getMetaField,
   insertInSection,
   sectionRootAt,
   sectionRoots,
@@ -289,5 +290,49 @@ describe("sectionRootAt — active root at a char position", () => {
   test("a position exactly on the heading offset activates that root (pos <= charPos)", () => {
     const at = doc.indexOf("## R");
     expect(sectionRootAt(roots, at)).toBe("PAI/USER/");
+  });
+});
+
+describe("getMetaField — the `**Label:** value` bold-meta getter (Story 12.4)", () => {
+  const frame =
+    "# Trust\n\n**Confidence:** 85%\n**Observation Count:** 42\n**Last Crystallized:** 2026-07-01\n\n## Body\n";
+
+  test("present field → the remainder-of-line string", () => {
+    expect(getMetaField(frame, "Confidence")).toBe("85%");
+    expect(getMetaField(frame, "Observation Count")).toBe("42");
+    expect(getMetaField(frame, "Last Crystallized")).toBe("2026-07-01");
+  });
+
+  test("absent field → null", () => {
+    expect(getMetaField(frame, "Nonexistent")).toBeNull();
+    expect(getMetaField("", "Confidence")).toBeNull();
+  });
+
+  test("label with regex metacharacters is matched literally", () => {
+    const doc = "**Score (0-1):** 0.9\n";
+    expect(getMetaField(doc, "Score (0-1)")).toBe("0.9");
+  });
+
+  test("first of many wins", () => {
+    const doc = "**Confidence:** 10%\n**Confidence:** 90%\n";
+    expect(getMetaField(doc, "Confidence")).toBe("10%");
+  });
+
+  test("remainder is trimmed of surrounding whitespace", () => {
+    expect(getMetaField("**Confidence:**    0.85   \n", "Confidence")).toBe("0.85");
+  });
+
+  test("remainder stops at the newline (does not spill into the next line)", () => {
+    const doc = "**Confidence:** 0.5\n**Observation Count:** 7\n";
+    expect(getMetaField(doc, "Confidence")).toBe("0.5");
+  });
+
+  test("empty value (label present, nothing after) → empty string, not null", () => {
+    expect(getMetaField("**Confidence:**\n", "Confidence")).toBe("");
+  });
+
+  test("caller keeps its typed parse — Number() on the returned string", () => {
+    const raw = getMetaField(frame, "Observation Count");
+    expect(Number.parseInt(raw ?? "", 10)).toBe(42);
   });
 });
