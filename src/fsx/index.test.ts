@@ -402,6 +402,15 @@ describe("resolveFrameworkDir — two-axis probe, fail-soft to the preferred def
       expect(resolveFrameworkDir(dir, ["custom-home"])).toBe(join(dir, "custom-home", "LIFEOS"));
     });
   });
+
+  test("empty candidate lists do NOT throw — fall back to the safe .claude/LIFEOS defaults (PR #40 nit)", () => {
+    inTmp((dir) => {
+      // With no candidates the resolver must still honor its "never throws" contract, resolving to the
+      // structural defaults rather than crashing on a non-null assertion over an empty array.
+      expect(() => resolveFrameworkDir(dir, [], [])).not.toThrow();
+      expect(resolveFrameworkDir(dir, [], [])).toBe(join(dir, ".claude", "LIFEOS"));
+    });
+  });
 });
 
 describe("fail-loud contract (FR5) — the loud half of Decision 2", () => {

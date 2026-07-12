@@ -266,9 +266,9 @@ export function resolveFrameworkDir(
   frameworkDirs: string[] = ["LIFEOS", "PAI"],
 ): string {
   const claudeHome =
-    claudeHomes.map((ch) => join(home, ch)).find(existsSync) ?? join(home, claudeHomes[0]!);
+    claudeHomes.map((ch) => join(home, ch)).find(existsSync) ?? join(home, claudeHomes[0] ?? ".claude");
   return (
     frameworkDirs.map((fd) => join(claudeHome, fd)).find(existsSync) ??
-    join(claudeHome, frameworkDirs[0]!)
+    join(claudeHome, frameworkDirs[0] ?? "LIFEOS")
   );
 }
