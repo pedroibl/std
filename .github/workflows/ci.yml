@@ -46,6 +46,11 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      # Gate 3b — proof/ typecheck (the not-yet-live PAI-tool rewrites). Manual-only since Epic 12
+      # (open Q3); wired here per the Epic-16 retro so proof/ type-regressions can't ship silently.
+      - name: Typecheck proof
+        run: bun run typecheck:proof
+
       # Gate 4 — core is runtime-neutral: no node:*/fs/DOM/network, no process/document (D1/NFR1/CM3).
       - name: Core purity
         run: bun run check:core-purity
