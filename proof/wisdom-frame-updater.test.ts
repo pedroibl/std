@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -287,5 +287,57 @@ describe("main() CLI", () => {
 describe("defaultFramesDir", () => {
   test("resolves under the given base", () => {
     expect(defaultFramesDir("/x/.claude")).toBe(join("/x/.claude", "MEMORY", "WISDOM", "FRAMES"));
+  });
+});
+
+describe("RT-2 framework-dir resolution (AD-9.3)", () => {
+  // ambient shell may export a real PAI_DIR — control LIFEOS_DIR+PAI_DIR+HOME explicitly and restore.
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME"] as const;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test("LIFEOS_DIR wins over PAI_DIR", () => {
+    process.env.LIFEOS_DIR = "/life";
+    process.env.PAI_DIR = "/pai";
+    expect(defaultFramesDir()).toBe(join("/life", "MEMORY", "WISDOM", "FRAMES"));
+  });
+
+  test("PAI_DIR honored when LIFEOS_DIR unset", () => {
+    delete process.env.LIFEOS_DIR;
+    process.env.PAI_DIR = "/pai";
+    expect(defaultFramesDir()).toBe(join("/pai", "MEMORY", "WISDOM", "FRAMES"));
+  });
+
+  test("neither env set → resolver falls back to LIFEOS under a fresh temp home", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    const home = mkdtempSync(join(tmpdir(), "rt2-"));
+    process.env.HOME = home;
+    try {
+      expect(defaultFramesDir()).toBe(join(home, ".claude", "LIFEOS", "MEMORY", "WISDOM", "FRAMES"));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy PAI tree present → resolver picks PAI", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    const home = mkdtempSync(join(tmpdir(), "rt2-"));
+    mkdirSync(join(home, ".claude", "PAI"), { recursive: true });
+    process.env.HOME = home;
+    try {
+      expect(defaultFramesDir()).toBe(join(home, ".claude", "PAI", "MEMORY", "WISDOM", "FRAMES"));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

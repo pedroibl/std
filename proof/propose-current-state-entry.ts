@@ -32,7 +32,7 @@ import { appendFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { flagValue, hasFlag } from "std/core";
-import { ensureDir } from "std/fsx";
+import { ensureDir, resolveFrameworkDir } from "std/fsx";
 
 // ─── Caller-local identity (D4) — injected via ProposeConfig; never crosses into src/** ───
 
@@ -64,7 +64,7 @@ export interface ProposeConfig {
 /** The live edge config (reads env identity). Tests build their own hermetic config instead. */
 export function defaultConfig(): ProposeConfig {
   const HOME = process.env.HOME || "";
-  const PAI_DIR = process.env.PAI_DIR || join(HOME, ".claude", "PAI");
+  const PAI_DIR = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(HOME);
   return {
     queueFile: join(PAI_DIR, "USER", "TELOS", "CURRENT_STATE", "proposals.jsonl"),
     allowedSources: ALLOWED_SOURCES,

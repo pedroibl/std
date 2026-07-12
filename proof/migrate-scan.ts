@@ -29,14 +29,14 @@ import { readFileSync, existsSync, statSync, appendFileSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { scoreRules, chunkContent, truncate, collapse, flagValue, hasFlag, type ScoreRule } from "std/core";
-import { walkFiles, ensureDir } from "std/fsx";
+import { walkFiles, ensureDir, resolveFrameworkDir } from "std/fsx";
 import { emitJson } from "std/report";
 
 // ─── Edge identity (D4): MIGRATION queue path, injected/overridable at the edge ───
 
 function defaultQueueFile(): string {
   const HOME = process.env.HOME || "";
-  const PAI_DIR = process.env.PAI_DIR || join(HOME, ".claude", "PAI");
+  const PAI_DIR = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(HOME);
   return join(PAI_DIR, "MEMORY", "MIGRATION", "migration-proposals.jsonl");
 }
 

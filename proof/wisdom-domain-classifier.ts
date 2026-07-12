@@ -24,7 +24,7 @@
  */
 
 import { flagValue, hasFlag, getMetaField } from "std/core";
-import { walkFiles, exists } from "std/fsx";
+import { walkFiles, exists, resolveFrameworkDir } from "std/fsx";
 import { emitJson, log } from "std/report";
 import { readFileSync } from "node:fs";
 import { join, basename } from "node:path";
@@ -35,7 +35,7 @@ import { join, basename } from "node:path";
 export function defaultFramesDir(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  const baseDir = env.PAI_DIR || join(env.HOME ?? "", ".claude");
+  const baseDir = env.LIFEOS_DIR || env.PAI_DIR || resolveFrameworkDir(env.HOME ?? "");
   return join(baseDir, "MEMORY", "WISDOM", "FRAMES");
 }
 

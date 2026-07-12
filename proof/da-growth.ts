@@ -5,7 +5,8 @@
  * and a summary for the primary DA. Behavior preserved to the byte; re-rolled fs/arg/date/text
  * plumbing now imports tested std primitives.
  *
- * Kept caller-local (D4): the `~/.claude/PAI` path roots, the `America/Los_Angeles` timezone, the
+ * Kept caller-local (D4): the `~/.claude/PAI` path roots, the `Australia/Melbourne` timezone (Pedro is
+ * in Melbourne, AU — NOT the PAI template's `America/Los_Angeles`), the
  * `primary:` registry regex, the opinions.yaml `- topic:` block parse + per-key `get()`, the mood
  * icon map, the diary/growth aggregation, and every column layout string. Paths, `now`, and `tz` are
  * injected at the edge so the tests are hermetic.
@@ -20,14 +21,14 @@
 
 import { join } from "path"
 import { bar, dispatch, dateParts, flagValue, parseNdjson, truncate } from "std/core"
-import { readIfExists } from "std/fsx"
+import { readIfExists, resolveFrameworkDir } from "std/fsx"
 
 // ── Caller-local identity (D4) ──
 
 const HOME = process.env.HOME ?? "~"
-const PAI = join(HOME, ".claude", "PAI")
+const PAI = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(HOME)
 const REGISTRY_PATH = join(PAI, "USER", "DA", "_registry.yaml")
-const TZ = "America/Los_Angeles"
+const TZ = "Australia/Melbourne"
 
 // ── Types ──
 
@@ -51,7 +52,7 @@ interface GrowthEvent {
 
 export function parsePrimaryDA(content: string): string {
   const match = content.match(/^primary:\s*(\S+)/m)
-  return match?.[1] ?? "kai"
+  return match?.[1] ?? "tome"
 }
 
 /** Load a JSONL file, skipping malformed lines. Missing file → []. */

@@ -35,7 +35,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { extractJson, flagValue } from "std/core";
-import { readIfExists } from "std/fsx";
+import { readIfExists, resolveFrameworkDir } from "std/fsx";
 import { spawnCapture } from "std/proc";
 import { appendAudit } from "std/report";
 
@@ -44,7 +44,7 @@ import { appendAudit } from "std/report";
 // only backs it up when HOME is unset, which is the same value on any real machine, so no live-tool
 // behavior changes.
 const HOME = process.env.HOME || homedir();
-const PAI_DIR = join(HOME, ".claude", "PAI");
+const PAI_DIR = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(HOME);
 const WORK_DIR = join(PAI_DIR, "MEMORY", "WORK");
 const FINDINGS_LOG = join(PAI_DIR, "MEMORY", "VERIFICATION", "cato-findings.jsonl");
 const TOOL_ACTIVITY_LOG = join(PAI_DIR, "MEMORY", "OBSERVABILITY", "tool-activity.jsonl");

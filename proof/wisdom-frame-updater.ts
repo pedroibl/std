@@ -20,7 +20,7 @@
 
 import { join } from "node:path";
 import { findSection, flagValue, getMetaField, hasFlag, insertInSection, isoDate } from "std/core";
-import { atomicWrite, readIfExists } from "std/fsx";
+import { atomicWrite, readIfExists, resolveFrameworkDir } from "std/fsx";
 import { emitJson } from "std/report";
 
 // ── Types ──
@@ -39,7 +39,7 @@ export interface UpdateResult {
 
 /** Resolve the default frames root the way the live tool does (`$PAI_DIR` or `~/.claude`). */
 export function defaultFramesDir(
-  base: string = process.env.PAI_DIR || join(process.env.HOME || "", ".claude"),
+  base: string = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(process.env.HOME || ""),
 ): string {
   return join(base, "MEMORY", "WISDOM", "FRAMES");
 }

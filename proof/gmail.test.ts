@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { resolveFrameworkDir } from "std/fsx";
 
 import { _resetTokenCacheForTests, accessToken, archiveBatch, countQuery, gmail } from "./gmail";
 
@@ -138,5 +139,78 @@ describe("gmail() — THE decision: fetchWithTimeout + edge parse, not httpJson"
     await countQuery("in:inbox");
     await countQuery("in:inbox");
     expect(tokenRequests).toBe(1);
+  });
+});
+
+describe("RT-2 framework-dir resolution (AD-9.3)", () => {
+  // credsPath() is NOT exported — it is observed through creds()/accessToken(), which throws
+  // "missing or invalid credentials file: <resolved path>" when the file is absent. That throw
+  // happens INSIDE creds() (before accessToken's fetch), so no network is touched.
+  //
+  // NOTE: gmail resolves its default root via node:os `homedir()`, and Bun's `homedir()` IGNORES
+  // process.env.HOME (verified empirically), so a temp home cannot be forced here. The resolver
+  // FALLBACK itself (fresh → LIFEOS, legacy → PAI) is proven hermetically by the sibling
+  // checkpoint/inference RT-2 blocks + src/fsx/index.test.ts. Here we prove (a) the override env
+  // wins, (b) its leading $HOME is expanded, and (c) the default root delegates to
+  // resolveFrameworkDir at the exact framework subpath — the last computed from the SAME resolver
+  // the tool uses, so it is machine-independent.
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME", "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] as const;
+  let savedEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+    // Explicitly neutralize any ambient live-PAI env — the resolver reads none of these, but the
+    // story mandates every test control them so nothing can leak in.
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    _resetTokenCacheForTests();
+  });
+
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+    _resetTokenCacheForTests();
+  });
+
+  // accessToken() → creds() → loadJson(credsPath()) throws with credsPath() in the message when the
+  // file is missing/invalid. Returns that message. No network — the throw precedes accessToken's fetch.
+  async function credsPathViaThrow(): Promise<string> {
+    try {
+      await accessToken();
+      throw new Error("expected accessToken() to throw on a missing creds file");
+    } catch (err) {
+      return (err as Error).message;
+    }
+  }
+
+  test("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE override wins over the resolver", async () => {
+    const override = join(mkdtempSync(join(tmpdir(), "rt2-gmail-")), "nonexistent-creds.json");
+    process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = override;
+    _resetTokenCacheForTests();
+    const msg = await credsPathViaThrow();
+    expect(msg).toContain(override);
+  });
+
+  test("the override's leading $HOME is expanded to homedir()", async () => {
+    process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = "$HOME/rt2-nonexistent-xyz/creds.json";
+    _resetTokenCacheForTests();
+    const msg = await credsPathViaThrow();
+    expect(msg).toContain(join(homedir(), "rt2-nonexistent-xyz", "creds.json"));
+  });
+
+  test("default root (no override) delegates to resolveFrameworkDir at USER/CREDENTIALS/google/credentials.json", async () => {
+    delete process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
+    _resetTokenCacheForTests();
+    // Computed from the same resolver the tool uses → machine-independent (whichever framework dir
+    // exists under the real home, both sides agree).
+    const expected = join(resolveFrameworkDir(homedir()), "USER/CREDENTIALS/google/credentials.json");
+    // Guarded so a real creds file (if ever present at that path) never triggers a token exchange;
+    // it is absent on this machine and on CI runners, so creds() throws with `expected` inside.
+    if (!existsSync(expected)) {
+      const msg = await credsPathViaThrow();
+      expect(msg).toContain(expected);
+    }
   });
 });

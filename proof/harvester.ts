@@ -62,7 +62,7 @@
  */
 
 import { charOverlap, flagValue, hasFlag, parseNdjson } from "std/core";
-import { ensureDir, saveJson, walkFiles } from "std/fsx";
+import { ensureDir, resolveFrameworkDir, saveJson, walkFiles } from "std/fsx";
 import { writeIfAbsent } from "std/report";
 
 // PAI domain helper — the one real shared edge dependency, stays in the tool (D4).
@@ -89,11 +89,13 @@ export interface Roots {
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function defaultRoots(): Roots {
-  const claudeDir = join(process.env.HOME ?? homedir(), ".claude");
+  const frameworkDir =
+    process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(process.env.HOME ?? homedir());
+  const claudeDir = dirname(frameworkDir);
   return {
     projectsRoot: process.env.CLAUDE_PROJECTS_ROOT ?? join(claudeDir, "projects"),
-    learningDir: join(claudeDir, "PAI", "MEMORY", "LEARNING"),
-    queueDir: join(claudeDir, "PAI", "MEMORY", "KNOWLEDGE", "_harvest-queue"),
+    learningDir: join(frameworkDir, "MEMORY", "LEARNING"),
+    queueDir: join(frameworkDir, "MEMORY", "KNOWLEDGE", "_harvest-queue"),
   };
 }
 

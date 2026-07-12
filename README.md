@@ -33,6 +33,14 @@ tied to a different vault's plugin contract.
 - **Tests first.** Every primitive ships with a `*.test.ts` beside it. Run `bun test`.
 - **A module only exists when a 2nd caller needs it.** Until then it's a function in a file.
 - **Pure core, side-effects at the edge** — `core` never touches the filesystem, DOM, or network.
+- **Caller-local identity is Pedro's, not the PAI template's (D4).** The `proof/` PAI-tool rewrites carry
+  personal config as caller-local identity (never in `src/`). Those defaults are set to **Pedro's actual
+  data**, not the upstream PAI template placeholders: timezone is **`Australia/Melbourne`** (Pedro is in
+  Melbourne, AU — not `America/Los_Angeles`); the primary DA defaults to **`tome`** (the real
+  `~/.claude/PAI/USER/DA/tome` — not `kai`); units are metric (°C, km, m). Fixed 2026-07-12 in
+  `proof/da-growth.ts` (`TZ`, `parsePrimaryDA` fallback) and `proof/arthur.ts` (time-window `defaultTz`).
+  The **live** `~/.claude/PAI/TOOLS/*` copies may still carry the template defaults — correct them during
+  the AD-9.2 cutover.
 
 ## Usage
 

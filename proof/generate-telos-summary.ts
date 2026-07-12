@@ -28,7 +28,7 @@
 
 import { join } from "node:path";
 import { truncate } from "std/core";
-import { atomicWrite, readIfExists } from "std/fsx";
+import { atomicWrite, readIfExists, resolveFrameworkDir } from "std/fsx";
 
 interface ParsedItem {
   id: string;
@@ -276,7 +276,7 @@ export function generate(telosDir: string, now: Date): string {
 
 /** Default TELOS dir from $HOME (identity edge — D4). */
 export function telosDir(home = process.env.HOME || ""): string {
-  return join(home, ".claude/PAI/USER/TELOS");
+  return join(resolveFrameworkDir(home), "USER/TELOS");
 }
 
 export function main(argv: string[] = process.argv.slice(2)): number {

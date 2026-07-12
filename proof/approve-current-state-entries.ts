@@ -19,7 +19,7 @@
  * and the `{{PRINCIPAL_NAME}}` doctrine reference.
  */
 import { dispatch, hasFlag, parseNdjson } from "std/core";
-import { atomicWrite, exists, readIfExists } from "std/fsx";
+import { atomicWrite, exists, readIfExists, resolveFrameworkDir } from "std/fsx";
 import { join } from "node:path";
 
 // ─── Identity / paths — caller-local (D4), injected for hermetic tests ───
@@ -27,7 +27,7 @@ export type Paths = { queueFile: string; currentStateDir: string };
 
 export function defaultPaths(): Paths {
   const HOME = process.env.HOME || "";
-  const PAI_DIR = process.env.PAI_DIR || join(HOME, ".claude", "PAI");
+  const PAI_DIR = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(HOME);
   const currentStateDir = join(PAI_DIR, "USER", "TELOS", "CURRENT_STATE");
   return {
     queueFile: join(currentStateDir, "proposals.jsonl"),

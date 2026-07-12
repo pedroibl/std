@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -231,8 +231,32 @@ describe("parse edge cases (caller-local domain parse preserved)", () => {
   });
 });
 
-describe("telosDir — identity edge resolves under the injected HOME", () => {
-  test("joins HOME/.claude/PAI/USER/TELOS", () => {
-    expect(telosDir("/home/x")).toBe("/home/x/.claude/PAI/USER/TELOS");
+describe("telosDir — resolves the framework dir under the injected HOME (RT-2, AD-9.3)", () => {
+  // Category 4: no framework-root env — telosDir resolves purely via resolveFrameworkDir(home).
+  test("fresh tree → LIFEOS default (the new name)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "telos-rt2-"));
+    try {
+      expect(telosDir(dir)).toBe(join(dir, ".claude", "LIFEOS", "USER", "TELOS"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  test("legacy PAI tree present → resolves under PAI (transition window)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "telos-rt2-"));
+    mkdirSync(join(dir, ".claude", "PAI"), { recursive: true });
+    try {
+      expect(telosDir(dir)).toBe(join(dir, ".claude", "PAI", "USER", "TELOS"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  test("LIFEOS tree present → resolves under LIFEOS", () => {
+    const dir = mkdtempSync(join(tmpdir(), "telos-rt2-"));
+    mkdirSync(join(dir, ".claude", "LIFEOS"), { recursive: true });
+    try {
+      expect(telosDir(dir)).toBe(join(dir, ".claude", "LIFEOS", "USER", "TELOS"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

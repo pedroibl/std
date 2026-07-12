@@ -38,16 +38,17 @@
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { flagValue, hasFlag, positional } from "std/core";
 import { fetchWithTimeout, httpJson } from "std/http";
-import { loadJson } from "std/fsx";
+import { loadJson, resolveFrameworkDir } from "std/fsx";
 
 // ─── Caller-local identity (D4): creds path/env, OAuth + API base URLs, INBOX label ─────────────────
 
 function credsPath(): string {
   return (
     process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE?.replace(/^\$HOME/, homedir()) ??
-    `${homedir()}/.claude/PAI/USER/CREDENTIALS/google/credentials.json`
+    join(resolveFrameworkDir(homedir()), "USER/CREDENTIALS/google/credentials.json")
   );
 }
 

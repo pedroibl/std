@@ -4,8 +4,11 @@ import {
   parseLearning,
   eventOf,
 } from "./harvest-backup-positive";
-import { dateFromLabel } from "./backup-harvest-common";
+import { dateFromLabel, discoverBackupSources } from "./backup-harvest-common";
 import { contentHash } from "std/core";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Historical posHash implementation to verify stability
 function historicalPosHash(text: string): string {
@@ -65,4 +68,25 @@ describe("harvest-backup-positive Unit Tests", () => {
       expect(stdHash).toBe(hist);
     }
   });
+});
+
+// Category 6 (RT-2, AD-9.3, AC7): a backup archive taken AFTER the LifeOS rename carries a `LIFEOS/…`
+// (or `.claude/LIFEOS/…`) LEARNING layout. The dual-root walk gained LIFEOS branches so those archives are
+// still discovered — a half-rename of the backup path would silently skip LifeOS backups. Assert all four
+// layouts (LIFEOS + legacy PAI, each at the two claude-home depths) are discovered.
+describe("RT-2 backup layout — LifeOS archives are discovered (AC7)", () => {
+  for (const layout of ["LIFEOS", join(".claude", "LIFEOS"), "PAI", join(".claude", "PAI")]) {
+    test(`discovers a ${layout}/MEMORY/LEARNING archive`, () => {
+      const backupsDir = mkdtempSync(join(tmpdir(), "bk-rt2-"));
+      const learningDir = join(backupsDir, "Backup-2026-07-12", layout, "MEMORY", "LEARNING");
+      mkdirSync(learningDir, { recursive: true });
+      writeFileSync(join(learningDir, "note.md"), "# a learning\n");
+      try {
+        const { sources } = discoverBackupSources(backupsDir, false, join(backupsDir, "_out"), true);
+        expect(sources.map((s) => s.label)).toContain("Backup-2026-07-12");
+      } finally {
+        rmSync(backupsDir, { recursive: true, force: true });
+      }
+    });
+  }
 });

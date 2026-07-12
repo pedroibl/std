@@ -22,7 +22,7 @@
 
 import { join } from "path";
 import { daysSince, extractSection, flagValue, hasFlag } from "std/core";
-import { readIfExists } from "std/fsx";
+import { readIfExists, resolveFrameworkDir } from "std/fsx";
 import { emitJson } from "std/report";
 
 // ── Caller-local identity (D4): path roots ──────────────────────────────────
@@ -30,7 +30,7 @@ export type Roots = { telosDir: string; currentDir: string };
 
 export function defaultRoots(): Roots {
   const HOME = process.env.HOME || "";
-  const PAI_DIR = process.env.PAI_DIR || join(HOME, ".claude", "PAI");
+  const PAI_DIR = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(HOME);
   const telosDir = join(PAI_DIR, "USER", "TELOS");
   return { telosDir, currentDir: join(telosDir, "CURRENT_STATE") };
 }

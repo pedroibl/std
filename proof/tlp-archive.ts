@@ -49,7 +49,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isoDate, positional } from "std/core";
-import { atomicWrite, ensureDir, readIfExists } from "std/fsx";
+import { atomicWrite, ensureDir, readIfExists, resolveFrameworkDir } from "std/fsx";
 import { fetchWithTimeout } from "std/http";
 
 // ─── Caller-local config (D4) — every path/URL is overridable so tests never hit the real network or /tmp ───
@@ -68,7 +68,7 @@ export function defaultConfig(): TlpConfig {
   const blogBaseUrl = process.env.TLP_BASE_URL ?? "https://thelastpsychiatrist.com";
   const stateDir = process.env.TLP_STATE_DIR ?? "/tmp";
   return {
-    knowledgeDir: process.env.TLP_KNOWLEDGE_DIR ?? join(HOME, ".claude/PAI/MEMORY/KNOWLEDGE/Blogs"),
+    knowledgeDir: process.env.TLP_KNOWLEDGE_DIR ?? join(resolveFrameworkDir(HOME), "MEMORY/KNOWLEDGE/Blogs"),
     urlFile: join(stateDir, "tlp-urls.txt"),
     failedFile: join(stateDir, "tlp-failed.txt"),
     successFile: join(stateDir, "tlp-success.txt"),

@@ -9,8 +9,8 @@
 // (FAKE_CODEX_OUTPUT / FAKE_CODEX_EXIT / FAKE_CODEX_SLEEP_SEC) that `spawnCapture` forwards by
 // inheritance (this tool never passes `opts.env`, so the child sees the full parent env).
 
-import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -36,6 +36,11 @@ writeFakeCodex();
 process.env.HOME = FAKE_HOME;
 process.env.CATO_CODEX_BIN = FAKE_CODEX;
 process.env.CATO_CODEX_TIMEOUT_MS = "400"; // short — the sleep test only waits ~400ms, not 120s
+// RT-2 (AD-9.3): the module now resolves its framework dir via `LIFEOS_DIR || PAI_DIR || resolveFrameworkDir(HOME)`.
+// The ambient shell may export a real PAI_DIR (live PAI), which would leak past the HOME seam, so pin the
+// framework dir explicitly at the fixture and clear LIFEOS_DIR — this keeps the PAI_DIR const below authoritative.
+delete process.env.LIFEOS_DIR;
+process.env.PAI_DIR = join(FAKE_HOME, ".claude", "PAI");
 
 const {
   parseArgs,
@@ -285,5 +290,58 @@ describe("main — exit codes", () => {
     expect(parsed.slug).toBe(slug);
     expect(parsed.cato_verdict).toBe("pass");
     expect(parsed.agrees_with_advisor).toBe("yes");
+  });
+});
+
+// Category 2 (RT-2, AD-9.3): PAI_DIR = LIFEOS_DIR || PAI_DIR || resolveFrameworkDir(HOME); the findings log
+// hangs off <PAI_DIR>/MEMORY/VERIFICATION/. PAI_DIR is a module const — re-import under a controlled env
+// (unique query busts Bun's cache) and observe where appendFinding writes cato-findings.jsonl.
+let rt2Seq = 0;
+describe("RT-2 framework-dir resolution — findings-log root (cato)", () => {
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME"] as const;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  async function writeFindingUnderEnv(): Promise<typeof import("./cross-vendor-audit")> {
+    const mod = await import(`./cross-vendor-audit?rt2=${rt2Seq++}`);
+    mod.appendFinding("rt2-slug", "advisor said pass", { verdict: "pass", findings: [] }, "E4");
+    return mod;
+  }
+  const findingsAt = (root: string) => join(root, "MEMORY", "VERIFICATION", "cato-findings.jsonl");
+
+  test("LIFEOS_DIR wins over PAI_DIR", async () => {
+    const life = mkdtempSync(join(tmpdir(), "cato-life-"));
+    const pai = mkdtempSync(join(tmpdir(), "cato-pai-"));
+    process.env.LIFEOS_DIR = life;
+    process.env.PAI_DIR = pai;
+    try {
+      await writeFindingUnderEnv();
+      expect(existsSync(findingsAt(life))).toBe(true);
+      expect(existsSync(findingsAt(pai))).toBe(false);
+    } finally {
+      rmSync(life, { recursive: true, force: true });
+      rmSync(pai, { recursive: true, force: true });
+    }
+  });
+
+  test("neither env set → resolver writes under .claude/LIFEOS of a fresh HOME", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cato-home-rt2-"));
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    process.env.HOME = home;
+    try {
+      await writeFindingUnderEnv();
+      expect(existsSync(findingsAt(join(home, ".claude", "LIFEOS")))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

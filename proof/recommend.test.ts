@@ -1,9 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { type Roots, loadCandidates, main, rank } from "./recommend";
+import { type Roots, defaultRoots, loadCandidates, main, rank } from "./recommend";
 
 // ── Hermetic TELOS fixture: 6 rankable restaurants + 1 blocklisted, one with a tracked visit. ──
 // A fixed `now` is injected everywhere so days_since is deterministic (no wall-clock reads).
@@ -206,5 +206,59 @@ describe("main — argument guards", () => {
 
   test("invalid category returns exit 1", () => {
     expect(main(["--category", "wine"], NOW)).toBe(1);
+  });
+});
+
+describe("RT-2 framework-dir resolution (AD-9.3)", () => {
+  // NOTE: the ambient shell may export a real PAI_DIR (live PAI). Every test MUST control
+  // LIFEOS_DIR + PAI_DIR + HOME explicitly and restore them, or the ambient env leaks in.
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME"] as const;
+  const SUB = ["USER", "TELOS"] as const;
+  let savedEnv: Record<string, string | undefined>;
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  test("LIFEOS_DIR wins over PAI_DIR", () => {
+    process.env.LIFEOS_DIR = "/life";
+    process.env.PAI_DIR = "/pai";
+    expect(defaultRoots().telosDir).toBe(join("/life", ...SUB));
+  });
+
+  test("PAI_DIR honored when LIFEOS_DIR unset (transition window)", () => {
+    delete process.env.LIFEOS_DIR;
+    process.env.PAI_DIR = "/pai";
+    expect(defaultRoots().telosDir).toBe(join("/pai", ...SUB));
+  });
+
+  test("neither env set → resolver falls back to LIFEOS under a fresh temp home", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    const home = mkdtempSync(join(tmpdir(), "rt2-"));
+    process.env.HOME = home;
+    try {
+      expect(defaultRoots().telosDir).toBe(join(home, ".claude", "LIFEOS", ...SUB));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy PAI tree present → resolver picks PAI", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    const home = mkdtempSync(join(tmpdir(), "rt2-"));
+    mkdirSync(join(home, ".claude", "PAI"), { recursive: true });
+    process.env.HOME = home;
+    try {
+      expect(defaultRoots().telosDir).toBe(join(home, ".claude", "PAI", ...SUB));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

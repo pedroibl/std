@@ -28,7 +28,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { dispatch, flagValue } from "std/core";
-import { ensureDir, loadJson, saveJson } from "std/fsx";
+import { ensureDir, loadJson, resolveFrameworkDir, saveJson } from "std/fsx";
 
 export interface TestStep {
   step: string;
@@ -65,7 +65,7 @@ export interface FeatureRegistry {
 }
 
 // Injected estate root — consumer identity, stays at the edge (D4).
-const REGISTRY_DIR = join(process.env.HOME || "", ".claude", "PAI", "MEMORY", "STATE", "progress");
+const REGISTRY_DIR = join(resolveFrameworkDir(process.env.HOME || ""), "MEMORY", "STATE", "progress");
 
 export function getRegistryPath(project: string, dir = REGISTRY_DIR): string {
   return join(dir, `${project}-features.json`);

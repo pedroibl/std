@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -428,5 +428,84 @@ describe("main", () => {
     expect(existsSync(join(root, "SYNTHESIS"))).toBe(false);
     const logged = (deps as Deps & { logged: string[] }).logged;
     expect(logged.some((l) => l.includes("No ratings in this period"))).toBe(true);
+  });
+});
+
+// ============================================================================
+// RT-2 framework-dir resolution (AD-9.3)
+// ============================================================================
+
+describe("RT-2 framework-dir resolution (AD-9.3)", () => {
+  // `defaultDeps()` is NOT exported, so drive the resolution through main() with its default deps and
+  // observe the resolved ratingsFile via the "No ratings file found at: <path>" log (frameworkDir has no
+  // file on a fresh/absolute path → main returns early). synthesisDir shares the same frameworkDir base,
+  // so proving ratingsFile proves the resolution.
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME"] as const;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  function ratingsPathFromMain(): string {
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...a: unknown[]) => {
+      logs.push(a.map((x) => String(x)).join(" "));
+    };
+    try {
+      main(["--week"]); // no deps → defaultDeps() computes the framework-dir-derived paths
+    } finally {
+      console.log = orig;
+    }
+    const line = logs.find((l) => l.startsWith("No ratings file found at:"));
+    if (!line) throw new Error(`no ratings-file log captured: ${logs.join(" | ")}`);
+    return line.replace("No ratings file found at: ", "");
+  }
+
+  test("LIFEOS_DIR wins over PAI_DIR", () => {
+    process.env.LIFEOS_DIR = "/life";
+    process.env.PAI_DIR = "/pai";
+    expect(ratingsPathFromMain()).toBe(join("/life", "MEMORY", "LEARNING", "SIGNALS", "ratings.jsonl"));
+  });
+
+  test("PAI_DIR honored when LIFEOS_DIR unset", () => {
+    delete process.env.LIFEOS_DIR;
+    process.env.PAI_DIR = "/pai";
+    expect(ratingsPathFromMain()).toBe(join("/pai", "MEMORY", "LEARNING", "SIGNALS", "ratings.jsonl"));
+  });
+
+  test("neither env set → resolver falls back to LIFEOS under a fresh temp home", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    const home = mkdtempSync(join(tmpdir(), "rt2-"));
+    process.env.HOME = home;
+    try {
+      expect(ratingsPathFromMain()).toBe(
+        join(home, ".claude", "LIFEOS", "MEMORY", "LEARNING", "SIGNALS", "ratings.jsonl"),
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy PAI tree present → resolver picks PAI", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    const home = mkdtempSync(join(tmpdir(), "rt2-"));
+    mkdirSync(join(home, ".claude", "PAI"), { recursive: true });
+    process.env.HOME = home;
+    try {
+      expect(ratingsPathFromMain()).toBe(
+        join(home, ".claude", "PAI", "MEMORY", "LEARNING", "SIGNALS", "ratings.jsonl"),
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

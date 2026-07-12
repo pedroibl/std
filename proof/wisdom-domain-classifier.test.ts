@@ -217,16 +217,22 @@ describe("main — CLI surface + exit codes", () => {
   });
 });
 
-describe("defaultFramesDir — root injection (identity stays caller-local)", () => {
-  test("uses PAI_DIR when set", () => {
+describe("defaultFramesDir — root injection (RT-2 precedence, AD-9.3)", () => {
+  test("LIFEOS_DIR wins over PAI_DIR", () => {
+    expect(
+      defaultFramesDir({ LIFEOS_DIR: "/life", PAI_DIR: "/opt/pai" } as NodeJS.ProcessEnv),
+    ).toBe(join("/life", "MEMORY", "WISDOM", "FRAMES"));
+  });
+
+  test("PAI_DIR honored when LIFEOS_DIR unset (transition window)", () => {
     expect(defaultFramesDir({ PAI_DIR: "/opt/pai" } as NodeJS.ProcessEnv)).toBe(
       join("/opt/pai", "MEMORY", "WISDOM", "FRAMES"),
     );
   });
 
-  test("falls back to HOME/.claude", () => {
+  test("neither env set → resolver falls back to LIFEOS under HOME/.claude (the new name)", () => {
     expect(defaultFramesDir({ HOME: "/home/x" } as NodeJS.ProcessEnv)).toBe(
-      join("/home/x", ".claude", "MEMORY", "WISDOM", "FRAMES"),
+      join("/home/x", ".claude", "LIFEOS", "MEMORY", "WISDOM", "FRAMES"),
     );
   });
 });

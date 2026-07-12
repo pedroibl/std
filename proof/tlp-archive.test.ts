@@ -338,3 +338,60 @@ describe("defaultConfig — env-var overrides (D4: nothing baked, everything ove
     }
   });
 });
+
+// ── RT-2 framework-dir resolution (AD-9.3, Category-4 resolver-only) ──────────────────────────────────
+
+describe("RT-2 framework-dir resolution (AD-9.3)", () => {
+  // tlp-archive is Category 4: it does NOT read LIFEOS_DIR/PAI_DIR at the framework root — only
+  // resolveFrameworkDir(HOME) for the knowledgeDir base, plus the TLP_KNOWLEDGE_DIR subpath override.
+  // So exercise the RESOLVER cases (fresh→LIFEOS, legacy PAI tree→PAI) + the override precedence.
+  const KEYS = ["TLP_KNOWLEDGE_DIR", "HOME", "LIFEOS_DIR", "PAI_DIR"] as const;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test("fresh home → knowledgeDir resolves under <home>/.claude/LIFEOS", () => {
+    delete process.env.TLP_KNOWLEDGE_DIR;
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    const home = mkdtempSync(join(tmpdir(), "rt2-"));
+    process.env.HOME = home;
+    try {
+      expect(defaultConfig().knowledgeDir).toBe(
+        join(home, ".claude", "LIFEOS", "MEMORY/KNOWLEDGE/Blogs"),
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy PAI tree present → resolver picks PAI", () => {
+    delete process.env.TLP_KNOWLEDGE_DIR;
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    const home = mkdtempSync(join(tmpdir(), "rt2-"));
+    mkdirSync(join(home, ".claude", "PAI"), { recursive: true });
+    process.env.HOME = home;
+    try {
+      expect(defaultConfig().knowledgeDir).toBe(
+        join(home, ".claude", "PAI", "MEMORY/KNOWLEDGE/Blogs"),
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("TLP_KNOWLEDGE_DIR override still wins over the resolver", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    process.env.TLP_KNOWLEDGE_DIR = "/custom";
+    expect(defaultConfig().knowledgeDir).toBe("/custom");
+  });
+});

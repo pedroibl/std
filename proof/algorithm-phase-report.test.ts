@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveFrameworkDir } from "std/fsx";
 import { main, readState, stateFile, writeState } from "./algorithm-phase-report";
 
 function tmp(): string {
@@ -119,5 +120,15 @@ describe("algorithm-phase-report — dispatch + flagValue command wiring", () =>
     ).toBe(0);
     const adj = readState(dir).metaLearnerAdjustments?.[0];
     expect(adj).toMatchObject({ parameter: "x", previousValue: 0.3, newValue: 0.45, cycle: 2 });
+  });
+});
+
+// Category 4 (RT-2, AD-9.3): STATE_DIR is `join(resolveFrameworkDir(homedir()), "MEMORY", "STATE")`.
+// homedir() is fixed (Bun ignores $HOME), so we prove the WIRING: the default resolves via the resolver,
+// never a bare `.claude/PAI` literal. The resolver's own LIFEOS>PAI>fallback precedence is covered
+// exhaustively in src/fsx/index.test.ts.
+describe("RT-2 framework-dir resolution — STATE_DIR wired to resolveFrameworkDir", () => {
+  test("stateFile() default resolves under resolveFrameworkDir(homedir()), not a bare .claude/PAI literal", () => {
+    expect(stateFile()).toBe(join(resolveFrameworkDir(homedir()), "MEMORY", "STATE", "algorithm-phase.json"));
   });
 });

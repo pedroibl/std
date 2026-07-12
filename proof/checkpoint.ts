@@ -43,7 +43,7 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { dispatch, positional } from "std/core";
-import { exists, loadJson, readIfExists } from "std/fsx";
+import { exists, loadJson, readIfExists, resolveFrameworkDir } from "std/fsx";
 import { git } from "std/git";
 import { parseCriteriaList } from "./isa-utils";
 
@@ -58,7 +58,7 @@ export interface Paths {
 export function defaultPaths(home: string = homedir()): Paths {
   return {
     allowlist: join(home, ".claude", "checkpoint-repos.txt"),
-    workDir: join(home, ".claude", "PAI", "MEMORY", "WORK"),
+    workDir: join(resolveFrameworkDir(home), "MEMORY", "WORK"),
   };
 }
 

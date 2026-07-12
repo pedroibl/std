@@ -14,9 +14,9 @@
  */
 
 import { readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { hasFlag } from "std/core";
-import { exists } from "std/fsx";
+import { exists, resolveFrameworkDir } from "std/fsx";
 import { type RefCheckConfig, type RefFinding, runRefCheck } from "./ref-check";
 
 /** Injected estate roots (identity, D4) — defaulted from $HOME, overridden by tests. */
@@ -27,8 +27,9 @@ export interface DocCheckEnv {
 }
 
 export function defaultEnv(home = process.env.HOME || ""): DocCheckEnv {
-  const claudeDir = join(home, ".claude");
-  return { claudeDir, paiDir: join(claudeDir, "PAI"), hooksDir: join(claudeDir, "hooks") };
+  const paiDir = resolveFrameworkDir(home);
+  const claudeDir = dirname(paiDir);
+  return { claudeDir, paiDir, hooksDir: join(claudeDir, "hooks") };
 }
 
 // ── DocCheck's PATH_PATTERNS (verbatim from DocCheck.ts:34-47), labelled for the engine. ──

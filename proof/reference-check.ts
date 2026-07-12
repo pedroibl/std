@@ -17,9 +17,9 @@
  */
 
 import { readdirSync } from "node:fs";
-import { extname, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { hasFlag } from "std/core";
-import { exists, walkFiles } from "std/fsx";
+import { exists, resolveFrameworkDir, walkFiles } from "std/fsx";
 import { type RefCheckConfig, type RefFinding, runRefCheck } from "./ref-check";
 
 const HELP = `ReferenceCheck — validate every reference across ~/.claude
@@ -43,8 +43,9 @@ export interface RefCheckEnv {
 }
 
 export function defaultEnv(home = process.env.HOME || ""): RefCheckEnv {
-  const claudeDir = join(home, ".claude");
-  return { claudeDir, paiDir: join(claudeDir, "PAI") };
+  const paiDir = resolveFrameworkDir(home);
+  const claudeDir = dirname(paiDir);
+  return { claudeDir, paiDir };
 }
 
 // ── Exclusion rules (verbatim from ReferenceCheck.ts:63-169) ──
@@ -70,12 +71,12 @@ const EXCLUDE_FILE_SUFFIXES = [".backup", ".old", ".retired", ".bak", ".orig", "
 const EXCLUDE_FILE_NAMES = new Set(["package-lock.json", "bun.lockb", "bun.lock", "yarn.lock", "pnpm-lock.yaml"]);
 
 /** Archived Algorithm snapshots reference renamed doctrine intentionally — exclude all but the latest. */
-function makeArchivedAlgorithmVersion(claudeDir: string): (relPath: string) => boolean {
+function makeArchivedAlgorithmVersion(paiDir: string): (relPath: string) => boolean {
   let latestCache: string | null = null;
   const latest = (): string => {
     if (latestCache !== null) return latestCache;
     try {
-      const algDir = join(claudeDir, "PAI", "ALGORITHM");
+      const algDir = join(paiDir, "ALGORITHM");
       const versions = readdirSync(algDir)
         .map((f) => f.match(/^v(\d+\.\d+\.\d+)\.md$/)?.[1])
         .filter((v): v is string => !!v)
@@ -185,7 +186,7 @@ export function buildRefConfig(
   env: RefCheckEnv,
   opts: { changedOnly: boolean; includeStale: boolean; includeOrphans: boolean },
 ): RefCheckConfig {
-  const isArchived = makeArchivedAlgorithmVersion(env.claudeDir);
+  const isArchived = makeArchivedAlgorithmVersion(env.paiDir);
   const isScannableFile = makeIsScannableFile(env.claudeDir, isArchived);
   return {
     claudeDir: env.claudeDir,

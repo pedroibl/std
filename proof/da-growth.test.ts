@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { bar, dateParts } from "std/core"
@@ -7,7 +7,7 @@ import { cmdDiary, cmdOpinions, cmdSummary, cmdGrowth, parsePrimaryDA, daysAgoSt
 
 // A fixed clock so the tz-relative cutoffs are deterministic.
 const NOW = new Date("2026-07-12T20:00:00Z")
-const TZ = "America/Los_Angeles"
+const TZ = "Australia/Melbourne"
 
 function makeDaDir(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), "da-growth-"))
@@ -78,9 +78,9 @@ describe("daysAgoStr — dateParts(now-Ndays, tz).iso", () => {
     }
   })
 
-  test("is a YYYY-MM-DD string honoring the injected tz (LA is behind UTC)", () => {
-    // NOW = 2026-07-12T20:00:00Z → 13:00 in LA on the 12th.
-    expect(daysAgoStr(0, NOW, TZ)).toBe("2026-07-12")
+  test("is a YYYY-MM-DD string honoring the injected tz (Melbourne is ahead of UTC)", () => {
+    // NOW = 2026-07-12T20:00:00Z → 06:00 AEST on the 13th in Melbourne (AEST = UTC+10, no DST in July).
+    expect(daysAgoStr(0, NOW, TZ)).toBe("2026-07-13")
     expect(daysAgoStr(0, NOW, TZ)).toBe(dateParts(NOW, TZ).iso)
   })
 })
@@ -91,9 +91,9 @@ describe("parsePrimaryDA", () => {
   test("extracts the primary: value", () => {
     expect(parsePrimaryDA("primary: tome\nother: x")).toBe("tome")
   })
-  test("empty / missing → default 'kai'", () => {
-    expect(parsePrimaryDA("")).toBe("kai")
-    expect(parsePrimaryDA("nothing here")).toBe("kai")
+  test("empty / missing → default 'tome' (Pedro's DA; dir is ~/.claude/PAI/USER/DA/tome)", () => {
+    expect(parsePrimaryDA("")).toBe("tome")
+    expect(parsePrimaryDA("nothing here")).toBe("tome")
   })
 })
 
@@ -167,5 +167,94 @@ describe("main dispatch", () => {
   test("known command → exit 0", () => {
     // summary reads the real (likely absent) daDir; still returns 0.
     expect(main(["summary"], NOW)).toBe(0)
+  })
+})
+
+// Category 2 (RT-2, AD-9.3): PAI = LIFEOS_DIR || PAI_DIR || resolveFrameworkDir(HOME); the DA registry +
+// diary hang off <PAI>/USER/DA/. PAI is a module const, so re-import under a controlled env (unique query
+// busts Bun's cache) and observe which root main(["diary"]) actually reads the diary from.
+let rt2Seq = 0
+const DIARY_ENTRY =
+  JSON.stringify({
+    date: "2026-07-10", // within 7 days of NOW (2026-07-12)
+    mood: "positive",
+    avg_rating: 9,
+    interaction_count: 3,
+    topics: ["RT2MARKER"],
+    notable_moments: [],
+    learning: "",
+  }) + "\n"
+
+function seedDiary(root: string): void {
+  // no registry → parsePrimaryDA defaults to "tome" (Pedro's DA)
+  mkdirSync(join(root, "USER", "DA", "tome"), { recursive: true })
+  writeFileSync(join(root, "USER", "DA", "tome", "diary.jsonl"), DIARY_ENTRY)
+}
+
+async function diaryOutputUnder(reimport: () => Promise<{ main: typeof main }>): Promise<string> {
+  const lines: string[] = []
+  const orig = console.log
+  console.log = (...a: unknown[]) => {
+    lines.push(a.join(" "))
+  }
+  try {
+    const mod = await reimport()
+    mod.main(["diary"], NOW)
+  } finally {
+    console.log = orig
+  }
+  return lines.join("\n")
+}
+
+describe("RT-2 framework-dir resolution — PAI root (da-growth)", () => {
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME"] as const
+  let saved: Record<string, string | undefined>
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]))
+  })
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k]
+      else process.env[k] = saved[k]
+    }
+  })
+
+  test("LIFEOS_DIR wins over PAI_DIR — diary read from the LIFEOS root", async () => {
+    const life = mkdtempSync(join(tmpdir(), "da-life-"))
+    const pai = mkdtempSync(join(tmpdir(), "da-pai-"))
+    seedDiary(life) // only LIFEOS has the diary
+    process.env.LIFEOS_DIR = life
+    process.env.PAI_DIR = pai
+    try {
+      expect(await diaryOutputUnder(() => import(`./da-growth?rt2=${rt2Seq++}`))).toContain("RT2MARKER")
+    } finally {
+      rmSync(life, { recursive: true, force: true })
+      rmSync(pai, { recursive: true, force: true })
+    }
+  })
+
+  test("PAI_DIR honored when LIFEOS_DIR unset (transition window)", async () => {
+    const pai = mkdtempSync(join(tmpdir(), "da-pai-"))
+    seedDiary(pai)
+    delete process.env.LIFEOS_DIR
+    process.env.PAI_DIR = pai
+    try {
+      expect(await diaryOutputUnder(() => import(`./da-growth?rt2=${rt2Seq++}`))).toContain("RT2MARKER")
+    } finally {
+      rmSync(pai, { recursive: true, force: true })
+    }
+  })
+
+  test("neither env set → resolver reads the diary under .claude/LIFEOS of a fresh HOME", async () => {
+    const home = mkdtempSync(join(tmpdir(), "da-home-"))
+    seedDiary(join(home, ".claude", "LIFEOS"))
+    delete process.env.LIFEOS_DIR
+    delete process.env.PAI_DIR
+    process.env.HOME = home
+    try {
+      expect(await diaryOutputUnder(() => import(`./da-growth?rt2=${rt2Seq++}`))).toContain("RT2MARKER")
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })

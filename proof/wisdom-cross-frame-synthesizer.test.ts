@@ -508,3 +508,50 @@ describe("main()", () => {
     expect(existsSync(join(dir, "MEMORY", "WISDOM", "META", "frame-health.md"))).toBe(false);
   });
 });
+
+// Category 3 (RT-2, AD-9.3): baseDir = LIFEOS_DIR || PAI_DIR || resolveFrameworkDir(HOME); WISDOM hangs off it.
+// Drive main([]) (a real synthesis run) and observe which root verified.md lands under.
+describe("RT-2 framework-dir resolution — WISDOM output root", () => {
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME"] as const;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+  const verifiedAt = (root: string) => join(root, "MEMORY", "WISDOM", "PRINCIPLES", "verified.md");
+
+  test("LIFEOS_DIR wins over PAI_DIR — synthesis writes under the LIFEOS root", () => {
+    const life = mkdtempSync(join(tmpdir(), "wcfs-life-"));
+    const pai = mkdtempSync(join(tmpdir(), "wcfs-pai-"));
+    seedFrames(life); // only the LIFEOS root has frames
+    process.env.LIFEOS_DIR = life;
+    process.env.PAI_DIR = pai;
+    try {
+      expect(main([])).toBe(0);
+      expect(existsSync(verifiedAt(life))).toBe(true);
+      expect(existsSync(verifiedAt(pai))).toBe(false);
+    } finally {
+      rmSync(life, { recursive: true, force: true });
+      rmSync(pai, { recursive: true, force: true });
+    }
+  });
+
+  test("neither env set → resolver writes under .claude/LIFEOS of a fresh HOME", () => {
+    const home = mkdtempSync(join(tmpdir(), "wcfs-home-"));
+    seedFrames(join(home, ".claude", "LIFEOS"));
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    process.env.HOME = home;
+    try {
+      expect(main([])).toBe(0);
+      expect(existsSync(verifiedAt(join(home, ".claude", "LIFEOS")))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

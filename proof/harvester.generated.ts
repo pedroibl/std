@@ -30,9 +30,13 @@
  *
  * ⚠ This is the 11.1 scaffold, not a compiled artifact: it cannot be type-
  *   checked until std is `bun link`ed. Holes marked  // ⟨EDGE⟩  and  // ⟨11.2⟩.
+ *   NOTE (Story 16.2 / RT-2): the framework-dir path constants below were retargeted onto
+ *   `resolveFrameworkDir` (AD-9.3), so this is no longer byte-verbatim for lines 51-52. The generator's
+ *   3 deliberately-wrong imports (writeIfAbsent, args-as-parseArgs, std/core/similarity) are UNCHANGED —
+ *   they remain the Story-11.3 improvement-note evidence; only the `.claude/PAI` roots were converged.
  */
 
-import { walkFiles, ensureDir, writeIfAbsent, saveJson } from "std/fsx";
+import { walkFiles, ensureDir, writeIfAbsent, saveJson, resolveFrameworkDir } from "std/fsx";
 import { parseNdjson, args as parseArgs } from "std/core";
 import { charOverlap } from "std/core/similarity";
 
@@ -48,8 +52,8 @@ import { join, basename } from "node:path";
 
 const HOME = homedir();
 const PROJECTS_ROOT = process.env.CLAUDE_PROJECTS_ROOT ?? join(HOME, ".claude", "projects");
-const LEARNING_DIR = join(HOME, ".claude", "PAI", "MEMORY", "LEARNING");
-const HARVEST_QUEUE_DIR = join(HOME, ".claude", "PAI", "MEMORY", "KNOWLEDGE", "_harvest-queue");
+const LEARNING_DIR = join(resolveFrameworkDir(HOME), "MEMORY", "LEARNING");
+const HARVEST_QUEUE_DIR = join(resolveFrameworkDir(HOME), "MEMORY", "KNOWLEDGE", "_harvest-queue");
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 // ============================================================================

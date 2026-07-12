@@ -84,6 +84,8 @@ export function discoverBackupSources(
       let hasLearning = false;
       if (wantLearning) {
         hasLearning =
+          fs.existsSync(path.join(full, "LIFEOS", "MEMORY", "LEARNING")) ||
+          fs.existsSync(path.join(full, ".claude", "LIFEOS", "MEMORY", "LEARNING")) ||
           fs.existsSync(path.join(full, "PAI", "MEMORY", "LEARNING")) ||
           fs.existsSync(path.join(full, ".claude", "PAI", "MEMORY", "LEARNING"));
       }
@@ -130,6 +132,8 @@ export async function extractTarball(
   return {
     projects: find([path.join(tmpRoot, ".claude", "projects"), path.join(tmpRoot, "projects")]),
     learning: find([
+      path.join(tmpRoot, ".claude", "LIFEOS", "MEMORY", "LEARNING"),
+      path.join(tmpRoot, "LIFEOS", "MEMORY", "LEARNING"),
       path.join(tmpRoot, ".claude", "PAI", "MEMORY", "LEARNING"),
       path.join(tmpRoot, "PAI", "MEMORY", "LEARNING"),
     ]),

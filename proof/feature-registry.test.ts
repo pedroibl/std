@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -149,5 +149,53 @@ describe("feature-registry — args/dispatch wiring (no default-dir side effects
     expect(main(["add", "onlyproject"])).toBe(1);
     expect(main(["update", "onlyproject"])).toBe(1);
     expect(main(["list"])).toBe(1);
+  });
+});
+
+// Category 4 (RT-2, AD-9.3): REGISTRY_DIR is captured at import from resolveFrameworkDir(process.env.HOME).
+// Re-import under a controlled env (unique query busts Bun's module cache) so we can observe the default.
+let rt2Seq = 0;
+describe("RT-2 framework-dir resolution — REGISTRY_DIR default", () => {
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME"] as const;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  async function registryPathUnder(home: string, seed?: "PAI" | "LIFEOS"): Promise<string> {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    if (seed) mkdirSync(join(home, ".claude", seed), { recursive: true });
+    process.env.HOME = home;
+    const mod = await import(`./feature-registry?rt2=${rt2Seq++}`);
+    return mod.getRegistryPath("proj"); // no dir arg → resolves via the module's REGISTRY_DIR default
+  }
+
+  test("fresh tree → REGISTRY_DIR under .claude/LIFEOS (the new name)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "feat-rt2-"));
+    try {
+      expect(await registryPathUnder(home)).toBe(
+        join(home, ".claude", "LIFEOS", "MEMORY", "STATE", "progress", "proj-features.json"),
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy PAI tree present → REGISTRY_DIR under .claude/PAI (transition window)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "feat-rt2-"));
+    try {
+      expect(await registryPathUnder(home, "PAI")).toBe(
+        join(home, ".claude", "PAI", "MEMORY", "STATE", "progress", "proj-features.json"),
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

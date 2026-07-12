@@ -55,7 +55,7 @@ import { extractJson, flagValue, hasFlag, positional } from "std/core";
 // parsed-JSON success path, not a raw/non-JSON/streaming fetch, so `fetchWithTimeout` (the transparent
 // envelope one layer down) has no direct caller in THIS tool.
 import { httpJson } from "std/http";
-import { loadJson, readIfExists, statMtime, walkFiles } from "std/fsx";
+import { loadJson, readIfExists, resolveFrameworkDir, statMtime, walkFiles } from "std/fsx";
 
 export type InferenceLevel = "fast" | "standard" | "smart";
 
@@ -277,11 +277,11 @@ export async function inference(options: InferenceOptions): Promise<InferenceRes
 
 function workDir(): string {
   const home = process.env.HOME || process.env.USERPROFILE || "";
-  return process.env.PAI_INFERENCE_WORK_DIR || join(home, ".claude", "PAI", "MEMORY", "WORK");
+  return process.env.PAI_INFERENCE_WORK_DIR || join(resolveFrameworkDir(home), "MEMORY", "WORK");
 }
 function stateFile(): string {
   const home = process.env.HOME || process.env.USERPROFILE || "";
-  return process.env.PAI_INFERENCE_STATE_FILE || join(home, ".claude", "PAI", "MEMORY", "STATE", "work.json");
+  return process.env.PAI_INFERENCE_STATE_FILE || join(resolveFrameworkDir(home), "MEMORY", "STATE", "work.json");
 }
 
 /**
