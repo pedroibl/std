@@ -87,10 +87,14 @@ export function loadEnv(envPath: string): Record<string, string> {
   return env;
 }
 
-function defaultEnvPath(): string {
-  return process.env.PAI_CONFIG_DIR
-    ? join(process.env.PAI_CONFIG_DIR, ".env")
-    : join(homedir(), ".claude", ".env");
+// Config-dir root: prefer the new LIFEOS_CONFIG_DIR stem, keep PAI_CONFIG_DIR for the pre-migration
+// transition window (AD-9.3 Rule 4), then the claude-home .env fallback (.claude never renames — 16.2
+// non-goal). `||` (not `??`) so an explicitly-empty LIFEOS_CONFIG_DIR="" falls through — matches the
+// file's truthy-ternary style and the 16.2 arthur.ts review patch (empty-string-override correctness).
+// Exported so youtube-api.test.ts can assert the resolved path shape directly (RT-6).
+export function defaultEnvPath(): string {
+  const configDir = process.env.LIFEOS_CONFIG_DIR || process.env.PAI_CONFIG_DIR;
+  return configDir ? join(configDir, ".env") : join(homedir(), ".claude", ".env");
 }
 
 /** Resolve API key / channel / base URL from `process.env`, falling back to a loaded `.env`. */

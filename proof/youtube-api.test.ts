@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { join } from "node:path";
 
 import {
   apiGet,
+  defaultEnvPath,
   formatNum,
   getChannel,
   loadEnv,
@@ -165,6 +167,43 @@ describe("loadEnv / resolveConfig", () => {
       if (saved.base === undefined) delete process.env.YOUTUBE_API_BASE_URL;
       else process.env.YOUTUBE_API_BASE_URL = saved.base;
     }
+  });
+});
+
+describe("defaultEnvPath — LIFEOS_CONFIG_DIR preferred, PAI_CONFIG_DIR kept (RT-6)", () => {
+  // The tool reads process.env.LIFEOS_CONFIG_DIR / PAI_CONFIG_DIR and homedir(). Set AND restore both
+  // env stems explicitly in each case — Pedro's shell exports PAI_DIR/PAI_CONFIG_DIR ambiently, and a
+  // leak there is exactly what 16.2's cross-vendor-audit test seam caught. homedir() (Bun's os.homedir)
+  // ignores $HOME, so the neither-set branch is asserted by the returned path shape, not by redirecting HOME.
+  const saved = { lifeos: process.env.LIFEOS_CONFIG_DIR, pai: process.env.PAI_CONFIG_DIR };
+  const setEnv = (lifeos: string | undefined, pai: string | undefined) => {
+    if (lifeos === undefined) delete process.env.LIFEOS_CONFIG_DIR;
+    else process.env.LIFEOS_CONFIG_DIR = lifeos;
+    if (pai === undefined) delete process.env.PAI_CONFIG_DIR;
+    else process.env.PAI_CONFIG_DIR = pai;
+  };
+  afterAll(() => {
+    setEnv(saved.lifeos, saved.pai);
+  });
+
+  test("LIFEOS_CONFIG_DIR wins even when PAI_CONFIG_DIR is also set", () => {
+    setEnv("/tmp/rt6-lifeos", "/tmp/rt6-pai");
+    expect(defaultEnvPath()).toBe(join("/tmp/rt6-lifeos", ".env"));
+  });
+
+  test("PAI_CONFIG_DIR is still honored when LIFEOS_CONFIG_DIR is unset (transition window)", () => {
+    setEnv(undefined, "/tmp/rt6-pai");
+    expect(defaultEnvPath()).toBe(join("/tmp/rt6-pai", ".env"));
+  });
+
+  test("an explicitly-empty LIFEOS_CONFIG_DIR falls through to PAI_CONFIG_DIR (|| not ??)", () => {
+    setEnv("", "/tmp/rt6-pai");
+    expect(defaultEnvPath()).toBe(join("/tmp/rt6-pai", ".env"));
+  });
+
+  test("neither set → ~/.claude/.env (claude-home fallback unchanged)", () => {
+    setEnv(undefined, undefined);
+    expect(defaultEnvPath().endsWith(join(".claude", ".env"))).toBe(true);
   });
 });
 
