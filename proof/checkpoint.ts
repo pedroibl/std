@@ -137,7 +137,7 @@ const MALFORMED = Symbol("checkpoint-state-malformed");
 export function loadState(statePath: string): CheckpointState | null {
   if (!exists(statePath)) return null;
   const raw = loadJson<Record<string, unknown> | typeof MALFORMED>(statePath, MALFORMED);
-  if (raw === MALFORMED) return null; // file existed but JSON.parse failed
+  if (!raw || raw === MALFORMED) return null; // file existed but JSON.parse failed or returned null
   return {
     committed_iscs: Array.isArray(raw.committed_iscs) ? (raw.committed_iscs as string[]) : [],
     last_commit_sha:
