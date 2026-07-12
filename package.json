@@ -21,6 +21,7 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
+    "typecheck:proof": "tsc -p proof/tsconfig.json",
     "check:core-purity": "bun run scripts/check-core-purity.ts",
     "check:dep-root": "bun run scripts/check-dep-root.ts",
     "check:single-source": "bun run scripts/check-single-source.ts",
