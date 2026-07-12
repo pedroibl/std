@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -140,5 +140,53 @@ describe("session-progress — args/dispatch wiring", () => {
     };
     saveProgress(p, dir);
     expect(loadProgress("stamp", dir)!.updated).not.toBe("");
+  });
+});
+
+// Category 4 (RT-2, AD-9.3): PROGRESS_DIR is captured at import from resolveFrameworkDir(process.env.HOME).
+// Re-import under a controlled env (unique query busts Bun's module cache) so we can observe the default.
+let rt2Seq = 0;
+describe("RT-2 framework-dir resolution — PROGRESS_DIR default", () => {
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME"] as const;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  async function progressPathUnder(home: string, seed?: "PAI" | "LIFEOS"): Promise<string> {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    if (seed) mkdirSync(join(home, ".claude", seed), { recursive: true });
+    process.env.HOME = home;
+    const mod = await import(`./session-progress?rt2=${rt2Seq++}`);
+    return mod.getProgressPath("proj"); // no dir arg → resolves via the module's PROGRESS_DIR default
+  }
+
+  test("fresh tree → PROGRESS_DIR under .claude/LIFEOS (the new name)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "sess-rt2-"));
+    try {
+      expect(await progressPathUnder(home)).toBe(
+        join(home, ".claude", "LIFEOS", "MEMORY", "STATE", "progress", "proj-progress.json"),
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy PAI tree present → PROGRESS_DIR under .claude/PAI (transition window)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "sess-rt2-"));
+    try {
+      expect(await progressPathUnder(home, "PAI")).toBe(
+        join(home, ".claude", "PAI", "MEMORY", "STATE", "progress", "proj-progress.json"),
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

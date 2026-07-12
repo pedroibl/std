@@ -35,7 +35,7 @@ import {
   isoDate,
   positional,
 } from "std/core";
-import { ensureDir, readIfExists, atomicWrite } from "std/fsx";
+import { ensureDir, readIfExists, atomicWrite, resolveFrameworkDir } from "std/fsx";
 import { appendAudit } from "std/report";
 
 // ── caller-local identity + engine (D4) ────────────────────────────────────────────────────────────
@@ -50,9 +50,9 @@ export interface Ctx {
 }
 
 export function defaultCtx(): Ctx {
-  const PAI_DIR = process.env.PAI_DIR || join(process.env.HOME!, ".claude");
+  const PAI_DIR = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(process.env.HOME!);
   return {
-    opinionsFile: join(PAI_DIR, "PAI/USER/OPINIONS.md"),
+    opinionsFile: join(PAI_DIR, "USER/OPINIONS.md"),
     relationshipLog: join(PAI_DIR, "MEMORY/RELATIONSHIP"),
     now: new Date(),
   };

@@ -43,7 +43,7 @@ import { parseArgs } from "node:util";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { contentHash, parseNdjson } from "std/core";
-import { walkFiles, ensureDir, readIfExists, atomicWrite, loadJson, saveJson } from "std/fsx";
+import { walkFiles, ensureDir, readIfExists, atomicWrite, loadJson, saveJson, resolveFrameworkDir } from "std/fsx";
 import {
   CONTEXT_BLOB_RE,
   TARBALL_RE,
@@ -61,7 +61,7 @@ import {
 
 const HOME = process.env.HOME!;
 const DEFAULT_BACKUPS_DIR = path.join(HOME, "Backups");
-const DEFAULT_PAI_DIR = path.join(HOME, ".claude", "PAI");
+const DEFAULT_PAI_DIR = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(HOME);
 
 // Tier-2 strong praise — unambiguous, reusable. Explicit ratings handled separately.
 const STRONG_RE =
@@ -160,9 +160,11 @@ function collectLearningMd(learningRoot: string): string[] {
   return out;
 }
 
-/** Find the LEARNING dir inside a source dir (two common layouts). */
+/** Find the LEARNING dir inside a source dir. LifeOS layouts preferred, PAI kept for pre-migration backups. */
 function learningDirIn(root: string): string | null {
   for (const c of [
+    path.join(root, "LIFEOS", "MEMORY", "LEARNING"),
+    path.join(root, ".claude", "LIFEOS", "MEMORY", "LEARNING"),
     path.join(root, "PAI", "MEMORY", "LEARNING"),
     path.join(root, ".claude", "PAI", "MEMORY", "LEARNING"),
   ]) {

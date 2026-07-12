@@ -1,5 +1,5 @@
-import { describe, expect, it, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import { describe, expect, it, beforeEach, afterEach } from "bun:test";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseNdjson } from "std/core";
@@ -239,5 +239,80 @@ describe("main — envelope, exits, dry-run", () => {
     expect([...files].some((f) => f.endsWith("a.md"))).toBe(true);
     expect([...files].some((f) => f.endsWith("b.txt"))).toBe(true);
     expect([...files].some((f) => f.endsWith("ignore.json"))).toBe(false);
+  });
+});
+
+describe("RT-2 framework-dir resolution (AD-9.3)", () => {
+  // The resolution seam (`defaultQueueFile`) is NOT exported, so we drive `main()` WITHOUT
+  // opts.queueFile — that forces the internal `process.env.LIFEOS_DIR || PAI_DIR ||
+  // resolveFrameworkDir(HOME)` path — and observe WHERE the queue file lands. The framework dir must
+  // therefore be writable, so LIFEOS_DIR/PAI_DIR are real mkdtemp roots (not "/life"/"/pai" literals).
+  // NOTE: the ambient shell may export a real PAI_DIR (live PAI). Every test controls
+  // LIFEOS_DIR + PAI_DIR + HOME explicitly and restores them, or the ambient env leaks in.
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME"] as const;
+  const QUEUE_SUB = ["MEMORY", "MIGRATION", "migration-proposals.jsonl"] as const;
+  let savedEnv: Record<string, string | undefined>;
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  // Run a scan that yields ≥1 proposal, using the env-resolved default queue file (no queueFile opt).
+  function scanWithResolvedQueue(): void {
+    const src = tmp();
+    const srcFile = join(src, "in.md");
+    writeFileSync(srcFile, "## Mission\nMy mission and north-star, my life's work, why I build things.\n");
+    const logOrig = console.log;
+    const errOrig = console.error;
+    console.log = () => {};
+    console.error = () => {};
+    try {
+      expect(main(["--source", srcFile], { now: FIXED_NOW })).toBe(0);
+    } finally {
+      console.log = logOrig;
+      console.error = errOrig;
+    }
+  }
+
+  it("LIFEOS_DIR wins over PAI_DIR", () => {
+    const life = tmp();
+    const pai = tmp();
+    process.env.LIFEOS_DIR = life;
+    process.env.PAI_DIR = pai;
+    scanWithResolvedQueue();
+    expect(existsSync(join(life, ...QUEUE_SUB))).toBe(true);
+    expect(existsSync(join(pai, ...QUEUE_SUB))).toBe(false);
+  });
+
+  it("PAI_DIR honored when LIFEOS_DIR unset (transition window)", () => {
+    delete process.env.LIFEOS_DIR;
+    const pai = tmp();
+    process.env.PAI_DIR = pai;
+    scanWithResolvedQueue();
+    expect(existsSync(join(pai, ...QUEUE_SUB))).toBe(true);
+  });
+
+  it("neither env set → resolver falls back to LIFEOS under a fresh temp home", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    const home = tmp();
+    process.env.HOME = home;
+    scanWithResolvedQueue();
+    expect(existsSync(join(home, ".claude", "LIFEOS", ...QUEUE_SUB))).toBe(true);
+  });
+
+  it("legacy PAI tree present → resolver picks PAI", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    const home = tmp();
+    mkdirSync(join(home, ".claude", "PAI"), { recursive: true });
+    process.env.HOME = home;
+    scanWithResolvedQueue();
+    expect(existsSync(join(home, ".claude", "PAI", ...QUEUE_SUB))).toBe(true);
   });
 });

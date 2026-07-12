@@ -195,3 +195,68 @@ describe("parseCliArgs — flagValue/hasFlag/positional collection (pure, no net
     expect(parsed.timeout).toBeUndefined();
   });
 });
+
+describe("RT-2 framework-dir resolution (AD-9.3)", () => {
+  // workDir()/stateFile() are NOT exported — observed through synthesizeAdvisorState(), whose
+  // "Source: <isaPath>" line embeds the resolved workDir. inference reads process.env.HOME DIRECTLY
+  // (not homedir()), so a temp HOME deterministically drives resolveFrameworkDir. Every test clears
+  // PAI_INFERENCE_WORK_DIR/STATE_FILE + LIFEOS_DIR/PAI_DIR so ambient live-PAI env cannot leak in.
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME", "PAI_INFERENCE_WORK_DIR", "PAI_INFERENCE_STATE_FILE"] as const;
+  let savedEnv: Record<string, string | undefined>;
+  let home: string;
+
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+    home = mkdtempSync(join(tmpdir(), "rt2-inference-"));
+    process.env.HOME = home;
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    delete process.env.PAI_INFERENCE_WORK_DIR;
+    delete process.env.PAI_INFERENCE_STATE_FILE;
+  });
+
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  // Seed an ISA.md under <home>/.claude/<frameworkRel>/MEMORY/WORK/sess-a and return that WORK root.
+  function seedIsa(frameworkRel: string): string {
+    const workRoot = join(home, ".claude", frameworkRel, "MEMORY", "WORK");
+    const slugDir = join(workRoot, "sess-a");
+    mkdirSync(slugDir, { recursive: true });
+    writeFileSync(join(slugDir, "ISA.md"), "# ISA content");
+    return workRoot;
+  }
+
+  test("fresh temp home → workDir resolves under .claude/LIFEOS (new name)", async () => {
+    const workRoot = seedIsa("LIFEOS");
+    const state = await synthesizeAdvisorState();
+    expect(state).toContain("ISA: sess-a");
+    expect(state).toContain(`Source: ${join(workRoot, "sess-a", "ISA.md")}`);
+  });
+
+  test("legacy .claude/PAI tree present → workDir resolves under .claude/PAI", async () => {
+    // Only the PAI tree exists at resolution time (no LIFEOS), so resolveFrameworkDir picks PAI.
+    const workRoot = seedIsa("PAI");
+    const state = await synthesizeAdvisorState();
+    expect(state).toContain(`Source: ${join(workRoot, "sess-a", "ISA.md")}`);
+    expect(state).toContain(join(home, ".claude", "PAI"));
+  });
+
+  test("PAI_INFERENCE_WORK_DIR override wins over the resolver", async () => {
+    // The resolver would point at the fresh (empty) LIFEOS tree; the override dir carries the only
+    // ISA, so a Source under it proves the override short-circuits resolveFrameworkDir.
+    const overrideWork = mkdtempSync(join(tmpdir(), "rt2-inf-override-"));
+    const slugDir = join(overrideWork, "ovr-session");
+    mkdirSync(slugDir, { recursive: true });
+    writeFileSync(join(slugDir, "ISA.md"), "# override ISA");
+    process.env.PAI_INFERENCE_WORK_DIR = overrideWork;
+
+    const state = await synthesizeAdvisorState();
+    expect(state).toContain(`Source: ${join(slugDir, "ISA.md")}`);
+    expect(state).not.toContain(join(home, ".claude", "LIFEOS"));
+  });
+});

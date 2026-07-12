@@ -20,10 +20,11 @@
 // (default-allow, allowed_callers, purposes, time_window, require_confirmation, rate_limit) since that
 // is the one piece of this file explicitly NOT rewritten — only re-plumbed with an injected `env`/`now`.
 
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveFrameworkDir } from "std/fsx";
 
 import {
   type ArthurEnv,
@@ -31,6 +32,7 @@ import {
   audit,
   checkRate,
   checkTimeWindow,
+  defaultEnv,
   evaluate,
   get,
   getPolicy,
@@ -67,6 +69,9 @@ function makeEnv(): ArthurEnv {
     policiesPath,
     auditRoot: join(root, "MEMORY", "SECURITY"),
     gcpProject: "fake-project",
+    // NB: a FIXED test tz to exercise the time-window mechanism — the "13:00 PT" instants + "PT" label
+    // below are hand-computed against it. Pedro's PRODUCTION default is Australia/Melbourne (arthur.ts
+    // defaultEnv/checkTimeWindow); this fixture stays LA only so the mechanism assertions remain deterministic.
     defaultTz: "America/Los_Angeles",
   };
 }
@@ -501,5 +506,48 @@ describe("loadPolicies / getPolicy — real YAML.parse over a temp policies.yaml
       cleanup(envA);
       cleanup(envB);
     }
+  });
+});
+
+describe("RT-2 framework-dir resolution (AD-9.3)", () => {
+  // `defaultEnv()` resolves the framework dir via `process.env.LIFEOS_DIR ?? PAI_DIR ??
+  // resolveFrameworkDir(homedir())`. Unlike the sibling tools, arthur reads `homedir()` (node:os), NOT
+  // `process.env.HOME`. Bun caches `homedir()` at process start and ignores runtime `process.env.HOME`
+  // mutation (verified empirically), so the fresh-temp-home / legacy-PAI-tree assertions CANNOT be
+  // forced here — those two cases are intentionally omitted for arthur. The two deterministic
+  // env-precedence tests below stand, plus a delegation test proving the no-env fallback IS the
+  // resolver applied to homedir() (not a hardcoded path).
+  // NOTE: the ambient shell may export a real PAI_DIR (live PAI). Every test controls
+  // LIFEOS_DIR + PAI_DIR explicitly and restores them, or the ambient env leaks in.
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR"] as const;
+  let savedEnv: Record<string, string | undefined>;
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  test("LIFEOS_DIR wins over PAI_DIR", () => {
+    process.env.LIFEOS_DIR = "/life";
+    process.env.PAI_DIR = "/pai";
+    expect(defaultEnv().paiDir).toBe("/life");
+  });
+
+  test("PAI_DIR honored when LIFEOS_DIR unset (transition window)", () => {
+    delete process.env.LIFEOS_DIR;
+    process.env.PAI_DIR = "/pai";
+    expect(defaultEnv().paiDir).toBe("/pai");
+  });
+
+  test("neither env set → fallback delegates to resolveFrameworkDir(homedir()) (LIFEOS-preferred)", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    // Can't force a temp home (homedir() is process-cached), so prove the wiring: the fallback IS the
+    // resolver applied to homedir(), not a baked path. resolveFrameworkDir prefers LIFEOS over PAI.
+    expect(defaultEnv().paiDir).toBe(resolveFrameworkDir(homedir()));
   });
 });

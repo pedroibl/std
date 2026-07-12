@@ -8,6 +8,7 @@ import {
   cmdList,
   cmdRollback,
   cmdShow,
+  defaultPaths,
   expandPath,
   findCommit,
   loadAllowlist,
@@ -282,6 +283,53 @@ describe("commands — console output + exit codes", () => {
       const code = main(["list", "my-slug"], paths);
       expect(code).toBe(0);
       expect(logs).toEqual([`no checkpoints recorded for my-slug`]);
+    });
+  });
+});
+
+describe("RT-2 framework-dir resolution (AD-9.3)", () => {
+  // defaultPaths(home) takes `home` as an explicit PARAM and resolveFrameworkDir reads NO env (pure
+  // home + filesystem probe — see src/fsx/index.test.ts), so the resolver fallback is forced directly
+  // with a temp home: no homedir()/env ambiguity. We still set LIFEOS_DIR/PAI_DIR/HOME to obviously
+  // wrong ambient values and prove the param-driven resolution ignores them entirely.
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME"] as const;
+  let savedEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+    process.env.LIFEOS_DIR = "/ambient/should/be/ignored/LIFEOS";
+    process.env.PAI_DIR = "/ambient/should/be/ignored/PAI";
+  });
+
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  test("fresh temp home → workDir under .claude/LIFEOS (new name); allowlist stays at claude-home", () => {
+    inTmpRoot((home) => {
+      const paths = defaultPaths(home);
+      expect(paths.workDir).toBe(join(home, ".claude", "LIFEOS", "MEMORY", "WORK"));
+      expect(paths.allowlist).toBe(join(home, ".claude", "checkpoint-repos.txt"));
+    });
+  });
+
+  test("legacy .claude/PAI tree present → workDir stays under .claude/PAI; allowlist unchanged", () => {
+    inTmpRoot((home) => {
+      mkdirSync(join(home, ".claude", "PAI"), { recursive: true });
+      const paths = defaultPaths(home);
+      expect(paths.workDir).toBe(join(home, ".claude", "PAI", "MEMORY", "WORK"));
+      expect(paths.allowlist).toBe(join(home, ".claude", "checkpoint-repos.txt"));
+    });
+  });
+
+  test("ambient LIFEOS_DIR/PAI_DIR env cannot override the param-driven resolver", () => {
+    inTmpRoot((home) => {
+      const paths = defaultPaths(home);
+      expect(paths.workDir).toBe(join(home, ".claude", "LIFEOS", "MEMORY", "WORK"));
+      expect(paths.workDir).not.toContain("/ambient/");
     });
   });
 });

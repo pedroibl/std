@@ -34,8 +34,8 @@
  *     calendar date parts (year/month/day), never hour/minute, so it cannot serve a minutes-of-day
  *     comparison; the `Intl.DateTimeFormat({hour,minute})` extraction is unchanged. What DOES move: the
  *     hardcoded `"America/Los_Angeles"` literal (source :121) is now an injected `tz` PARAMETER
- *     (`ArthurEnv.defaultTz`, still defaulting to `"America/Los_Angeles"`) — the value is identical,
- *     caller-local config (D4); it is just no longer buried inside the function body.
+ *     (`ArthurEnv.defaultTz`, defaulting to `"Australia/Melbourne"` — Pedro is in Melbourne, AU, NOT the
+ *     PAI template's LA) — caller-local config (D4); it is just no longer buried inside the function body.
  *   - the rate-limit bucket arithmetic (source :94-109, `/minute|hour|day` regex + `Date.now()`) — KEPT
  *     LOCAL verbatim (D4: consumer-specific rate vocabulary, not a generic std primitive). `now`
  *     becomes an optional injected ms-since-epoch parameter (default `Date.now()`) for test determinism.
@@ -53,7 +53,7 @@
  *     be — a proof file must not need real GCP credentials to load or test). The real dynamic
  *     `import()` is still the documented DEFAULT fetcher, used whenever a caller doesn't inject a stub
  *     — the production behavior is unchanged, only now swappable at the seam.
- *   - `PAI_DIR` / `POLICIES_PATH` / `GCP_PROJECT` / the `America/Los_Angeles` time-window default — all
+ *   - `PAI_DIR` / `POLICIES_PATH` / `GCP_PROJECT` / the `Australia/Melbourne` time-window default — all
  *     stay caller-local identity (D4), bundled into one injectable `ArthurEnv` (the same "env" pattern
  *     `doc-check.ts` uses for PAI-estate roots), still env-sourced with the exact same defaults.
  *
@@ -71,7 +71,7 @@ import YAML from "yaml";
 
 import { flagValue, positional } from "std/core";
 import { dateParts } from "std/core";
-import { ensureDir } from "std/fsx";
+import { ensureDir, resolveFrameworkDir } from "std/fsx";
 import { appendAudit } from "std/report";
 
 // ───────────────────────── Types (unchanged from the source) ─────────────────────────
@@ -119,13 +119,13 @@ export interface ArthurEnv {
 }
 
 export function defaultEnv(): ArthurEnv {
-  const paiDir = process.env.PAI_DIR ?? join(homedir(), ".claude", "PAI");
+  const paiDir = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(homedir());
   return {
     paiDir,
     policiesPath: join(paiDir, "USER", "ARTHUR", "policies.yaml"),
     auditRoot: join(paiDir, "MEMORY", "SECURITY"),
     gcpProject: process.env.PAI_GCP_PROJECT ?? "",
-    defaultTz: "America/Los_Angeles",
+    defaultTz: "Australia/Melbourne",
   };
 }
 
@@ -208,11 +208,11 @@ export function checkRate(key: string, caller: string, limit: string, now: numbe
 
 // ───────────────────────── Time window check — kept local (D4); tz now injected ─────────────────────────
 
-export function checkTimeWindow(window: string, tz: string = "America/Los_Angeles", now: Date = new Date()): { ok: boolean; reason?: string } {
+export function checkTimeWindow(window: string, tz: string = "Australia/Melbourne", now: Date = new Date()): { ok: boolean; reason?: string } {
   const match = window.match(/^(\d{2}):(\d{2})-(\d{2}):(\d{2})$/);
   if (!match) return { ok: true };
   const [, sh, sm, eh, em] = match;
-  // Windows are expressed in `tz` (default America/Los_Angeles / Pacific Time), independent of the
+  // Windows are expressed in `tz` (default Australia/Melbourne — Pedro's tz), independent of the
   // host timezone — compute the current tz-local wall-clock minutes-of-day. `dateParts` cannot serve
   // this: it returns only calendar date parts, never hour/minute (see the header note).
   const tzParts = new Intl.DateTimeFormat("en-US", {
@@ -227,7 +227,7 @@ export function checkTimeWindow(window: string, tz: string = "America/Los_Angele
   const startMin = parseInt(sh!, 10) * 60 + parseInt(sm!, 10);
   const endMin = parseInt(eh!, 10) * 60 + parseInt(em!, 10);
   if (minutesNow < startMin || minutesNow > endMin) {
-    const label = tz === "America/Los_Angeles" ? "PT" : tz;
+    const label = tz === "Australia/Melbourne" ? "AET" : tz === "America/Los_Angeles" ? "PT" : tz;
     const nowStamp = `${String(tzHour).padStart(2, "0")}:${String(tzMin).padStart(2, "0")} ${label}`;
     return { ok: false, reason: `outside time window ${window} (now ${nowStamp})` };
   }

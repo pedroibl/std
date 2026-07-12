@@ -20,7 +20,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { dispatch } from "std/core";
-import { loadJson, saveJson, walkFiles } from "std/fsx";
+import { loadJson, resolveFrameworkDir, saveJson, walkFiles } from "std/fsx";
 
 interface Decision {
   timestamp: string;
@@ -54,7 +54,7 @@ export interface SessionProgress {
 }
 
 // Injected estate root — consumer identity, stays at the edge (D4).
-const PROGRESS_DIR = join(process.env.HOME || "", ".claude", "PAI", "MEMORY", "STATE", "progress");
+const PROGRESS_DIR = join(resolveFrameworkDir(process.env.HOME || ""), "MEMORY", "STATE", "progress");
 
 export function getProgressPath(project: string, dir = PROGRESS_DIR): string {
   return join(dir, `${project}-progress.json`);

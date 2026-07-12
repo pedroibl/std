@@ -7,7 +7,7 @@
 // newline / Δ3 unified attribution), plus mine `sourceLine` correctness, the
 // per-session >0.8-overlap dedup, and the dormant provenance seam.
 
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   mkdirSync,
   mkdtempSync,
@@ -19,9 +19,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
+  defaultRoots,
   discoverSessions,
   harvestSession,
   main,
@@ -294,3 +295,72 @@ function allLearningFiles(r: Roots): Array<{ name: string; path: string }> {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// RT-2 framework-dir resolution (AD-9.3)
+// ---------------------------------------------------------------------------
+
+describe("RT-2 framework-dir resolution (AD-9.3)", () => {
+  // ambient shell may export a real PAI_DIR / CLAUDE_PROJECTS_ROOT — control them explicitly + restore.
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME", "CLAUDE_PROJECTS_ROOT"] as const;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test("LIFEOS_DIR wins over PAI_DIR; projectsRoot hangs off dirname(frameworkDir)", () => {
+    process.env.LIFEOS_DIR = "/life";
+    process.env.PAI_DIR = "/pai";
+    delete process.env.CLAUDE_PROJECTS_ROOT;
+    const r = defaultRoots();
+    expect(r.learningDir).toBe(join("/life", "MEMORY", "LEARNING"));
+    expect(r.queueDir).toBe(join("/life", "MEMORY", "KNOWLEDGE", "_harvest-queue"));
+    // projectsRoot lives beside the framework dir (claude-home), not under it.
+    expect(r.projectsRoot).toBe(join(dirname("/life"), "projects"));
+  });
+
+  test("PAI_DIR honored when LIFEOS_DIR unset", () => {
+    delete process.env.LIFEOS_DIR;
+    process.env.PAI_DIR = "/pai";
+    delete process.env.CLAUDE_PROJECTS_ROOT;
+    expect(defaultRoots().learningDir).toBe(join("/pai", "MEMORY", "LEARNING"));
+  });
+
+  test("neither env set → resolver falls back to LIFEOS under a fresh temp home", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    delete process.env.CLAUDE_PROJECTS_ROOT;
+    const home = mkdtempSync(join(tmpdir(), "rt2-"));
+    process.env.HOME = home;
+    try {
+      const r = defaultRoots();
+      expect(r.learningDir).toBe(join(home, ".claude", "LIFEOS", "MEMORY", "LEARNING"));
+      expect(r.queueDir).toBe(join(home, ".claude", "LIFEOS", "MEMORY", "KNOWLEDGE", "_harvest-queue"));
+      expect(r.projectsRoot).toBe(join(home, ".claude", "projects"));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy PAI tree present → resolver picks PAI", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    delete process.env.CLAUDE_PROJECTS_ROOT;
+    const home = mkdtempSync(join(tmpdir(), "rt2-"));
+    mkdirSync(join(home, ".claude", "PAI"), { recursive: true });
+    process.env.HOME = home;
+    try {
+      const r = defaultRoots();
+      expect(r.learningDir).toBe(join(home, ".claude", "PAI", "MEMORY", "LEARNING"));
+      expect(r.projectsRoot).toBe(join(home, ".claude", "projects"));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

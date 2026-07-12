@@ -32,7 +32,7 @@
 
 import { join, dirname } from "node:path";
 import { dispatch, isoDate, parseNdjson, slugify } from "std/core";
-import { atomicWrite, ensureDir, exists, readIfExists } from "std/fsx";
+import { atomicWrite, ensureDir, exists, readIfExists, resolveFrameworkDir } from "std/fsx";
 import { appendAudit } from "std/report";
 
 // ─── Wire format (FROZEN — caller-local, D4) ───
@@ -63,7 +63,7 @@ export type Ctx = {
 
 export function defaultCtx(now: Date = new Date()): Ctx {
   const home = process.env.HOME || "";
-  const paiDir = process.env.PAI_DIR || join(home, ".claude", "PAI");
+  const paiDir = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(home);
   return {
     home,
     paiDir,

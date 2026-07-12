@@ -29,7 +29,7 @@ import {
   scoreRules,
   type ScoreRule,
 } from "std/core";
-import { ensureDir, atomicWrite, readIfExists } from "std/fsx";
+import { ensureDir, atomicWrite, readIfExists, resolveFrameworkDir } from "std/fsx";
 import { lines } from "std/report";
 
 // ============================================================================
@@ -339,8 +339,8 @@ export interface Deps {
 }
 
 function defaultDeps(): Deps {
-  const claudeDir = join(process.env.HOME ?? "", ".claude");
-  const learningDir = join(claudeDir, "PAI", "MEMORY", "LEARNING");
+  const frameworkDir = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(process.env.HOME ?? "");
+  const learningDir = join(frameworkDir, "MEMORY", "LEARNING");
   return {
     ratingsFile: join(learningDir, "SIGNALS", "ratings.jsonl"),
     synthesisDir: join(learningDir, "SYNTHESIS"),

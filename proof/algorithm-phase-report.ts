@@ -23,9 +23,9 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { dispatch, extractJson, flagValue } from "std/core";
-import { ensureDir, loadJson, saveJson } from "std/fsx";
+import { ensureDir, loadJson, resolveFrameworkDir, saveJson } from "std/fsx";
 
-const STATE_DIR = join(homedir(), ".claude", "PAI", "MEMORY", "STATE");
+const STATE_DIR = join(resolveFrameworkDir(homedir()), "MEMORY", "STATE");
 
 export function stateFile(dir = STATE_DIR): string {
   return join(dir, "algorithm-phase.json");

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -229,6 +229,66 @@ describe("doc-check mode (curated scope) — narrower extraction, own envelope",
       expect(doc.docExitCode(envelope)).toBe(0); // stale never fails
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// Category 5 (RT-2, AD-9.3): defaultEnv derives the framework dir via resolveFrameworkDir, then the
+// claude-home via dirname(). hooks/ and the archived-ALGORITHM walk keep hanging off the claude-home.
+describe("RT-2 framework-dir resolution — defaultEnv (doc-check + reference-check)", () => {
+  test("doc.defaultEnv: fresh tree → paiDir under .claude/LIFEOS, claudeDir = its parent, hooksDir off claude-home", () => {
+    const home = mkdtempSync(join(tmpdir(), "dc-rt2-"));
+    try {
+      const env = doc.defaultEnv(home);
+      expect(env.paiDir).toBe(join(home, ".claude", "LIFEOS"));
+      expect(env.claudeDir).toBe(join(home, ".claude"));
+      expect(env.hooksDir).toBe(join(home, ".claude", "hooks"));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("ref.defaultEnv: legacy PAI tree present → paiDir under .claude/PAI, claudeDir = its parent", () => {
+    const home = mkdtempSync(join(tmpdir(), "rc-rt2-"));
+    mkdirSync(join(home, ".claude", "PAI"), { recursive: true });
+    try {
+      const env = ref.defaultEnv(home);
+      expect(env.paiDir).toBe(join(home, ".claude", "PAI"));
+      expect(env.claudeDir).toBe(join(home, ".claude"));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+// OQ-2 / AC5: USER/ is (on the real estate) a SYMLINK that points OUT of the framework dir. reference-check
+// walks the whole claude tree; the walk must follow USER/ through the symlink, read the files there, and
+// TERMINATE (realpath escapes LIFEOS/, so it is not a cycle). If the walk skipped or looped on the symlink,
+// the broken ref inside the symlinked file would never be reported (or the test would hang).
+describe("RT-2 symlinked USER/ (OQ-2, AC5) — the walk follows USER/ out of LIFEOS/ and reads through it", () => {
+  test("a broken ref inside a file under the symlinked USER/ is scanned and reported (walk terminates)", () => {
+    const home = mkdtempSync(join(tmpdir(), "sym-rt2-"));
+    const fwDir = join(home, ".claude", "LIFEOS"); // fresh tree → defaultEnv resolves here
+    const userReal = join(home, ".config", "LIFEOS", "USER"); // USER lives OUTSIDE the framework dir
+    mkdirSync(fwDir, { recursive: true });
+    mkdirSync(userReal, { recursive: true });
+    symlinkSync(userReal, join(fwDir, "USER")); // <framework>/USER → <home>/.config/LIFEOS/USER
+    // a markdown file UNDER the symlinked USER with a broken framework-relative ref — only surfaces if walked.
+    writeFileSync(join(userReal, "sym-note.md"), "# note\n\nBroken: `USER/ghost-does-not-exist.md`\n");
+    try {
+      const env = ref.defaultEnv(home);
+      expect(env.paiDir).toBe(fwDir); // sanity: the fresh LIFEOS tree resolved
+      const result = runRefCheck(ref.buildRefConfig(env, { changedOnly: false, includeStale: false, includeOrphans: false }));
+      const envelope = ref.refEnvelope(result, 0);
+      // The file under the symlinked USER was scanned and its broken ref reported — proof the walk read through it.
+      expect(
+        envelope.findings.some(
+          (f) => f.file === join("LIFEOS", "USER", "sym-note.md") && f.ref === "USER/ghost-does-not-exist.md",
+        ),
+      ).toBe(true);
+      expect(envelope.scannedFiles).toBeGreaterThan(0);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   });
 });

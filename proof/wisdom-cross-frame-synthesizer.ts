@@ -41,7 +41,7 @@ import {
   jaccard,
   tokenize,
 } from "std/core";
-import { atomicWrite, ensureDir, exists, walkFiles } from "std/fsx";
+import { atomicWrite, ensureDir, exists, resolveFrameworkDir, walkFiles } from "std/fsx";
 import { lines } from "std/report";
 
 // ── Types ──
@@ -369,7 +369,7 @@ export function main(argv: string[] = process.argv.slice(2)): number {
   }
 
   // Estate paths are caller identity (D4) — resolved at the edge, injectable via PAI_DIR for tests.
-  const baseDir = process.env.PAI_DIR || join(process.env.HOME ?? "", ".claude");
+  const baseDir = process.env.LIFEOS_DIR || process.env.PAI_DIR || resolveFrameworkDir(process.env.HOME ?? "");
   const wisdomDir = join(baseDir, "MEMORY", "WISDOM");
   const framesDir = join(wisdomDir, "FRAMES");
   const principlesDir = join(wisdomDir, "PRINCIPLES");

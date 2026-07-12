@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,6 +7,7 @@ import {
   addEvidence,
   addOpinion,
   confidenceBar,
+  defaultCtx,
   main,
   parseOpinions,
 } from "./opinion-tracker";
@@ -167,5 +168,65 @@ describe("logRelationshipEvent → appendAudit under the UTC month dir", () => {
     expect(rec.event_type).toBe("opinion_created");
     expect(rec.timestamp).toBe(FIXED_NOW.toISOString());
     expect(rec.statement).toBe("Logs an event");
+  });
+});
+
+// ── RT-2 framework-dir resolution (AD-9.3) ───────────────────────────────────────────────────────────
+
+describe("RT-2 framework-dir resolution (AD-9.3)", () => {
+  // ambient shell may export a real PAI_DIR — control LIFEOS_DIR+PAI_DIR+HOME explicitly and restore.
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR", "HOME"] as const;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test("LIFEOS_DIR wins over PAI_DIR — BOTH opinionsFile and relationshipLog hang off the framework dir", () => {
+    process.env.LIFEOS_DIR = "/life";
+    process.env.PAI_DIR = "/pai";
+    const c = defaultCtx();
+    expect(c.opinionsFile).toBe(join("/life", "USER/OPINIONS.md"));
+    // Deliberate RT-2 behavior shift: relationshipLog now hangs off the framework dir, not the old
+    // <home>/.claude/MEMORY/RELATIONSHIP. This documents that shift.
+    expect(c.relationshipLog).toBe(join("/life", "MEMORY/RELATIONSHIP"));
+  });
+
+  test("PAI_DIR honored when LIFEOS_DIR unset", () => {
+    delete process.env.LIFEOS_DIR;
+    process.env.PAI_DIR = "/pai";
+    expect(defaultCtx().opinionsFile).toBe(join("/pai", "USER/OPINIONS.md"));
+  });
+
+  test("neither env set → resolver falls back to LIFEOS under a fresh temp home", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    const home = mkdtempSync(join(tmpdir(), "rt2-"));
+    process.env.HOME = home;
+    try {
+      const c = defaultCtx();
+      expect(c.opinionsFile).toBe(join(home, ".claude", "LIFEOS", "USER/OPINIONS.md"));
+      expect(c.relationshipLog).toBe(join(home, ".claude", "LIFEOS", "MEMORY/RELATIONSHIP"));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy PAI tree present → resolver picks PAI", () => {
+    delete process.env.LIFEOS_DIR;
+    delete process.env.PAI_DIR;
+    const home = mkdtempSync(join(tmpdir(), "rt2-"));
+    mkdirSync(join(home, ".claude", "PAI"), { recursive: true });
+    process.env.HOME = home;
+    try {
+      expect(defaultCtx().opinionsFile).toBe(join(home, ".claude", "PAI", "USER/OPINIONS.md"));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
