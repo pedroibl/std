@@ -18,9 +18,33 @@ test("scanBackEdges flags both PAI/Tools and PAI-Tools forms", () => {
   expect(pkg.some((o) => o.detail === "PAI-Tools")).toBe(true);
 });
 
+test("scanBackEdges flags the case-insensitive PAI/TOOLS real dir (Note #1 option a)", () => {
+  // The real on-disk dir is ALL-CAPS `PAI/TOOLS`; the mixed-case regex would have missed it on a
+  // case-sensitive FS. The `i` flag catches both the old mixed-case form and the real all-caps dir.
+  expect(scanBackEdges(`import { t } from "../PAI/TOOLS/glab";`).some((o) => o.detail === "../PAI/TOOLS/glab")).toBe(true);
+  expect(scanBackEdges(`import { t } from "../PAI/Tools/glab";`).some((o) => o.detail === "../PAI/Tools/glab")).toBe(true);
+});
+
+test("scanBackEdges flags the new LIFEOS/TOOLS framework-dir back-edge (RT-4, case-exact)", () => {
+  expect(scanBackEdges(`import { t } from "../src/x/LIFEOS/TOOLS/y";`).some((o) => o.detail === "../src/x/LIFEOS/TOOLS/y")).toBe(true);
+  expect(scanBackEdges(`import { t } from "LIFEOS-TOOLS";`).some((o) => o.detail === "LIFEOS-TOOLS")).toBe(true);
+});
+
+test("scanBackEdges flags the LifeOS and LifeOs identifiers (RT-4)", () => {
+  expect(scanBackEdges(`import { t } from "../LifeOS/x";`).some((o) => o.detail === "../LifeOS/x")).toBe(true);
+  expect(scanBackEdges(`import { t } from "../LifeOs/x";`).some((o) => o.detail === "../LifeOs/x")).toBe(true);
+});
+
 test("scanBackEdges does NOT false-positive on bloomfilter or a clean relative import", () => {
   expect(scanBackEdges(`import { B } from "bloomfilter";`)).toEqual([]);
   expect(scanBackEdges(`import { other } from "./other";`)).toEqual([]);
+});
+
+test("RT-4 does NOT false-positive on benign lifeoslike / PAILtools lookalikes", () => {
+  // case-exact LIFEOS + word-bounded LifeO[sS] means lowercase `lifeoslike` never matches;
+  // `PAILtools` has no `/`|`-` separator after `PAI`, so isPaiTools misses it too.
+  expect(scanBackEdges(`import { x } from "./lifeoslike/util";`)).toEqual([]);
+  expect(scanBackEdges(`import { x } from "PAILtools";`)).toEqual([]);
 });
 
 test("scanBackEdges ignores a commented-out loom import", () => {
