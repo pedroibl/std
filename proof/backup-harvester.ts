@@ -38,8 +38,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { contentHash, parseNdjson } from "std/core";
 import { walkFiles, ensureDir, readIfExists, atomicWrite, loadJson, saveJson } from "std/fsx";
+import { spawnCapture } from "std/proc";
 import {
   CONTEXT_BLOB_RE,
+  TARBALL_RE,
   flattenContent,
   dateOf,
   discoverBackupSources,
