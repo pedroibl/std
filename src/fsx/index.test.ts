@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 
-import { atomicWrite, ensureDir, exists, loadJson, readIfExists, saveJson, statMtime, walkFiles } from "./index";
+import { atomicWrite, ensureDir, exists, loadJson, readIfExists, resolveFrameworkDir, saveJson, statMtime, walkFiles } from "./index";
 
 /** Run `fn` against a throwaway temp dir, cleaned up after. */
 function inTmp(fn: (dir: string) => void): void {
@@ -329,6 +329,86 @@ describe("walkFiles — recursive, predicate-filtered, files-not-dirs, cycle-saf
         // No symlinks created — plain walk still finds the file at its real path.
         expect(found).toContain(join(a, "file.txt"));
       }
+    });
+  });
+});
+
+describe("resolveFrameworkDir — two-axis probe, fail-soft to the preferred default (AD-9.3 keystone)", () => {
+  // Framework-dir axis (axis 2): under a resolved claude-home, first-existing framework dir wins.
+  test("resolves LIFEOS when only <home>/.claude/LIFEOS exists", () => {
+    inTmp((dir) => {
+      mkdirSync(join(dir, ".claude", "LIFEOS"), { recursive: true });
+      expect(resolveFrameworkDir(dir)).toBe(join(dir, ".claude", "LIFEOS"));
+    });
+  });
+
+  test("resolves PAI (fallback order) when only <home>/.claude/PAI exists", () => {
+    inTmp((dir) => {
+      mkdirSync(join(dir, ".claude", "PAI"), { recursive: true });
+      expect(resolveFrameworkDir(dir)).toBe(join(dir, ".claude", "PAI"));
+    });
+  });
+
+  test("LIFEOS wins over PAI when BOTH exist (first-exists precedence)", () => {
+    inTmp((dir) => {
+      mkdirSync(join(dir, ".claude", "LIFEOS"), { recursive: true });
+      mkdirSync(join(dir, ".claude", "PAI"), { recursive: true });
+      expect(resolveFrameworkDir(dir)).toBe(join(dir, ".claude", "LIFEOS"));
+    });
+  });
+
+  // Claude-home axis (axis 1): the second candidate `.config/claude` is probed when `.claude` is absent.
+  test("resolves via the second claude-home candidate when <home>/.claude is absent", () => {
+    inTmp((dir) => {
+      mkdirSync(join(dir, ".config", "claude", "LIFEOS"), { recursive: true });
+      // no <dir>/.claude at all — axis 1 must fall through to .config/claude
+      expect(resolveFrameworkDir(dir)).toBe(join(dir, ".config", "claude", "LIFEOS"));
+    });
+  });
+
+  test("fresh tree → <home>/.claude/LIFEOS (first-of-each-axis default), no throw", () => {
+    inTmp((dir) => {
+      expect(resolveFrameworkDir(dir)).toBe(join(dir, ".claude", "LIFEOS"));
+    });
+  });
+
+  test("partial tree — <home>/.claude exists but no framework dir → <home>/.claude/LIFEOS", () => {
+    inTmp((dir) => {
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      expect(resolveFrameworkDir(dir)).toBe(join(dir, ".claude", "LIFEOS"));
+    });
+  });
+
+  test("never returns empty on a fresh tree", () => {
+    inTmp((dir) => {
+      expect(resolveFrameworkDir(dir)).not.toBe("");
+    });
+  });
+
+  // Custom candidate lists are honored (the D4 injection contract — nothing is baked).
+  test("custom frameworkDirs list — only [\"PAI\"] resolves/falls back to PAI", () => {
+    inTmp((dir) => {
+      // fresh tree, custom framework list → falls back to the first custom candidate
+      expect(resolveFrameworkDir(dir, undefined, ["PAI"])).toBe(join(dir, ".claude", "PAI"));
+      // and when it exists it is found
+      mkdirSync(join(dir, ".claude", "PAI"), { recursive: true });
+      expect(resolveFrameworkDir(dir, undefined, ["PAI"])).toBe(join(dir, ".claude", "PAI"));
+    });
+  });
+
+  test("custom claudeHomes list is honored", () => {
+    inTmp((dir) => {
+      mkdirSync(join(dir, "custom-home", "LIFEOS"), { recursive: true });
+      expect(resolveFrameworkDir(dir, ["custom-home"])).toBe(join(dir, "custom-home", "LIFEOS"));
+    });
+  });
+
+  test("empty candidate lists do NOT throw — fall back to the safe .claude/LIFEOS defaults (PR #40 nit)", () => {
+    inTmp((dir) => {
+      // With no candidates the resolver must still honor its "never throws" contract, resolving to the
+      // structural defaults rather than crashing on a non-null assertion over an empty array.
+      expect(() => resolveFrameworkDir(dir, [], [])).not.toThrow();
+      expect(resolveFrameworkDir(dir, [], [])).toBe(join(dir, ".claude", "LIFEOS"));
     });
   });
 });

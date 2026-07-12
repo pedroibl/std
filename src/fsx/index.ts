@@ -227,3 +227,48 @@ export function loadJson<T>(path: string, fallback: T): T {
 export function saveJson(path: string, value: unknown): void {
   atomicWrite(path, JSON.stringify(value, null, 2) + "\n");
 }
+
+/**
+ * Resolve the framework directory under a caller-supplied `home`, probing TWO axes in sequence and
+ * falling back to the first candidate of each. This is AD-9.3's keystone: the ~12 estate tools that each
+ * re-hand-roll `PAI_DIR || join(HOME, ".claude", "PAI")` collapse onto this one tested primitive.
+ *
+ * Two axes, resolved in order (NOT a cross-product):
+ *   1. **claude-home** — the first `join(home, ch)` in `claudeHomes` that exists (default probes
+ *      `~/.claude`, then `~/.config/claude`). The `.claude` segment is a PROBED CANDIDATE, never a baked
+ *      literal in the walk. Falls back to `join(home, claudeHomes[0])` on a fresh tree.
+ *   2. **framework-dir** — under that resolved claude-home, the first `join(claudeHome, fd)` in
+ *      `frameworkDirs` that exists (default probes `LIFEOS`, then `PAI`). Falls back to
+ *      `join(claudeHome, frameworkDirs[0])`.
+ *
+ * Returns the resolved framework-dir absolute path. **Never throws** on a missing tree and **never
+ * returns `""`** — it is a PATH COMPUTER, not an I/O op: fail-soft-to-the-preferred-default, because the
+ * caller's *next* step (its own read of a file under the returned dir) is where a genuinely-absent tree
+ * fails loud (FR5). A resolver that threw would force all 12 consumers to wrap it, defeating the
+ * convergence. On a fresh tree the defaults yield `<home>/.claude/LIFEOS` — the NEW name.
+ *
+ * **Four-casing contract** (case-preserving `join`, no `.toLowerCase()` anywhere — the R3 guard: macOS
+ * is case-insensitive and hides a mismatch that breaks on Linux/CI):
+ *   - `LIFEOS`  — the runtime DIRECTORY (all-caps; the default `frameworkDirs[0]`)
+ *   - `LifeOS`  — the repo / brand name
+ *   - `LifeOs`  — code-identifier / filename stems
+ *   - `lifeos`  — url / env-var stems
+ *   - `Life OS` (spaced) is RETIRED / BANNED.
+ *
+ * **CONSUMER-AGNOSTIC (D4/NFR3):** no `HOME`/`~`/`PAI_DIR`/`LIFEOS_DIR`/absolute-estate/pedro/model/voice
+ * literal is baked. `home` is a caller argument (the caller passes `process.env.HOME ?? homedir()` — and
+ * prefers a `LIFEOS_DIR` env override — at the edge, not here). The candidate lists are framework-SHAPE
+ * constants (the same class D4 permits for `git`'s `-C` or `dateParts`' injected `tz`), not identity.
+ */
+export function resolveFrameworkDir(
+  home: string,
+  claudeHomes: string[] = [".claude", ".config/claude"],
+  frameworkDirs: string[] = ["LIFEOS", "PAI"],
+): string {
+  const claudeHome =
+    claudeHomes.map((ch) => join(home, ch)).find(existsSync) ?? join(home, claudeHomes[0] ?? ".claude");
+  return (
+    frameworkDirs.map((fd) => join(claudeHome, fd)).find(existsSync) ??
+    join(claudeHome, frameworkDirs[0] ?? "LIFEOS")
+  );
+}

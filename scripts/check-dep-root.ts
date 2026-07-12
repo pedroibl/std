@@ -22,9 +22,19 @@ export type Violation = { kind: string; detail: string; line?: number };
 
 // Segment-aware so `bloomfilter` / `heirloom` / `loomis` do NOT false-positive; a bare substring would.
 const isLoom = (spec: string): boolean => spec.split(/[\\/]/).includes("loom");
-// Covers both the path form (`PAI/Tools`) and the package-name form (`PAI-Tools`).
-const isPaiTools = (spec: string): boolean => /PAI[\/-]Tools/.test(spec);
-const isBackEdge = (spec: string): boolean => isLoom(spec) || isPaiTools(spec);
+// Covers the path form (`PAI/TOOLS`) and the package-name form (`PAI-Tools`). Case-INsensitive (Note #1
+// option a): the real on-disk dir is ALL-CAPS `PAI/TOOLS`, so a mixed-case `/PAI[\/-]Tools/` would miss
+// it on a case-sensitive FS (Linux/CI) — the `i` flag catches both the old mixed-case and the real dir.
+const isPaiTools = (spec: string): boolean => /PAI[\/-]TOOLS/i.test(spec);
+// RT-4 (AD-9.3 Rule 5, same-commit half-rename lock-step): flag the NEW framework-dir back-edge shapes.
+// CASE-EXACT (Rule 3): `LIFEOS[\/-]TOOLS` (all-caps dir — NOT the brief's mixed-case `LIFEOS/Tools`, which
+// would silently miss the real runtime path) + the `LifeOS`/`LifeOs` identifiers, kept word-bounded so a
+// benign `lifeoslike` does not false-positive. Never case-fold: `LIFEOS` (dir) must not conflate with
+// `LifeOS` (repo) / `LifeOs` (code identifiers) / `lifeos` (urls). `Life OS` spaced is retired/banned.
+const isFrameworkDir = (spec: string): boolean =>
+  /LIFEOS[\/-]TOOLS/.test(spec) || /\bLifeO[sS]\b/.test(spec);
+const isBackEdge = (spec: string): boolean =>
+  isLoom(spec) || isPaiTools(spec) || isFrameworkDir(spec);
 
 /** Pure: flag any import/require specifier in a source file reaching `loom` or `PAI/Tools`. */
 export function scanBackEdges(src: string): Violation[] {
