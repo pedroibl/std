@@ -46,6 +46,7 @@ import { contentHash, parseNdjson } from "std/core";
 import { walkFiles, ensureDir, readIfExists, atomicWrite, loadJson, saveJson } from "std/fsx";
 import {
   CONTEXT_BLOB_RE,
+  TARBALL_RE,
   flattenContent,
   dateOf,
   discoverBackupSources,
