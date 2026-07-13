@@ -39,7 +39,16 @@ describe("readJsonFromStream — posture-neutral T | null (AD-9.4 Rule 2)", () =
     const start = Date.now();
     const v = await readJsonFromStream(neverEndingStream(), 40);
     expect(v).toBeNull();
-    expect(Date.now() - start).toBeLessThan(1000); // resolved via the 40ms override, not a hang
+    expect(Date.now() - start).toBeLessThan(500); // resolved via the 40ms override, well under the 1000ms default
+  });
+
+  test("on resolution it detaches its listeners and pauses the stream (no orphaned flowing stdin)", async () => {
+    const s = neverEndingStream();
+    await readJsonFromStream(s, 20); // times out → finish(null) runs the cleanup
+    expect(s.listenerCount("data")).toBe(0);
+    expect(s.listenerCount("end")).toBe(0);
+    expect(s.listenerCount("error")).toBe(0);
+    expect(s.isPaused()).toBe(true);
   });
 
   test("override timeout is honored — resolves fast, not at the 1000ms default", async () => {

@@ -61,7 +61,7 @@ interface ToolFailureEvent {
   tool_input_preview: string;
 }
 
-const OBS_DIR = join(resolveFrameworkDir(homedir()), 'MEMORY', 'OBSERVABILITY');
+const OBS_DIR = join(resolveFrameworkDir(process.env.HOME ?? homedir()), 'MEMORY', 'OBSERVABILITY');
 const FAILURES_FILE = 'tool-failures.jsonl';
 const TZ = 'Australia/Melbourne'; // Pedro's actual tz (never the PAI template's America/Los_Angeles).
 

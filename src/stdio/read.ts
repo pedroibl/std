@@ -28,7 +28,9 @@ export const DEFAULT_STDIN_TIMEOUT_MS = 1000;
  * Read the process's own stdin fully, race it against `timeoutMs`, and `JSON.parse` the result.
  * Resolves the parsed value on success, or **`null` on empty / malformed / timeout** — it never rejects,
  * never exits, never throws. Posture-neutral (see the module header): the caller maps `null` to its
- * posture.
+ * posture. Note a valid JSON `null` literal also resolves `null` — the contract is "no usable input"; a
+ * caller needing to distinguish it should not be using this reader (valid `false`/`0`/`""` return
+ * distinctly).
  *
  * `timeoutMs` defaults to `DEFAULT_STDIN_TIMEOUT_MS` (1000) and is caller-overridable.
  */
@@ -49,21 +51,11 @@ export function readJsonFromStream<T = unknown>(
   return new Promise<T | null>((resolve) => {
     let settled = false;
     let data = "";
-    // The single resolution point — guarded so the FIRST of {end, timeout, error} wins and clears the
-    // timer. A later callback is a no-op (no double-resolve, no timer leak).
-    const finish = (value: T | null): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(value);
-    };
-    // Timeout wins if the input never arrives or the stream never ends — resolve `null`, never hang.
-    const timer = setTimeout(() => finish(null), timeoutMs);
 
-    stream.on("data", (chunk: Buffer | string) => {
+    const onData = (chunk: Buffer | string): void => {
       data += typeof chunk === "string" ? chunk : chunk.toString();
-    });
-    stream.on("end", () => {
+    };
+    const onEnd = (): void => {
       const text = data.trim();
       if (!text) return finish(null); // empty / whitespace-only stdin → null
       try {
@@ -71,7 +63,29 @@ export function readJsonFromStream<T = unknown>(
       } catch {
         finish(null); // malformed JSON → null (posture-neutral: we do not throw; the caller decides)
       }
-    });
-    stream.on("error", () => finish(null));
+    };
+    const onError = (): void => finish(null);
+
+    // The single resolution point — guarded so the FIRST of {end, timeout, error} wins. A later callback
+    // is a no-op (no double-resolve, no timer leak). On resolution it also DETACHES the listeners and
+    // pauses the stream: a flowing `process.stdin` left attached after a timeout keeps the event loop
+    // ref'd, so a caller that returns naturally (rather than `process.exit`ing) would otherwise hang, and
+    // an orphaned `data` handler would keep appending to a dead closure.
+    const finish = (value: T | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stream.removeListener("data", onData);
+      stream.removeListener("end", onEnd);
+      stream.removeListener("error", onError);
+      if (typeof stream.pause === "function") stream.pause();
+      resolve(value);
+    };
+    // Timeout wins if the input never arrives or the stream never ends — resolve `null`, never hang.
+    const timer = setTimeout(() => finish(null), timeoutMs);
+
+    stream.on("data", onData);
+    stream.on("end", onEnd);
+    stream.on("error", onError);
   });
 }
