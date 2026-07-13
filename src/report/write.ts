@@ -26,7 +26,7 @@
 // scope for FR9 (and `appendAudit` is explicitly best-effort and loss-tolerant).
 
 import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { atomicWrite, ensureDir } from "../fsx";
 
@@ -128,4 +128,19 @@ export function appendAudit(path: string, record: unknown, maxBytes: number = AU
   } catch {
     // best-effort: swallow — a failed audit write must not break the caller (FR9).
   }
+}
+
+/**
+ * Append one JSONL `record` to `join(dir, file)`, creating `dir` first. The dir+file-shaped sibling of
+ * `appendAudit` (which takes a single full path).
+ *
+ * WHY a separate signature: the ~10 hook observability sites all carry the SAME three-part shape — a base
+ * `dir` (e.g. `MEMORY/OBSERVABILITY`) + a `filename` (e.g. `tool-activity.jsonl`) + their own
+ * `ensureDir(dir)` before an `appendFileSync` — which the full-path `appendAudit` did not model, so each
+ * re-hand-rolls the mkdir. This models that shape directly. It DELEGATES to `appendAudit` for the write,
+ * so it inherits the identical size-rotation and BEST-EFFORT/never-throw semantics (FR9) — it is an
+ * EXTENSION of the audit surface, not a rival writer (AD-9.4 Rule 4 / P2).
+ */
+export function appendJsonlEvent(dir: string, file: string, record: unknown, maxBytes?: number): void {
+  appendAudit(join(dir, file), record, maxBytes);
 }

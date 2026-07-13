@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { dateParts, daysSince, isoDate } from "./date";
+import { dateParts, daysSince, isoDate, isoOffset } from "./date";
 
 // All instants are fixed Date literals — never `new Date()` — so the suite is deterministic and a
 // stray ambient-clock read in the kit would surface as a failure rather than a flaky pass.
@@ -52,6 +52,54 @@ describe("dateParts", () => {
     expect(p).toEqual({ year: 2026, month: 6, day: 30, iso: "2026-06-30" });
     const pad = (n: number) => String(n).padStart(2, "0");
     expect(`${p.year}-${pad(p.month)}-${pad(p.day)}`).toBe(p.iso);
+  });
+});
+
+describe("isoOffset — tz-offset ISO timestamp YYYY-MM-DDTHH:MM:SS±HH:MM (Story 13.2 / P3)", () => {
+  // Fixed instants + DST-free zones so the offsets are stable regardless of the run date.
+  test("positive whole-hour offset (Australia/Brisbane, +10:00, no DST)", () => {
+    expect(isoOffset(new Date("2026-07-13T04:00:00Z"), "Australia/Brisbane")).toBe(
+      "2026-07-13T14:00:00+10:00",
+    );
+  });
+
+  test("negative whole-hour offset (America/Phoenix, -07:00, no DST)", () => {
+    expect(isoOffset(new Date("2026-07-13T12:00:00Z"), "America/Phoenix")).toBe(
+      "2026-07-13T05:00:00-07:00",
+    );
+  });
+
+  test("HALF-HOUR offset renders +05:30, not a dropped/mis-padded minutes field (Asia/Kolkata)", () => {
+    // The mandatory guard: every whole-hour case would pass a broken ±HH:MM minutes path. Only a
+    // sub-hour zone proves the minutes remainder is carried. (Story AC3.)
+    expect(isoOffset(new Date("2026-07-13T04:00:00Z"), "Asia/Kolkata")).toBe(
+      "2026-07-13T09:30:00+05:30",
+    );
+  });
+
+  test("45-minute offset renders +05:45 (Asia/Kathmandu) — the minutes field generalizes", () => {
+    expect(isoOffset(new Date("2026-07-13T04:00:00Z"), "Asia/Kathmandu")).toBe(
+      "2026-07-13T09:45:00+05:45",
+    );
+  });
+
+  test("UTC renders +00:00", () => {
+    expect(isoOffset(new Date("2026-07-13T08:15:30Z"), "UTC")).toBe("2026-07-13T08:15:30+00:00");
+  });
+
+  test("crosses the day boundary in the target tz (Australia/Melbourne)", () => {
+    // 2026-07-13 15:00Z is 2026-07-14 01:00 in Melbourne (AEST +10:00 in July).
+    expect(isoOffset(new Date("2026-07-13T15:00:00Z"), "Australia/Melbourne")).toBe(
+      "2026-07-14T01:00:00+10:00",
+    );
+  });
+
+  test("throws RangeError on an Invalid Date (fail-loud, FR5)", () => {
+    expect(() => isoOffset(new Date("garbage"), "UTC")).toThrow(RangeError);
+  });
+
+  test("throws RangeError on an invalid IANA tz (fail-loud, FR5)", () => {
+    expect(() => isoOffset(new Date("2026-07-13T04:00:00Z"), "Not/AZone")).toThrow(RangeError);
   });
 });
 

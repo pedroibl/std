@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { appendAudit, appendIfMissing, commitRename, safeWrite, stageWrite, writeIfAbsent } from "./write";
+import { appendAudit, appendIfMissing, appendJsonlEvent, commitRename, safeWrite, stageWrite, writeIfAbsent } from "./write";
 
 /** Run `fn` against a throwaway temp dir, cleaned up after. */
 function inTmp(fn: (dir: string) => void): void {
@@ -141,6 +141,51 @@ describe("appendAudit — JSONL, size-rotated, best-effort (FR9)", () => {
       writeFileSync(path, "i am a file");
       // out.md is a file, so out.md/audit.jsonl can't be created — appendAudit must swallow, not throw.
       expect(() => appendAudit(join(path, "audit.jsonl"), { x: 1 })).not.toThrow();
+    });
+  });
+});
+
+describe("appendJsonlEvent — dir+file JSONL, ensureDir-first, best-effort (Story 13.2 / P2)", () => {
+  test("creates the base dir when absent, then appends a parseable JSONL record", () => {
+    inTmp((dir) => {
+      const base = join(dir, "MEMORY", "OBSERVABILITY"); // does not exist yet
+      appendJsonlEvent(base, "events.jsonl", { event: "a", n: 1 });
+      const path = join(base, "events.jsonl");
+      expect(existsSync(path)).toBe(true);
+      expect(JSON.parse(readFileSync(path, "utf8").trim())).toEqual({ event: "a", n: 1 });
+    });
+  });
+
+  test("appends a \\n-terminated JSON.stringify(record) per call (one line each)", () => {
+    inTmp((dir) => {
+      appendJsonlEvent(dir, "events.jsonl", { event: "a" });
+      appendJsonlEvent(dir, "events.jsonl", { event: "b" });
+      const raw = readFileSync(join(dir, "events.jsonl"), "utf8");
+      expect(raw.endsWith("\n")).toBe(true);
+      const lines = raw.trim().split("\n");
+      expect(lines).toHaveLength(2);
+      expect(JSON.parse(lines[0]!)).toEqual({ event: "a" });
+      expect(JSON.parse(lines[1]!)).toEqual({ event: "b" });
+    });
+  });
+
+  test("rotates to <file>.1 once the log reaches maxBytes (inherited from appendAudit)", () => {
+    inTmp((dir) => {
+      const path = join(dir, "events.jsonl");
+      appendJsonlEvent(dir, "events.jsonl", { big: "x".repeat(200) }, 50);
+      const sizeAfterFirst = statSync(path).size;
+      appendJsonlEvent(dir, "events.jsonl", { next: true }, 50);
+      expect(existsSync(`${path}.1`)).toBe(true);
+      expect(statSync(`${path}.1`).size).toBe(sizeAfterFirst);
+      expect(JSON.parse(readFileSync(path, "utf8").trim())).toEqual({ next: true });
+    });
+  });
+
+  test("best-effort: swallows I/O errors, never throws (dir cannot be created)", () => {
+    inTmp((dir) => {
+      const asFile = join(dir, "not-a-dir");
+      writeFileSync(asFile, "i am a file"); // using it as `dir` makes ensureDir/append impossible
+      expect(() => appendJsonlEvent(asFile, "events.jsonl", { x: 1 })).not.toThrow();
     });
   });
 });
