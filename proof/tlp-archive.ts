@@ -26,10 +26,12 @@
  * `isoDate`, not the still-deferred `isoDateTime` 2-consumer primitive (not built here, per scope).
  *
  * CLI (`list`/`probe`/`one`/`all`/`retry`/`index`) → `positional()` for subcommand/URL extraction. Every
- * command here is async (network + fs I/O); `core/args.dispatch` requires SYNCHRONOUS handlers
- * (`Record<string, () => number>`) — SUBSTRATE FINDING shared with `youtube-api.ts` (see its header):
- * `args.ts`'s own doc comment flags this gap as deferred "until a real consumer needs it." This cluster
- * is that consumer; routing here stays a plain `switch` since this story does not touch `src/**`.
+ * command here is async (network + fs I/O). The original 12.5 rewrite noted `core/args.dispatch` required
+ * SYNCHRONOUS handlers (`Record<string, () => number>`) — the SUBSTRATE FINDING shared with `inference.ts`
+ * / `youtube-api.ts` that `args.ts`'s own doc comment deferred "until a real consumer needs it." Epic 17
+ * promoted the async sibling `core.dispatchAsync`; `main()` now routes through it, replacing the former
+ * `if/else` chain. `onUnknown` returns exit 2 (usage) unchanged — this file is one of `dispatchAsync`'s
+ * two proof-of-adoption consumers (with `inference.ts`).
  *
  * STAYS caller-local (D4): `htmlToMd` + every HTML-parsing helper (domain vocabulary, not a plumbing
  * primitive), the Knowledge entry schema (`buildEntry`/`buildArchiveIndex`), the blog's domain URL, the
@@ -48,7 +50,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { isoDate, positional } from "std/core";
+import { dispatchAsync, isoDate, positional } from "std/core";
 import { atomicWrite, ensureDir, readIfExists, resolveFrameworkDir } from "std/fsx";
 import { fetchWithTimeout } from "std/http";
 
@@ -566,67 +568,85 @@ export async function main(
   const today = isoDate(now);
   const cmd = positional(argv);
 
-  if (cmd === "list") {
-    const urls = await buildUrlList(cfg);
-    console.log(`Wrote ${urls.length} URLs to ${cfg.urlFile}`);
-  } else if (cmd === "probe") {
-    const url = positional(argv.slice(1));
-    if (!url) throw new Error("probe requires URL arg");
-    const html = await fetchHtml(url);
-    const post = parsePost(html, url);
-    console.log(
-      JSON.stringify(
-        { ...post, bodyHtml: post.bodyHtml.slice(0, 200) + "...", bodyMd: post.bodyMd.slice(0, 400) + "..." },
-        null,
-        2,
-      ),
-    );
-  } else if (cmd === "one") {
-    const url = positional(argv.slice(1));
-    if (!url) throw new Error("one requires URL arg");
-    const r = await processOne(cfg, url, null, today);
-    console.log(JSON.stringify(r, null, 2));
-  } else if (cmd === "all") {
-    let urls: string[];
-    const existing = readIfExists(cfg.urlFile);
-    if (existing === null) {
-      console.log("Building URL list first…");
-      urls = await buildUrlList(cfg);
-    } else {
-      urls = existing.split("\n").filter(Boolean);
-    }
-    console.log(`Processing ${urls.length} URLs at concurrency ${CONCURRENCY}…`);
-    const r = await runBulk(cfg, urls, today);
-    console.log(`\n=== DONE ===`);
-    console.log(`Success: ${r.success.length}`);
-    console.log(`Failed:  ${r.failed.length}`);
-    if (r.failed.length) {
-      console.log(`\nFailed list at ${cfg.failedFile}`);
-    }
-  } else if (cmd === "retry") {
-    const failedContent = readIfExists(cfg.failedFile);
-    if (failedContent === null) {
-      console.log("No failed file");
+  // Subcommand routing → `core.dispatchAsync` (the async sibling promoted in Epic 17). Each handler is
+  // async (network + fs), returns its own exit code, and closes over `cfg`/`today`/`argv`; behavior +
+  // console output are byte-identical to the former `if/else` chain, including the exit-2 usage on an
+  // unknown command via `onUnknown`.
+  const handlers: Record<string, () => Promise<number>> = {
+    list: async () => {
+      const urls = await buildUrlList(cfg);
+      console.log(`Wrote ${urls.length} URLs to ${cfg.urlFile}`);
       return 0;
-    }
-    const lines = failedContent.split("\n").filter(Boolean);
-    const urls = lines.map((l) => l.split("\t")[0]).filter(Boolean);
-    console.log(`Retrying ${urls.length} URLs…`);
-    const r = await runBulk(cfg, urls, today);
-    console.log(`\n=== RETRY DONE ===`);
-    console.log(`Success: ${r.success.length}`);
-    console.log(`Failed:  ${r.failed.length}`);
-  } else if (cmd === "index") {
-    const urlContent = readIfExists(cfg.urlFile) ?? "";
-    const urls = urlContent.split("\n").filter(Boolean);
-    const out = buildArchiveIndex(cfg, urls, today);
-    atomicWrite(join(cfg.knowledgeDir, "tlp-archive-index.md"), out);
-    console.log(`Wrote tlp-archive-index.md (${out.length} chars)`);
-  } else {
+    },
+    probe: async () => {
+      const url = positional(argv.slice(1));
+      if (!url) throw new Error("probe requires URL arg");
+      const html = await fetchHtml(url);
+      const post = parsePost(html, url);
+      console.log(
+        JSON.stringify(
+          { ...post, bodyHtml: post.bodyHtml.slice(0, 200) + "...", bodyMd: post.bodyMd.slice(0, 400) + "..." },
+          null,
+          2,
+        ),
+      );
+      return 0;
+    },
+    one: async () => {
+      const url = positional(argv.slice(1));
+      if (!url) throw new Error("one requires URL arg");
+      const r = await processOne(cfg, url, null, today);
+      console.log(JSON.stringify(r, null, 2));
+      return 0;
+    },
+    all: async () => {
+      let urls: string[];
+      const existing = readIfExists(cfg.urlFile);
+      if (existing === null) {
+        console.log("Building URL list first…");
+        urls = await buildUrlList(cfg);
+      } else {
+        urls = existing.split("\n").filter(Boolean);
+      }
+      console.log(`Processing ${urls.length} URLs at concurrency ${CONCURRENCY}…`);
+      const r = await runBulk(cfg, urls, today);
+      console.log(`\n=== DONE ===`);
+      console.log(`Success: ${r.success.length}`);
+      console.log(`Failed:  ${r.failed.length}`);
+      if (r.failed.length) {
+        console.log(`\nFailed list at ${cfg.failedFile}`);
+      }
+      return 0;
+    },
+    retry: async () => {
+      const failedContent = readIfExists(cfg.failedFile);
+      if (failedContent === null) {
+        console.log("No failed file");
+        return 0;
+      }
+      const lines = failedContent.split("\n").filter(Boolean);
+      const urls = lines.map((l) => l.split("\t")[0]).filter(Boolean);
+      console.log(`Retrying ${urls.length} URLs…`);
+      const r = await runBulk(cfg, urls, today);
+      console.log(`\n=== RETRY DONE ===`);
+      console.log(`Success: ${r.success.length}`);
+      console.log(`Failed:  ${r.failed.length}`);
+      return 0;
+    },
+    index: async () => {
+      const urlContent = readIfExists(cfg.urlFile) ?? "";
+      const urls = urlContent.split("\n").filter(Boolean);
+      const out = buildArchiveIndex(cfg, urls, today);
+      atomicWrite(join(cfg.knowledgeDir, "tlp-archive-index.md"), out);
+      console.log(`Wrote tlp-archive-index.md (${out.length} chars)`);
+      return 0;
+    },
+  };
+
+  return dispatchAsync(cmd, handlers, () => {
     console.log("Usage: bun tlp-archive.ts {list|probe URL|one URL|all|retry|index}");
     return 2;
-  }
-  return 0;
+  });
 }
 
 if (import.meta.main) {
