@@ -37,6 +37,13 @@ export interface Consumer {
 /** The closed adoption record. Sorted by `name`; one entry per consumer (AD-3 serialization). */
 export const STD_CONSUMERS: readonly Consumer[] = [
   {
+    name: "gen-image",
+    repo: "~/Dev/gen-image",
+    adopted: "bun link",
+    surface: "core (args, parse/text/date, severity); future http/fsx/proc",
+    note: "Epic 1 substrate adoption. Story 1.1 links std + registers here; actual arg/fs/proc swaps land in Story 1.2 (std plumbing), parse/text/date in 1.3, http edge in 1.4.",
+  },
+  {
     name: "loom",
     repo: "~/Dev/loom (gitlab: pedroibl/loom)",
     adopted: "bun link",
