@@ -38,13 +38,36 @@ export function hasFlag(args: string[], name: string): boolean {
  * handler may legitimately return any code). Pure: no console, no process, no exit — the only side
  * effects are whatever the caller's handlers / `onUnknown` do. `Object.hasOwn` ensures inherited
  * prototype keys (`constructor`, `toString`, …) are never run as handlers — they fall through to
- * `onUnknown`. Handlers are synchronous and return a number; an async/richer-result variant is left for
- * when a real consumer needs it (D2 — no speculative generalization).
+ * `onUnknown`. Handlers are synchronous and return a number; when the handlers do async work (network,
+ * fs), use `dispatchAsync` (the sibling below), which the D2 "when a real consumer needs it" note that
+ * used to sit here has since earned.
  */
 export function dispatch(
   cmd: string,
   handlers: Record<string, () => number>,
   onUnknown: (cmd: string) => number,
 ): number {
+  return Object.hasOwn(handlers, cmd) ? handlers[cmd]() : onUnknown(cmd);
+}
+
+/**
+ * Async sibling of `dispatch` — identical routing, for CLIs whose subcommands do awaited work (an HTTP
+ * call, an fs walk). Promoted in Epic 17 after every non-trivial extracted CLI hand-rolled this exact
+ * `Object.hasOwn`-keyed async switch because `dispatch` was sync-only (the deferred consumer the sync
+ * doc anticipated arrived ≥8× over across the 12.5 sweep).
+ *
+ * Semantics mirror `dispatch` byte-for-byte, only the value type changes: handlers return
+ * `Promise<number>`, and the returned promise resolves to the matched handler's exit code, or to
+ * `onUnknown(cmd)`'s. `onUnknown` may be sync OR async (`Promise<number> | number`) — a plain
+ * `console.error(...); return 1` edge handler is accepted unchanged, and `await` on a bare number is a
+ * no-op, so callers need not wrap it. Own-property lookup only, so inherited prototype keys
+ * (`constructor`, `toString`, …) still fall through to `onUnknown`. Pure: no console, no process, no
+ * exit — side effects are whatever the caller's handlers / `onUnknown` do.
+ */
+export async function dispatchAsync(
+  cmd: string,
+  handlers: Record<string, () => Promise<number>>,
+  onUnknown: (cmd: string) => Promise<number> | number,
+): Promise<number> {
   return Object.hasOwn(handlers, cmd) ? handlers[cmd]() : onUnknown(cmd);
 }

@@ -38,19 +38,20 @@
  * instruction not to re-preserve the old ordering. See `inference.test.ts` for the regression that
  * proves it.
  *
- * SUBSTRATE FINDING #2 — `core.dispatch()` doesn't fit this CLI's subcommand switch (advisor vs
- * inference): `dispatch()` is documented sync-only (`Record<string, () => number>`), but both branches
+ * SUBSTRATE FINDING #2 [RESOLVED — Epic 17] — `core.dispatch()` didn't fit this CLI's subcommand switch
+ * (advisor vs inference): `dispatch()` was sync-only (`Record<string, () => number>`), but both branches
  * here `await` real work (an Anthropic/OpenRouter call). Forcing an async body through a sync handler
  * would either lose the awaited result or return before the work completes — a correctness bug, not a
- * style choice. `gmail.ts` (this same story) hits the identical wall on its own subcommand switch. Both
- * hand-roll the same `Object.hasOwn`-keyed map `dispatch()` itself uses internally, just async. This is
- * exactly the "async/richer-result variant" `dispatch`'s own doc comment defers "until a real consumer
- * needs it" (D2) — there are now two candidate consumers.
+ * style choice. `gmail.ts` (this same story) hit the identical wall, and the 12.5 sweep found ≥8 CLIs
+ * hand-rolling the same `Object.hasOwn`-keyed async map. That is the "async/richer-result variant"
+ * `dispatch`'s doc comment deferred "until a real consumer needs it" (D2) — the consumers arrived, so
+ * `core.dispatchAsync` was promoted. `main()` below now routes through it (see the note there); this
+ * file is one of its two proof-of-adoption consumers (with `tlp-archive.ts`).
  */
 
 import { readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { extractJson, flagValue, hasFlag, positional } from "std/core";
+import { dispatchAsync, extractJson, flagValue, hasFlag, positional } from "std/core";
 // Only httpJson is needed here — both provider calls (Anthropic, OpenRouter) are POST-JSON with a
 // parsed-JSON success path, not a raw/non-JSON/streaming fetch, so `fetchWithTimeout` (the transparent
 // envelope one layer down) has no direct caller in THIS tool.
@@ -539,15 +540,18 @@ async function main(): Promise<number> {
   const parsed = parseCliArgs(process.argv.slice(2));
   const { mode, positionalArgs, autoState, timeout, expectJson, level } = parsed;
 
-  // See SUBSTRATE FINDING #2 at the top of this file for why this is a hand-rolled async map (same
-  // `Object.hasOwn` shape `dispatch()` uses internally) rather than `core.dispatch()` itself.
+  // Subcommand switch → `core.dispatchAsync` (the async sibling this file's SUBSTRATE FINDING #2 called
+  // for, now promoted in Epic 17). Same `Object.hasOwn` routing, awaited handlers; `onUnknown` keeps the
+  // exact prior error text + exit 1. `mode` is already narrowed to a known key by `parseCliArgs`, so the
+  // unknown branch is unreachable here — retained byte-identical for contract stability.
   const handlers: Record<string, () => Promise<number>> = {
     advisor: () => runAdvisorCli({ positionalArgs, autoState, timeout }),
     inference: () => runInferenceCli({ positionalArgs, expectJson, timeout, level }),
   };
-  if (Object.hasOwn(handlers, mode)) return handlers[mode]();
-  console.error(`Invalid mode: ${mode}. Use inference or advisor.`);
-  return 1;
+  return dispatchAsync(mode, handlers, (m) => {
+    console.error(`Invalid mode: ${m}. Use inference or advisor.`);
+    return 1;
+  });
 }
 
 if (import.meta.main) {
