@@ -5,4 +5,4 @@
 
 export { lines, type Lines } from "./p";
 export { emitJson, jsonOutput, log } from "./json";
-export { appendAudit, appendIfMissing, commitRename, safeWrite, stageWrite, writeIfAbsent } from "./write";
+export { appendAudit, appendIfMissing, appendJsonlEvent, commitRename, safeWrite, stageWrite, writeIfAbsent } from "./write";
