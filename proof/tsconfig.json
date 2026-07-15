@@ -1,5 +1,9 @@
 {
   "extends": "../tsconfig.json",
+  "//allowImportingTsExtensions": "Story 13.6: the live security inspectors (EgressInspector/RulesInspector) import siblings by the `../types.ts` byte-verbatim string; tsc needs this flag to typecheck those .ts-suffixed specifiers. Proof-infra only — the deployed hooks run under Bun (which resolves .ts natively) and this tsconfig is NEVER deployed. Valid because the root config sets noEmit:true.",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true
+  },
   "include": ["**/*.ts"],
   "//": "harvester.generated.ts is the VERBATIM Task-0 capture (Story 11.1) — it preserves the generator's 3 wrong imports on purpose as the Story-11.3 improvement-note input, so it is excluded from typecheck.",
   "exclude": ["harvester.generated.ts"]
