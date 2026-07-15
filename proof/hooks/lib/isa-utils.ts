@@ -28,3 +28,25 @@ export function readRegistry(): { sessions: Record<string, any> } {
 export function writeRegistry(_reg: { sessions: Record<string, any> }): void {
   // no-op in the proof — cleanStaleSessions is exercised via the injectable pure fn, not this write
 }
+
+// ── ISA artifact + rating-pulse surface (added Story 13.4 for WCL + SatisfactionCapture) ──
+// Faithful signatures of the isa-utils exports the memory cluster consumes: findArtifactPath (WCL locates
+// the session's ISA.md) and addRatingPulse (SatCap records a rating on the ISA registry). Frozen module —
+// isa-utils.ts's own collapse is Story 13.5; the 13.4 hooks keep importing these two by identical string.
+
+/** Locate a session's Ideal-State-Artifact path (ISA.md / legacy PRD.md) by slug, or null when absent.
+ *  Real impl walks MEMORY/WORK/<slug>; proof stub returns null (fire-tests hit no-state exit-0 first). */
+export function findArtifactPath(_slug: string): string | null {
+  return null;
+}
+
+export interface RatingPulse {
+  value: number; // 1-10
+  timestamp: number; // epoch ms
+  message?: string; // the short message that triggered it (optional, max 32 chars)
+}
+
+/** Record a rating pulse on the session's ISA registry. Real impl mutates the registry; proof no-op. */
+export function addRatingPulse(_sessionUUID: string, _pulse: RatingPulse): void {
+  // no-op in the proof — SatisfactionCapture's happy path is not exercised by the null-stdin fire test
+}

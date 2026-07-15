@@ -22,6 +22,30 @@ export function getIdentity(): Identity {
   };
 }
 
+// ── Principal surface (added Story 13.4 for RelationshipMemory + SatisfactionCapture) ──
+// Faithful signatures of the identity exports the memory cluster consumes: getPrincipal /
+// getPrincipalName (RM O-notes + SatCap prompt/learning) and getDAName (RM B-notes). Real impl reads
+// settings.json → principal; the proof returns Pedro's actuals (Melbourne tz, never the template's LA).
+export interface Principal {
+  name: string;
+  pronunciation: string;
+  timezone: string;
+}
+
+export function getPrincipal(): Principal {
+  return { name: "Pedro", pronunciation: "PEH-droo", timezone: "Australia/Melbourne" };
+}
+
+/** The active DA's name (real impl: getIdentity().name). */
+export function getDAName(): string {
+  return getIdentity().name;
+}
+
+/** The Principal's name (real impl: getPrincipal().name). */
+export function getPrincipalName(): string {
+  return getPrincipal().name;
+}
+
 // ── Observability config surface (added Story 13.3 for observability-transport.ts) ──
 // Faithful signatures of ~/.claude/hooks/lib/identity.ts's observability exports; the rewrite consumes
 // `ObservabilityTarget` (type) + `getObservabilityConfig()`. Real impl reads settings.json → observability.
