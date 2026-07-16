@@ -1,39 +1,81 @@
-// PROOF-ONLY SHIM (Story 13.4, Option A) — NOT deployed.
-// Reproduces the ~/.claude/hooks/lib/time.ts exports the 13.4 rewrites consume so proof/hooks/**
-// typechecks in isolation; the DEPLOYED hooks import the REAL `./lib/time` by the identical relative
-// string (byte-verbatim deploy holds). FROZEN module (AD-9.4 Rule 3 / AC7) — lib/time.ts is owned by
-// Story 13.7 (its internal swap to core.isoOffset/dateParts is 13.7's, NOT this story's); this copy
-// exists ONLY for the proof. Caller-local default = Pedro's actual tz (Australia/Melbourne — memory
-// pai-template-defaults-are-pedros-data, never the template's America/Los_Angeles).
-//
-// Deterministic-ish: the proof drives the hooks to their `null`-stdin / no-state exit-0 branches, which
-// return BEFORE these time fns run on the happy path, so exact values are never asserted through the fire
-// tests. getPSTComponents returns fixed sentinels so any accidental happy-path reach stays inspectable.
+/**
+ * Shared Time Utilities
+ *
+ * Consistent timestamp generation across the hook system.
+ * Reads timezone from settings.json via principal.timezone
+ * Used by: All hooks that need timestamps
+ *
+ * Story 13.7 (AD-9.4 Rule 3): internals collapsed onto the tested `core` date primitives BEHIND
+ * byte-stable export signatures — this is the frozen-facade migration 13.3/13.4 deferred here.
+ *   - getISOTimestamp     → core.isoOffset(now, tz)      (YYYY-MM-DDTHH:MM:SS±HH:MM; byte-parity golden test)
+ *   - getPSTDate          → core.dateParts(now, tz).iso  (date-only YYYY-MM-DD)
+ *   - getPSTComponents / getFilenameTimestamp / getPSTTimestamp derive their H:M:S from isoOffset's
+ *     fixed-width YYYY-MM-DDTHH:MM:SS prefix — NOT dateParts (which has NO hour/minute/second field).
+ * The tz short-NAME (getPSTTimestamp / getTimezoneDisplay) has no std primitive → stays caller-local.
+ * The 7 exports are the contract: their bytes must not shift — 12 importers across 4 clusters (incl. 3
+ * live 13.3 hooks) depend on getISOTimestamp emitting identical bytes.
+ */
 
-const TZ = "Australia/Melbourne";
+import { getPrincipal } from './identity';
+import { isoOffset, dateParts } from 'std/core';
 
-function localNow(): Date {
-  return new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
+/**
+ * Get configured timezone from settings.json (defaults to UTC)
+ */
+function getTimezone(): string {
+  return getPrincipal().timezone || 'UTC';
 }
 
-/** ISO-ish timestamp (real impl: tz-aware). Proof stub returns a stable ISO string shape. */
-export function getISOTimestamp(): string {
-  return new Date().toISOString();
+/**
+ * Get full timestamp string: "YYYY-MM-DD HH:MM:SS TZ"
+ */
+export function getPSTTimestamp(): string {
+  const timezone = getTimezone();
+  const date = new Date();
+  // Date + time from isoOffset's YYYY-MM-DDTHH:MM:SS prefix (dateParts has no H:M:S).
+  const iso = isoOffset(date, timezone);
+  const ymd = `${iso.slice(0, 4)}-${iso.slice(5, 7)}-${iso.slice(8, 10)}`;
+  const hms = `${iso.slice(11, 13)}:${iso.slice(14, 16)}:${iso.slice(17, 19)}`;
+
+  // Get short timezone name (caller-local: no std primitive for the short tz NAME)
+  const tzName = date.toLocaleString('en-US', { timeZone: timezone, timeZoneName: 'short' }).split(' ').pop() || 'UTC';
+
+  return `${ymd} ${hms} ${tzName}`;
 }
 
-/** YYYY-MM-DD in the caller-local tz. Real impl reads the configured tz; proof mirrors the shape. */
+/**
+ * Get date only: "YYYY-MM-DD"
+ */
 export function getPSTDate(): string {
-  const d = localNow();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return dateParts(new Date(), getTimezone()).iso;
 }
 
-/** YYYY-MM in the caller-local tz. */
+/**
+ * Get year-month for directory structure: "YYYY-MM"
+ */
 export function getYearMonth(): string {
-  const d = localNow();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  return getPSTDate().substring(0, 7);
 }
 
-/** Decomposed tz-local components (faithful shape of the real getPSTComponents). */
+/**
+ * Get ISO8601 timestamp with timezone offset
+ */
+export function getISOTimestamp(): string {
+  return isoOffset(new Date(), getTimezone());
+}
+
+/**
+ * Get timestamp formatted for filenames: "YYYY-MM-DD-HHMMSS"
+ */
+export function getFilenameTimestamp(): string {
+  // H:M:S from isoOffset's fixed-width prefix (dateParts is date-only).
+  const iso = isoOffset(new Date(), getTimezone());
+  return `${iso.slice(0, 4)}-${iso.slice(5, 7)}-${iso.slice(8, 10)}-${iso.slice(11, 13)}${iso.slice(14, 16)}${iso.slice(17, 19)}`;
+}
+
+/**
+ * Get timestamp components for custom formatting
+ */
 export function getPSTComponents(): {
   year: number;
   month: string;
@@ -42,13 +84,23 @@ export function getPSTComponents(): {
   minutes: string;
   seconds: string;
 } {
-  const d = localNow();
+  // Every component from isoOffset's YYYY-MM-DDTHH:MM:SS prefix (dateParts has no H:M:S).
+  const iso = isoOffset(new Date(), getTimezone());
   return {
-    year: d.getFullYear(),
-    month: String(d.getMonth() + 1).padStart(2, "0"),
-    day: String(d.getDate()).padStart(2, "0"),
-    hours: String(d.getHours()).padStart(2, "0"),
-    minutes: String(d.getMinutes()).padStart(2, "0"),
-    seconds: String(d.getSeconds()).padStart(2, "0"),
+    year: Number(iso.slice(0, 4)),
+    month: iso.slice(5, 7),
+    day: iso.slice(8, 10),
+    hours: iso.slice(11, 13),
+    minutes: iso.slice(14, 16),
+    seconds: iso.slice(17, 19),
   };
+}
+
+/**
+ * Get timezone string for display
+ */
+export function getTimezoneDisplay(): string {
+  const timezone = getTimezone();
+  const date = new Date();
+  return date.toLocaleString('en-US', { timeZone: timezone, timeZoneName: 'short' }).split(' ').pop() || timezone;
 }
