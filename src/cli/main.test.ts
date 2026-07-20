@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -83,6 +83,85 @@ describe("runMain — std alias --install", () => {
     const lines: string[] = [];
     expect(await runMain([], { log: (l) => lines.push(l) })).toBe(2);
     expect(lines.join("\n")).toBe(HELP);
+  });
+});
+
+describe("cn dispatch + HELP (Story 7.2 — review finding: this branch had zero coverage)", () => {
+  test("HELP documents --watch (AC9) — deleting the line shipped green before this", () => {
+    expect(HELP).toContain("--watch");
+    expect(HELP).toContain("cn deploy");
+  });
+
+  test("`cn` delegates to runCnDeploy and returns its exit code", async () => {
+    // A missing --vault is the one-shot usage error (2) — proves the delegation, no vault needed.
+    expect(await runMain(["cn", "deploy"], { log: () => {} })).toBe(2);
+  });
+
+  test("--watch registers the shutdown hook AT THE CALLSITE, and only when resident (AC5)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "std-main-cn-"));
+    try {
+      const vault = join(dir, "vault");
+      mkdirSync(join(vault, ".obsidian"), { recursive: true });
+      // A FAKE watcher: this test must never open a real recursive watch — that surface is
+      // platform-divergent (FSEvents vs inotify) and this suite runs on Linux in CI.
+      const watch = () => ({ close: () => {} });
+
+      // No --watch → nothing goes resident, so no handler is installed.
+      let stops = 0;
+      expect(
+        await runMain(["cn", "deploy", "--vault", vault], {
+          log: () => {},
+          watch,
+          onWatchStart: () => stops++,
+        }),
+      ).toBe(0);
+      expect(stops).toBe(0);
+
+      // --watch → the callsite receives `stop`. Calling it is what a real SIGINT handler does.
+      let stop: (() => void) | undefined;
+      expect(
+        await runMain(["cn", "deploy", "--vault", vault, "--watch"], {
+          log: () => {},
+          watch,
+          onWatchStart: (s) => {
+            stop = s;
+            s();
+          },
+        }),
+      ).toBe(0);
+      expect(typeof stop).toBe("function");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the DEFAULT shutdown hook is a real SIGINT listener installed by main.ts", async () => {
+    // Every other case injects onWatchStart, so the `?? ((stop) => process.on("SIGINT", stop))` default
+    // was never exercised — deleting it shipped green. Here nothing is injected: the listener main.ts
+    // registers IS the handle, and invoking it is what ctrl-c does.
+    const dir = mkdtempSync(join(tmpdir(), "std-main-sigint-"));
+    try {
+      const vault = join(dir, "vault");
+      mkdirSync(join(vault, ".obsidian"), { recursive: true });
+      const before = process.listeners("SIGINT");
+      const p = runMain(["cn", "deploy", "--vault", vault, "--watch"], {
+        log: () => {},
+        watch: () => ({ close: () => {} }),
+      });
+
+      let added: ((...a: unknown[]) => void)[] = [];
+      for (let i = 0; i < 50 && added.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        added = process.listeners("SIGINT").filter((l) => !before.includes(l)) as typeof added;
+      }
+      expect(added.length).toBe(1);
+
+      added[0]!(); // ctrl-c
+      expect(await p).toBe(0);
+      process.removeListener("SIGINT", added[0]!);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

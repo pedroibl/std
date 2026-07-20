@@ -9,7 +9,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { runCnDeploy } from "./cn-deploy";
+import { type CnDeployDeps, runCnDeploy } from "./cn-deploy";
 import { RepoNavError, defaultTargets, installAlias, type RepoConfig } from "./repo-nav";
 
 /** std's own global registry path (XDG-aware), the SoT `alias --install` reads. */
@@ -27,6 +27,10 @@ export interface MainDeps {
   reposPath?: string;
   zdotdir?: string;
   log?: (line: string) => void;
+  /** Overrides the SIGINT registration for `cn deploy --watch` (tests pass a no-op / a capture). */
+  onWatchStart?: (stop: () => void) => void;
+  /** Overrides the real file watcher, so the resident branch is testable without touching fs.watch. */
+  watch?: CnDeployDeps["watch"];
 }
 
 /** Top-level usage. A single hand-maintained constant — keep it in sync when commands change. */
@@ -41,6 +45,7 @@ commands:
 cn deploy options:
   --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)
   --format <fmt>    bundle format: esm (default) or cjs
+  --watch           deploy once, then stay resident and redeploy on every save under src/cn, src/core
 
 flags:
   -h, --help        show this help`;
@@ -64,7 +69,15 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
   }
 
   if (cmd === "cn") {
-    return await runCnDeploy(rest, { log });
+    // SIGINT is registered HERE, at the callsite, and does nothing but call `stop()` — never inside
+    // `runWatch`, or the loop could not be unit-tested without installing a real signal handler (and a
+    // `process.exit` reachable from a test kills the test runner). `deps.onWatchStart` is only invoked
+    // when `--watch` actually goes resident, so the one-shot path installs no handler.
+    return await runCnDeploy(rest, {
+      log,
+      onWatchStart: deps.onWatchStart ?? ((stop) => process.on("SIGINT", stop)),
+      watch: deps.watch,
+    });
   }
 
   if (cmd === "alias") {

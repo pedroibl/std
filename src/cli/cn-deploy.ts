@@ -18,7 +18,8 @@
 // IDENTITY-FREE (D4/NFR3). No vault path, vault name, or vault literal appears here or anywhere in
 // `src/**`. The path arrives only as `--vault`; Pedro's actual path lives caller-side.
 
-import { join } from "node:path";
+import { watch } from "node:fs";
+import { basename, join } from "node:path";
 
 import { flagValue, hasFlag } from "../core/args";
 import { atomicWrite, exists, readIfExists } from "../fsx/index";
@@ -80,6 +81,17 @@ export function resolveTarget(vault: string | undefined): string {
 }
 
 /**
+ * Render one `BuildMessage` as `file:line:col message`. `String(msg)` yields only `BuildMessage: <text>`
+ * — no file, no line — which is not enough to fix a syntax error from a watch log scrolling past.
+ */
+function formatBuildMessage(msg: unknown): string {
+  const m = msg as { message?: string; position?: { file?: string; line?: number; column?: number } };
+  const p = m?.position;
+  const where = p?.file ? `${p.file}:${p.line ?? 0}:${p.column ?? 0}: ` : "";
+  return `${where}${m?.message ?? String(msg)}`;
+}
+
+/**
  * Bundle `src/cn/index.ts` into a single ESM string with the banner as line 1.
  *
  * `target: "browser"` because the artifact runs inside Obsidian (Electron renderer). Host plugin APIs
@@ -91,15 +103,34 @@ export function resolveTarget(vault: string | undefined): string {
  * `format` is a parameter because the CST-can-require-ESM question is the assumption Story 7.1 tests
  * live (AC8). If ESM does not load, the pre-authorized fallback is `"cjs"` with target unchanged.
  */
-export async function buildBundle(format: "esm" | "cjs" = "esm"): Promise<string> {
-  const result = await Bun.build({
-    entrypoints: [entrypoint()],
-    target: "browser",
-    format,
-    banner: BANNER,
-  });
+export async function buildBundle(
+  format: "esm" | "cjs" = "esm",
+  entry: string = entrypoint(),
+): Promise<string> {
+  let result: Awaited<ReturnType<typeof Bun.build>>;
+  try {
+    result = await Bun.build({
+      entrypoints: [entry],
+      target: "browser",
+      format,
+      banner: BANNER,
+    });
+  } catch (e) {
+    // Bun.build THROWS an AggregateError on a failed build rather than returning `success: false`, and
+    // its `.message` is the useless `Bundle failed`. Without this, the resident loop reported a syntax
+    // error as `✗ … AggregateError: Bundle failed` with no file, no line, and no diagnostic — the loop
+    // survived (AC4) but told you nothing, which is half of what AC4 asks for. Unwrap `.errors`.
+    const detail =
+      e instanceof AggregateError ? e.errors.map(formatBuildMessage).join("\n") : String(e);
+    throw new CnDeployError(`bundle failed:\n${detail}`);
+  }
   if (!result.success) {
-    throw new CnDeployError(`bundle failed:\n${result.logs.map(String).join("\n")}`);
+    // ⚠ UNREACHABLE ON BUN 1.3.14 — measured: Bun THROWS (handled above) instead of returning
+    // success:false, so no test can turn this line red and reverting it stays green. Kept, and kept
+    // using the same renderer as the throw path, because the day a Bun upgrade honours its documented
+    // contract this is the branch that runs — and `String(msg)` would silently regress the diagnostic
+    // back to a bare `BuildMessage: …` with no file and no line, un-fixing AC4 on a dependency bump.
+    throw new CnDeployError(`bundle failed:\n${result.logs.map(formatBuildMessage).join("\n")}`);
   }
   if (result.outputs.length !== 1) {
     throw new CnDeployError(
@@ -109,13 +140,295 @@ export async function buildBundle(format: "esm" | "cjs" = "esm"): Promise<string
   return await result.outputs[0]!.text();
 }
 
-/** Injected sink so `run` is testable without capturing stdout. */
-export interface CnDeployDeps {
-  log?: (line: string) => void;
+/** Outcome of one build+write cycle. `written: false` means the bytes were already on disk (AC3). */
+export type DeployResult =
+  | { ok: true; bytes: number; written: boolean }
+  | { ok: false; error: string };
+
+/**
+ * One full deploy cycle: build in memory, re-check the clobber guard, skip if identical, write
+ * atomically, read back. Never throws — every failure comes back as `{ok:false}` so a resident watch
+ * loop can report it and survive (AC4). The one-shot path unwraps it into the 0/1 exit code.
+ *
+ * SKIP-IF-IDENTICAL (AC3): the vault is on iCloud. Rewriting byte-identical content costs a sync
+ * round-trip and makes Obsidian re-read a file that did not change, so an unchanged build does not
+ * touch the target at all — its mtime must not move.
+ */
+export async function deployOnce(
+  vault: string,
+  format: "esm" | "cjs",
+  entry: string = entrypoint(),
+): Promise<DeployResult> {
+  try {
+    const code = await buildBundle(format, entry);
+    // RE-CHECK after the await. `resolveTarget` ran before the build, and a real bundle takes long
+    // enough that a hand-authored file can appear in that window — writing unconditionally here would
+    // defeat the clobber guard entirely, which is the one safety property this command exists to hold.
+    const target = resolveTarget(vault);
+    if (readIfExists(target) === code) {
+      return { ok: true, bytes: code.length, written: false };
+    }
+    atomicWrite(target, code);
+    // Read-back verification, the Makefile discipline: never claim a write we did not confirm landed.
+    if (readIfExists(target) !== code) {
+      return {
+        ok: false,
+        error: `read-back mismatch at ${target} — the artifact on disk is not what was built`,
+      };
+    }
+    return { ok: true, bytes: code.length, written: true };
+  } catch (e) {
+    return {
+      ok: false,
+      error:
+        e instanceof CnDeployError ? e.message : `deploy failed at ${artifactPath(vault)}: ${e}`,
+    };
+  }
+}
+
+/** Trailing debounce window. One editor save fires several FSEvents; they collapse into one rebuild. */
+export const WATCH_DEBOUNCE_MS = 150;
+
+/**
+ * Extensions that can never be a bundle input. Everything else is a possible source save.
+ *
+ * ⚠ `.json`, `.css`, `.txt`, `.yaml` and `.toml` are DELIBERATELY ABSENT — Bun ships default loaders for
+ * all of them, so `import tokens from "./tokens.json"` is a real bundle input. FR20's CSS token system is
+ * cn's next step, so ignoring those extensions would reinstate exactly the silent under-trigger this
+ * ignore-list exists to kill. Noisy *specific files* are excluded by basename below instead.
+ */
+const IGNORED_EXTENSIONS = [
+  ".md",
+  ".log",
+  ".map",
+  ".snap",
+  ".swp",
+  ".swx",
+  ".tsbuildinfo",
+  ".orig", // merge leftovers
+  ".rej",
+];
+
+/** Specific noisy files that are never inputs. Excluded by NAME so their extensions stay watchable. */
+const IGNORED_NAMES = ["package.json", "tsconfig.json", ".DS_Store"];
+
+/**
+ * Whether an event on `filename` could have changed the bundle.
+ *
+ * ⚠ THIS IS AN IGNORE-LIST, NOT A `.ts` SUFFIX TEST, AND THAT IS LOAD-BEARING. Measured on this machine
+ * (Story 7.2 contact check): editors that save via write-temp-then-rename report the TEMP name, never the
+ * real one. Claude Code's own edit reported `index.ts.tmp.46812.0e28eeb8a7b3`; `perl -i` reported the
+ * extensionless `XX7Eoqmy`. A `filename.endsWith(".ts")` filter drops both — a watcher that prints its
+ * banner and then silently never rebuilds, which is precisely the failure this loop exists to prevent.
+ * Only an in-place write (shell `>>`, a truncate+write) reports `index.ts`.
+ *
+ * So: reject what provably cannot matter (test files, docs, lockfiles, editor swap files), and let
+ * anything else through. Over-triggering is cheap — the debounce collapses the burst and skip-if-identical
+ * means an irrelevant event costs one in-memory rebuild and NO write to the iCloud vault. Under-triggering
+ * is the expensive failure, because it is silent.
+ *
+ * A temp suffix is stripped before the checks, so `foo.test.ts.tmp.123.abc` is still recognised as a test
+ * file and stays ignored.
+ */
+export function isBundleRelevant(filename: string): boolean {
+  const base = basename(filename)
+    .replace(/\.tmp[.\w-]*$/, "") // write-temp-then-rename: `index.ts.tmp.46812.0e28eeb8a7b3`
+    .replace(/~$/, ""); // editor backup: `index.ts~`
+  if (base === "") return false;
+  if (/\.(test|spec)\.tsx?$/.test(base)) return false; // a test edit cannot change the bundle
+  if (IGNORED_NAMES.includes(base)) return false;
+  return !IGNORED_EXTENSIONS.some((ext) => base.endsWith(ext));
+}
+
+/** A closed-over watcher handle. The only thing the loop needs from a watcher is the ability to stop it. */
+export interface WatchHandle {
+  close(): void;
+}
+
+/** Close a watcher without letting one bad handle strand the rest — shutdown must always complete. */
+function closeQuietly(w: WatchHandle): void {
+  try {
+    w.close();
+  } catch {
+    /* already closed / fd gone — nothing to recover, and throwing here would leak the siblings */
+  }
+}
+
+/** The side-effecting collaborators of the watch loop, injected so AC6 can test it with fakes. */
+export interface WatchDeps {
+  watch: (dir: string, cb: (filename: string | null) => void) => WatchHandle;
+  deploy: () => Promise<DeployResult>;
+  setTimer: (fn: () => void, ms: number) => unknown;
+  clearTimer: (t: unknown) => void;
+  log: (line: string) => void;
+  /** Where build failures go. Defaults to `log`; the CLI passes a stderr sink (AC4). */
+  logError?: (line: string) => void;
 }
 
 /**
- * `std cn deploy --vault <dir>` — validate, build in memory, write atomically, read back.
+ * The resident rebuild loop. Watches `dirs`, and on every `.ts` (non-test) save runs `deploy` — debounced,
+ * serialized, and skipping the write when the bytes are unchanged (that last part lives in `deploy`).
+ *
+ * RESIDENT BY CONSTRUCTION (AC5): `done` stays PENDING until `stop()` is called. Registering watchers and
+ * returning would let `main.ts`'s `process.exit(code)` kill the loop before the first save — a process that
+ * prints its banner and then does nothing.
+ *
+ * SHUTDOWN IS A VALUE, NOT A SIGNAL: `stop()` closes every watcher, clears any pending timer, and resolves
+ * `done` with 0. `process.on("SIGINT", …)` is registered by the CALLER — a signal handler (or a
+ * `process.exit`) in here could not be unit-tested without killing the test runner.
+ *
+ * NO `eventType` FILTER: on macOS+Bun a plain content write reports `rename`, not `change`. Filtering on
+ * `"change"` yields a watcher that never fires — a feature that starts clean and does nothing. The adapter
+ * therefore discards the event type entirely and the filter keys on the filename alone.
+ */
+export function runWatch(dirs: string[], deps: WatchDeps): { done: Promise<number>; stop: () => void } {
+  const logError = deps.logError ?? deps.log;
+  let resolveDone: (code: number) => void;
+  const done = new Promise<number>((r) => {
+    resolveDone = r;
+  });
+
+  let timer: unknown = null;
+  let inFlight = false;
+  let queued = false; // an event arrived mid-deploy — coalesce it into ONE follow-up run
+  let stopped = false;
+  let trigger = "";
+
+  const run = (): void => {
+    inFlight = true;
+    // Snapshot the trigger NOW. It is a shared closure variable, so reading it at completion would
+    // attribute a coalesced run to whichever save happened to land last.
+    const t = trigger;
+    void deps
+      .deploy()
+      .then((res) => {
+        if (!res.ok) {
+          // AC4: report loudly, leave the last good artifact live, KEEP WATCHING. A resident watcher
+          // that dies on the first typo is worse than useless.
+          logError(`✗ ${res.error}`);
+        } else if (res.written) {
+          deps.log(`↻ ${t} → cn.js (${res.bytes} B)`);
+        } else {
+          deps.log(`· unchanged (${t})`);
+        }
+      })
+      .finally(() => {
+        inFlight = false;
+        if (stopped) {
+          // stop() was called mid-deploy and DEFERRED the resolve to here, so `main.ts` does not
+          // process.exit(0) — reporting a clean shutdown — while the save that is still building
+          // never reaches the vault.
+          finish();
+          return;
+        }
+        if (queued) {
+          queued = false;
+          run();
+        }
+      });
+  };
+
+  const fire = (): void => {
+    timer = null;
+    if (stopped) return;
+    if (inFlight) {
+      queued = true; // never two builds + atomicWrites racing on the same vault path
+      return;
+    }
+    run();
+  };
+
+  const onEvent = (dir: string, filename: string | null): void => {
+    if (stopped) return;
+    if (filename === null) return; // the node API's filename is nullable — do not crash the loop
+    if (!isBundleRelevant(filename)) return;
+    // A rename-save reports an opaque temp name, so name the watched dir instead of printing noise.
+    trigger = filename.endsWith(".ts") ? basename(filename) : `src/${basename(dir)}`;
+    if (timer !== null) deps.clearTimer(timer);
+    timer = deps.setTimer(fire, WATCH_DEBOUNCE_MS);
+  };
+
+  // Registration can FAIL — an exhausted inotify limit (ENOSPC), a permission denial, a dir removed
+  // between watchDirs() and here. Left unguarded, the throw escapes an async caller as a rejected
+  // promise, main.ts's `.then(process.exit)` never runs, and the exit code lands outside the 0/1/2
+  // contract — with the watchers already opened leaked behind it.
+  const watchers: WatchHandle[] = [];
+  try {
+    for (const dir of dirs) watchers.push(deps.watch(dir, (f) => onEvent(dir, f)));
+  } catch (e) {
+    for (const w of watchers) closeQuietly(w);
+    throw new CnDeployError(`cannot watch ${dirs.join(", ")}: ${e}`);
+  }
+
+  let finished = false;
+  const finish = (): void => {
+    if (finished) return;
+    finished = true;
+    resolveDone(0);
+  };
+
+  const stop = (): void => {
+    if (stopped) return;
+    stopped = true;
+    if (timer !== null) {
+      deps.clearTimer(timer);
+      timer = null;
+    }
+    for (const w of watchers) closeQuietly(w); // an unclosed FSWatcher keeps the Bun process alive
+    // A deploy in flight resolves `done` from its own `.finally` — see run(). Resolving here would
+    // report a clean exit while the last save is still being written.
+    if (!inFlight) finish();
+  };
+
+  return { done, stop };
+}
+
+/** The directories the bundle MAY contain (AD-5 rule 2), resolved relative to THIS file — never absolute. */
+export function watchDirs(): string[] {
+  return [join(import.meta.dir, "..", "cn"), join(import.meta.dir, "..", "core")];
+}
+
+/** The node-style `watch(dir, opts, (ev, filename) => …)` signature this adapter narrows. */
+type NodeWatch = (
+  dir: string,
+  opts: { recursive: boolean },
+  listener: (ev: string, filename: string | Buffer | null) => void,
+) => WatchHandle;
+
+/**
+ * Real `node:fs` adapter, with the watch function injectable so a test can prove the `rename` case.
+ * The event type is DELIBERATELY discarded: macOS FSEvents reports `rename` for a plain content write,
+ * so a handler gated on `eventType === "change"` silently never fires.
+ */
+export function makeWatchAdapter(
+  watchFn: NodeWatch = watch as unknown as NodeWatch,
+): (dir: string, cb: (filename: string | null) => void) => WatchHandle {
+  return (dir, cb) =>
+    // `String(filename)` rather than a `typeof === "string"` test: on any platform/encoding where the
+    // API yields a Buffer, coercing to null would turn EVERY event into a dropped one — a watcher that
+    // fires constantly and never rebuilds, the same silent class as the temp-name bug.
+    watchFn(dir, { recursive: true }, (_ev, filename) =>
+      cb(filename == null ? null : String(filename)),
+    );
+}
+
+/** Injected sink so `run` is testable without capturing stdout. */
+export interface CnDeployDeps {
+  log?: (line: string) => void;
+  /** Called once with the loop's `stop()` when `--watch` goes resident — the callsite owns SIGINT (AC5). */
+  onWatchStart?: (stop: () => void) => void;
+  /**
+   * Overrides the real `node:fs` watcher so the `--watch` WIRING is assertable. Without this seam the
+   * only way to reach the resident branch in a test is to open real recursive watchers — the
+   * platform-divergent surface AC6 forbids in CI. A fake here proves the dirs, the format and the
+   * banner are threaded correctly without touching inotify/FSEvents.
+   */
+  watch?: (dir: string, cb: (filename: string | null) => void) => WatchHandle;
+}
+
+/**
+ * `std cn deploy --vault <dir> [--watch]` — validate, build in memory, write atomically, read back.
+ * With `--watch`, the same deploy then stays resident and re-runs on every save under `src/cn` + `src/core`.
  * Returns a process exit code: 0 ok, 1 fail-loud, 2 usage.
  */
 export async function runCnDeploy(argv: string[], deps: CnDeployDeps = {}): Promise<number> {
@@ -123,7 +436,7 @@ export async function runCnDeploy(argv: string[], deps: CnDeployDeps = {}): Prom
   const [sub, ...rest] = argv;
 
   if (sub !== "deploy") {
-    console.error("usage: std cn deploy --vault <dir>   # bundle src/cn -> <vault>/Scripts/cn.js");
+    console.error("usage: std cn deploy --vault <dir> [--watch]   # bundle src/cn -> <vault>/Scripts/cn.js");
     return 2;
   }
 
@@ -154,22 +467,38 @@ export async function runCnDeploy(argv: string[], deps: CnDeployDeps = {}): Prom
     return 1;
   }
 
-  try {
-    const code = await buildBundle(format);
-    // RE-CHECK after the await. `resolveTarget` ran before the build, and a real bundle takes long
-    // enough that a hand-authored file can appear in that window — writing unconditionally here would
-    // defeat the clobber guard entirely, which is the one safety property this command exists to hold.
-    resolveTarget(vault);
-    atomicWrite(target, code);
-    // Read-back verification, the Makefile discipline: never claim a write we did not confirm landed.
-    const written = readIfExists(target);
-    if (written !== code) {
-      throw new CnDeployError(`read-back mismatch at ${target} — the artifact on disk is not what was built`);
-    }
-    log(`✓ cn (${format}) → ${target}  ${code.length} bytes`);
-    return 0;
-  } catch (e) {
-    console.error(`✗ ${e instanceof CnDeployError ? e.message : `deploy failed at ${target}: ${e}`}`);
+  // ALL of 7.1's fail-loud guards have now run. Only then does the watcher start (AC1) — failing fast
+  // beats failing later inside a resident loop.
+  const first = await deployOnce(vault as string, format);
+  if (!first.ok) {
+    console.error(`✗ ${first.error}`);
     return 1;
   }
+  log(`✓ cn (${format}) → ${target}  ${first.bytes} bytes`);
+
+  if (!hasFlag(rest, "watch")) return 0;
+
+  const dirs = watchDirs();
+  let done: Promise<number>;
+  let stop: () => void;
+  try {
+    ({ done, stop } = runWatch(dirs, {
+      watch: deps.watch ?? makeWatchAdapter(),
+      deploy: () => deployOnce(vault as string, format),
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+      log,
+      logError: (l) => console.error(l),
+    }));
+  } catch (e) {
+    // Registration failed (see runWatch). Report it in the house format and keep the 0/1/2 contract —
+    // never let it escape as an unhandled rejection past main.ts's process.exit.
+    console.error(`✗ ${e instanceof CnDeployError ? e.message : e}`);
+    return 1;
+  }
+  deps.onWatchStart?.(stop);
+  log(
+    `watching ${dirs.map((d) => `src/${basename(d)}`).join(", ")} → ${target}  (ctrl-c to stop)`,
+  );
+  return await done;
 }
