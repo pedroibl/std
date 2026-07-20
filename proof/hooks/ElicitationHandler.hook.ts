@@ -29,7 +29,13 @@ interface ElicitationInput {
 function main() {
   let input: ElicitationInput;
   try {
-    input = JSON.parse(readFileSync('/dev/stdin', 'utf-8'));
+    // fd 0, NOT '/dev/stdin'. Opening the PATH creates a second file description on the pipe, which
+    // is unreliable under Linux (the CI runner): the read can come back empty, JSON.parse throws, and
+    // the fail-open catch below exits 0 having logged nothing — green exit code, missing audit record.
+    // This is why `std/stdio.readStdinJson` reads the `process.stdin` STREAM; the hooks that adopted it
+    // pass in CI while this one did not. Reading fd 0 keeps main() SYNCHRONOUS (Story 13.7 AC8) while
+    // getting the same pipe-correct behaviour.
+    input = JSON.parse(readFileSync(0, 'utf-8'));
   } catch {
     // fail-OPEN (AD-9.4 Rule 2): no / malformed stdin → exit 0, non-blocking.
     process.exit(0);
