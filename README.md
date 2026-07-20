@@ -18,7 +18,7 @@ The same vocabulary, rendered several ways. The runtime boundary **is** the modu
 | `cli` | Bun | manifest-driven gate dispatcher (`std` on PATH) | zsh-planning, loom |
 | `glab` | Bun | `glab api` wrapper + git-remote-first repo resolution | per-repo Makefiles |
 | `proc`·`git`·`http`·`fsx` | Bun | plumbing edges: `spawnCapture` · `git(repo,args)` · `fetchWithTimeout`/`httpJson` · `walkFiles`/`atomicWrite`/`loadJson` | PAI/Tools rewrites |
-| `cn` | Obsidian (**zDrafts** vault) | **DOM** (JS Engine + CSS tokens, `cn-`) | zDrafts creative notes |
+| `cn` | Obsidian (**zDrafts** vault) | **DOM** (CodeScript Toolkit + Dataview, `cn-`) | zDrafts creative notes |
 | `dashkit` | Obsidian (**note-report** vault) | **DOM** (dashboards, `dk-`) | note-report progress dashboards |
 
 `core` holds *what a citation / severity / stat / sprint-summary / progress-bar is*. `report`, `cn`, and `dashkit`

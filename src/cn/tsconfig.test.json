@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.json",
+  "//": "The other half of the src/cn/ typecheck. tsconfig.json covers the DEPLOYED slice with types: [] so a stray Bun/node global is a compile error; that same barrier makes `bun:test` unresolvable. Test files are never bundled into the vault, so they keep Bun's types — and get DOM, because they assert against DOM-typed signatures. Both configs run under `bun run typecheck:cn`; between them every .ts in src/cn/ is checked exactly once.",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM"],
+    "types": ["bun"]
+  },
+  "include": ["**/*.test.ts"],
+  "//exclude": "Same inherited-exclude trap as the sibling config — root's [\"src/cn/**\"] would otherwise leave zero input files.",
+  "exclude": []
+}
