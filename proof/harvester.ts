@@ -62,13 +62,24 @@
  */
 
 import { charOverlap, collapse, flagValue, hasFlag, parseNdjson } from "std/core";
-import { atomicWrite, ensureDir, resolveFrameworkDir, saveJson, walkFiles } from "std/fsx";
+import { atomicWrite, ensureDir, readIfExists, resolveFrameworkDir, saveJson, walkFiles } from "std/fsx";
 import { lines, writeIfAbsent } from "std/report";
 
 // PAI domain helper — the one real shared edge dependency, stays in the tool (D4).
 // VENDORED into proof/ for the hermetic self-test; production imports the real
 // `../../hooks/lib/learning-utils`. [Story 11.1 open-question #2]
 import { getLearningCategory, isLearningCapture } from "./learning-utils";
+
+// Story 15.3 — the pure artifact classifier lives in its own module so it is unit-testable with no
+// disk and no miner, and so this already-contended file grows by a seam rather than a subsystem.
+import {
+  classifyArtifact,
+  emptyStats,
+  parseCatalog,
+  recordClassification,
+  renderClassificationReport,
+  type Catalog,
+} from "./skill-classifier";
 
 import { statSync } from "node:fs";
 import { readFileSync } from "node:fs";
@@ -562,14 +573,29 @@ export function provenanceOf(m: MinedMemory): Provenance {
   return { sessionId: m.sessionId, sourceLine: m.sourceLine, timestamp: m.timestamp, projectSlug: m.project };
 }
 
-export function queueCandidate(m: MinedMemory): Record<string, unknown> {
+/**
+ * Build the queue JSON for one mined candidate.
+ *
+ * `extraTags` (Story 15.3) carries the ALREADY-COMPUTED artifact tags — never a
+ * catalog. Classification happens in `runMine`'s mined loop, BEFORE the dry-run
+ * gate, so that `--dry-run` still classifies and still reports its rate; by the
+ * time this runs the tags exist and this function only ATTACHES them. Passing a
+ * catalog here instead would put the classifier back inside the write path that
+ * separation exists to keep it out of.
+ *
+ * Optional on purpose: every pre-15.3 caller compiles and emits the identical
+ * shape when it is omitted.
+ */
+export function queueCandidate(m: MinedMemory, extraTags: readonly string[] = []): Record<string, unknown> {
   const provenance = provenanceOf(m);
   return {
     title: `${m.memoryType}: ${m.content.substring(0, 60)}...`,
     content: `## ${m.memoryType.charAt(0).toUpperCase() + m.memoryType.slice(1)}\n\n${m.content}\n\n## Context\n\n${m.context}`,
     domain: "Ideas",
     type: "idea",
-    tags: [m.memoryType, "mined", `project:${m.project}`],
+    // ADDITIVE (15.3 AC1): `project:<slug>` is never removed or repurposed — 15.2 routes on it
+    // today and 15.1's digest renders it. Artifact tags join it; they do not replace it.
+    tags: [m.memoryType, "mined", `project:${m.project}`, ...extraTags],
     confidence: m.confidence,
     sourcePattern: m.sourcePattern,
     project: m.project,
@@ -581,10 +607,10 @@ export function queueCandidate(m: MinedMemory): Record<string, unknown> {
   };
 }
 
-function writeToQueue(roots: Roots, m: MinedMemory): string {
+function writeToQueue(roots: Roots, m: MinedMemory, extraTags: readonly string[] = []): string {
   ensureDir(roots.queueDir);
   const path = join(roots.queueDir, queueFilename(m));
-  saveJson(path, queueCandidate(m)); // Δ2 — trailing newline
+  saveJson(path, queueCandidate(m, extraTags)); // Δ2 — trailing newline
   return path;
 }
 
@@ -770,7 +796,11 @@ export function runHarvest(roots: Roots, sel: Selection, opts: { dryRun?: boolea
   return learnings.length;
 }
 
-export function runMine(roots: Roots, sel: Selection, opts: { dryRun?: boolean; target?: string } = {}): number {
+export function runMine(
+  roots: Roots,
+  sel: Selection,
+  opts: { dryRun?: boolean; target?: string; catalog?: Catalog } = {},
+): number {
   // Validate the target BEFORE mining, so a hostile path fails fast instead of after the work.
   if (opts.target !== undefined) resolveDigestPath(roots, opts.target);
 
@@ -796,6 +826,11 @@ export function runMine(roots: Roots, sel: Selection, opts: { dryRun?: boolean; 
   // below, so the digest accumulates them as they are produced, reusing byProject for grouping ORDER.
   const digestGroups = new Map<string, MinedMemory[]>();
 
+  // Story 15.3 — artifact classification. `null` when no catalog was injected: we then claim NO rate
+  // at all rather than printing a 0% that reads like a measured finding (the honest-number discipline
+  // AC2 is built on). The stats object is deliberately OUTSIDE the dry-run gate below.
+  const stats = opts.catalog ? emptyStats() : null;
+
   let totalMined = 0;
   for (const [project, refs] of byProject) {
     let projectMined = 0;
@@ -805,7 +840,15 @@ export function runMine(roots: Roots, sel: Selection, opts: { dryRun?: boolean; 
       const raw = readFileSync(ref.path, "utf-8");
       const { mined } = harvestSession(ref, raw);
       for (const mem of mined) {
-        if (!opts.dryRun) writeToQueue(roots, mem);
+        // ⚠ SEAM (15.3 AC2) — classify HERE, in the mined loop, BEFORE the dry-run gate below.
+        // Classifying inside writeToQueue/queueCandidate would skip it entirely under --dry-run:
+        // no tags AND no rate in the exact mode a human reviews in. Only the WRITE is gated.
+        let artifactTags: readonly string[] = [];
+        if (opts.catalog && stats) {
+          artifactTags = classifyArtifact(mem, opts.catalog);
+          recordClassification(stats, mem, artifactTags);
+        }
+        if (!opts.dryRun) writeToQueue(roots, mem, artifactTags);
         projectCandidates.push(mem);
         out.push(
           `  ${confidenceIcon(mem.confidence)} [${mem.memoryType}] ${mem.content.substring(0, 80)}... (${(mem.confidence * 100).toFixed(0)}%)`,
@@ -822,6 +865,10 @@ export function runMine(roots: Roots, sel: Selection, opts: { dryRun?: boolean; 
   }
 
   if (opts.target !== undefined) emitDigest(roots, digestGroups, opts.target, opts.dryRun === true);
+
+  // Unconditional w.r.t. --dry-run (15.3 AC2): the rate is the honest measure of whether the
+  // classifier delivered, and the mode that produced this story's evidence is the dry run.
+  if (stats) renderClassificationReport(stats).forEach((l) => console.log(l));
 
   console.log(`\n\u{2705} ${totalMined} candidate(s) ${opts.dryRun ? "found (dry run)" : "queued for review"}`);
   if (!opts.dryRun && totalMined > 0) {
@@ -851,6 +898,12 @@ Usage:
   harvester --target DIR    With --mine: also render the pass as a repo-local
                             digest at DIR/docs/session-digest.md. Orthogonal to
                             --project: unfiltered, the digest is grouped by project.
+  harvester --catalog FILE  With --mine: tag each candidate by the skill/tool it
+                            pertains to, from an injected JSON catalog
+                            {"skills":[...],"tools":[...]}. Adds skill:<Name> /
+                            tool:<Name> alongside project:<slug> (never replacing
+                            it), or "unclassified". Prints the classification rate
+                            broken down by confidence band — under --dry-run too.
   harvester --help          Show this help
 
 Examples:
@@ -860,6 +913,7 @@ Examples:
   harvester --mine --recent 5
   harvester --mine --project pipis --target ~/Dev/pipis
   harvester --mine --target ~/Dev/pipis --dry-run
+  harvester --mine --catalog ~/.config/std/artifact-catalog.json --dry-run
 
 Output (tagged by project of origin):
   Harvest: MEMORY/LEARNING/{ALGORITHM|SYSTEM}/YYYY-MM/
@@ -867,7 +921,17 @@ Output (tagged by project of origin):
   Digest:  <target>/docs/session-digest.md (with --target)
 `;
 
-const KNOWN_FLAGS = new Set(["recent", "all", "session", "project", "dry-run", "mine", "target", "help"]);
+const KNOWN_FLAGS = new Set([
+  "recent",
+  "all",
+  "session",
+  "project",
+  "dry-run",
+  "mine",
+  "target",
+  "catalog",
+  "help",
+]);
 
 /** Tokens starting with `--` whose name isn't a known flag (gap #4: core/args is
  *  per-flag and does not reject unknowns the way the originals' strict parseArgs did,
@@ -898,6 +962,39 @@ export function targetFromArgv(argv: string[]): string | undefined {
   return value;
 }
 
+/**
+ * Read `--catalog`, closing the same three `core.flagValue` look-ahead holes `targetFromArgv`
+ * documents (`--catalog --dry-run` / `--catalog=` / trailing `--catalog`). The silent-no-op case is
+ * the one that matters most here: a swallowed `--catalog` would print no rate and leave every
+ * candidate untagged, which looks exactly like "the signal isn't there" — the finding this story
+ * exists to measure honestly. Fail loud instead. Returns `undefined` only when genuinely absent.
+ */
+export function catalogPathFromArgv(argv: string[]): string | undefined {
+  if (!hasFlag(argv, "catalog") && !argv.some((t) => t.startsWith("--catalog="))) return undefined;
+  const value = flagValue(argv, "catalog");
+  if (value === undefined || value === "" || value.startsWith("--")) {
+    throw new Error("--catalog requires a file value (e.g. --catalog ~/.config/std/artifact-catalog.json)");
+  }
+  return value;
+}
+
+/**
+ * Load the injected catalog DOCUMENT from disk (D4/NFR3 — the names are Pedro's estate, never baked
+ * into std or into this tool). Fail-loud on absent/unparseable: `readIfExists` softening a missing
+ * file to `null` would silently classify nothing, and a fake 0% rate is worse than an error.
+ */
+export function loadCatalog(path: string): Catalog {
+  const raw = readIfExists(path);
+  if (raw === null) throw new Error(`--catalog file not found: ${path}`);
+  let doc: unknown;
+  try {
+    doc = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`catalog is not valid JSON (${path}): ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return parseCatalog(doc);
+}
+
 export function main(argv: string[]): number {
   if (hasFlag(argv, "help")) {
     console.log(HELP);
@@ -925,8 +1022,10 @@ export function main(argv: string[]): number {
   // malformed value is a usage error (exit 2), not a half-run. Only this parse is wrapped — widening the
   // catch over the dispatch would swallow `runHarvest`'s fail-loud I/O errors (FR5).
   let target: string | undefined;
+  let catalogPath: string | undefined;
   try {
     target = targetFromArgv(argv);
+    catalogPath = catalogPathFromArgv(argv);
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     return 2;
@@ -935,11 +1034,25 @@ export function main(argv: string[]): number {
     console.error("--target applies to the mine path only; add --mine");
     return 2; // fail loud rather than silently ignoring the flag
   }
+  if (catalogPath !== undefined && !hasFlag(argv, "mine")) {
+    console.error("--catalog applies to the mine path only; add --mine");
+    return 2; // same discipline as --target: never silently ignore a flag
+  }
 
   const roots = defaultRoots();
 
   if (hasFlag(argv, "mine")) {
-    runMine(roots, sel, { dryRun, target });
+    // Read AFTER the usage checks so a malformed catalog is still a usage error, not a half-run.
+    let catalog: Catalog | undefined;
+    if (catalogPath !== undefined) {
+      try {
+        catalog = loadCatalog(catalogPath);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        return 2;
+      }
+    }
+    runMine(roots, sel, { dryRun, target, catalog });
   } else {
     runHarvest(roots, sel, { dryRun });
   }

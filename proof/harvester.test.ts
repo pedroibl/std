@@ -24,11 +24,14 @@ import { dirname, join } from "node:path";
 
 import {
   buildDigest,
+  catalogPathFromArgv,
   defaultRoots,
   discoverSessions,
   harvestSession,
+  loadCatalog,
   main,
   provenanceOf,
+  queueCandidate,
   reduceLearnings,
   resolveDigestPath,
   runHarvest,
@@ -40,6 +43,8 @@ import {
   type Roots,
   type SessionRef,
 } from "./harvester";
+
+import type { Catalog } from "./skill-classifier";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -579,5 +584,165 @@ describe("--target digest hardening (15.1 review)", () => {
     expect(headings).toEqual(["## proj/alpha (`proj-alpha`)", "## proj/beta (`proj-beta`)"]);
     // Each entry sits under its own project heading.
     expect(md.indexOf("proj-alpha`\n")).toBeLessThan(md.indexOf("## proj/beta"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Story 15.3 — skill/tool-level classification wired into the mine path
+// ---------------------------------------------------------------------------
+
+describe("15.3 — artifact classification seam", () => {
+  const CATALOG: Catalog = [
+    { name: "Interceptor", kind: "skill" },
+    { name: "SessionHarvester", kind: "tool" },
+  ];
+
+  /** A >200-char decision that NAMES a catalogued skill outside any frame. */
+  const NAMES_SKILL =
+    "We decided to always verify a deploy with the Interceptor skill before claiming it works. " +
+    "The decision is to make that the rule for every web change from now on, because the previous " +
+    "approach let broken pages through and we chose to close that hole permanently this sprint.";
+
+  // AC1 — additivity. `project:<slug>` must survive; 15.2 routes on it today.
+  test("AC1: classification tags are ADDITIVE — project:<slug>, memoryType and `mined` all survive", () => {
+    const m: MinedMemory = {
+      sessionId: "aaaa1111-0000-0000-0000-000000000153",
+      project: "proj-alpha",
+      timestamp: "2026-07-20T10:00:00.000Z",
+      memoryType: "decision",
+      content: NAMES_SKILL,
+      context: NAMES_SKILL.slice(0, 300),
+      confidence: 0.5,
+      sourcePattern: "decided to",
+      sourceLine: 3,
+    };
+    const withTags = queueCandidate(m, ["skill:Interceptor"]);
+    expect(withTags.tags).toEqual(["decision", "mined", "project:proj-alpha", "skill:Interceptor"]);
+
+    // Omitting the argument leaves the pre-15.3 shape byte-identical.
+    expect(queueCandidate(m).tags).toEqual(["decision", "mined", "project:proj-alpha"]);
+  });
+
+  test("AC1: the tag lands on the QUEUE FILE, alongside the untouched project tag", () => {
+    const sid = "bbbb1111-0000-0000-0000-000000000153";
+    writeSession(
+      "proj-alpha",
+      sid,
+      JSON.stringify({ type: "assistant", message: { content: NAMES_SKILL }, timestamp: "2026-07-20T10:00:00.000Z" }),
+    );
+    expect(runMine(roots, {}, { catalog: CATALOG })).toBe(1);
+
+    const file = readdirSync(roots.queueDir).find((f) => f.endsWith(".json"))!;
+    const candidate = JSON.parse(readFileSync(join(roots.queueDir, file), "utf-8"));
+    expect(candidate.tags).toContain("skill:Interceptor");
+    expect(candidate.tags).toContain("project:proj-alpha"); // AC1 additivity, on the real write path
+  });
+
+  // AC2 — THE SEAM. Classification must NOT live in the write path.
+  test("AC2: --dry-run still classifies and still reports the rate (and writes nothing)", () => {
+    const sid = "cccc1111-0000-0000-0000-000000000153";
+    writeSession(
+      "proj-alpha",
+      sid,
+      JSON.stringify({ type: "assistant", message: { content: NAMES_SKILL }, timestamp: "2026-07-20T10:00:00.000Z" }),
+    );
+
+    const said: string[] = [];
+    const realLog = console.log;
+    console.log = (...a: unknown[]) => void said.push(a.join(" "));
+    try {
+      expect(runMine(roots, {}, { dryRun: true, catalog: CATALOG })).toBe(1);
+    } finally {
+      console.log = realLog;
+    }
+
+    const out = said.join("\n");
+    expect(out).toContain("classified 1/1");
+    expect(out).toContain("100%");
+    // Only the WRITE is dry-run-gated; the rate report is not.
+    expect(existsSync(roots.queueDir)).toBe(false);
+  });
+
+  test("AC2: with no catalog injected, nothing is classified and no rate is claimed", () => {
+    const sid = "dddd1111-0000-0000-0000-000000000153";
+    writeSession(
+      "proj-alpha",
+      sid,
+      JSON.stringify({ type: "assistant", message: { content: NAMES_SKILL }, timestamp: "2026-07-20T10:00:00.000Z" }),
+    );
+
+    const said: string[] = [];
+    const realLog = console.log;
+    console.log = (...a: unknown[]) => void said.push(a.join(" "));
+    try {
+      expect(runMine(roots, {})).toBe(1);
+    } finally {
+      console.log = realLog;
+    }
+    expect(said.join("\n")).not.toContain("classified");
+
+    const file = readdirSync(roots.queueDir).find((f) => f.endsWith(".json"))!;
+    const candidate = JSON.parse(readFileSync(join(roots.queueDir, file), "utf-8"));
+    expect(candidate.tags).toEqual(["decision", "mined", "project:proj-alpha"]);
+  });
+
+  // AC2 — the honest bucket, end to end through the miner.
+  test("AC2: an unattributable candidate is tagged `unclassified` and counted, never guessed", () => {
+    const sid = "eeee1111-0000-0000-0000-000000000153";
+    writeSession(
+      "subagents",
+      sid,
+      JSON.stringify({ type: "assistant", message: { content: DECISION }, timestamp: "2026-07-20T10:00:00.000Z" }),
+    );
+
+    const said: string[] = [];
+    const realLog = console.log;
+    console.log = (...a: unknown[]) => void said.push(a.join(" "));
+    try {
+      expect(runMine(roots, {}, { catalog: CATALOG })).toBe(1);
+    } finally {
+      console.log = realLog;
+    }
+
+    const file = readdirSync(roots.queueDir).find((f) => f.endsWith(".json"))!;
+    const candidate = JSON.parse(readFileSync(join(roots.queueDir, file), "utf-8"));
+    expect(candidate.tags).toContain("unclassified");
+    expect(candidate.tags).toContain("project:subagents");
+    expect(candidate.tags.some((t: string) => t.startsWith("skill:") || t.startsWith("tool:"))).toBe(false);
+    expect(said.join("\n")).toContain("classified 0/1");
+  });
+
+  // AC5 / CLI — the catalog is injected DATA, and the flag guard is exhaustive.
+  test("--catalog is allowlisted, guarded against the flagValue look-ahead gap, and documented", () => {
+    expect(unknownFlags(["--mine", "--catalog", "/tmp/c.json"])).toEqual([]);
+    expect(unknownFlags(["--mine", "--catalog=/tmp/c.json"])).toEqual([]);
+    expect(unknownFlags(["--mine", "--catalogue", "/tmp/c.json"])).toEqual(["--catalogue"]);
+
+    expect(catalogPathFromArgv(["--mine", "--recent", "5"])).toBeUndefined();
+    expect(catalogPathFromArgv(["--mine", "--catalog", "/tmp/c.json"])).toBe("/tmp/c.json");
+    expect(catalogPathFromArgv(["--mine", "--catalog=/tmp/c.json"])).toBe("/tmp/c.json");
+    expect(() => catalogPathFromArgv(["--mine", "--catalog", "--dry-run"])).toThrow(/requires a file/);
+    expect(() => catalogPathFromArgv(["--mine", "--catalog="])).toThrow(/requires a file/);
+    expect(() => catalogPathFromArgv(["--mine", "--catalog"])).toThrow(/requires a file/);
+  });
+
+  test("loadCatalog reads the injected JSON, and fails loud on a missing or malformed file", () => {
+    const good = join(root, "catalog.json");
+    writeFileSync(good, JSON.stringify({ skills: ["Interceptor"], tools: ["SessionHarvester"] }));
+    expect(loadCatalog(good)).toEqual([
+      { name: "Interceptor", kind: "skill" },
+      { name: "SessionHarvester", kind: "tool" },
+    ]);
+
+    expect(() => loadCatalog(join(root, "nope.json"))).toThrow(/not found/i);
+    const bad = join(root, "bad.json");
+    writeFileSync(bad, "{ not json");
+    expect(() => loadCatalog(bad)).toThrow(/catalog/i);
+  });
+
+  // These main() calls return BEFORE defaultRoots(), so they stay hermetic.
+  test("main exits 2 on a malformed --catalog and on --catalog without --mine", () => {
+    expect(main(["--mine", "--catalog"])).toBe(2);
+    expect(main(["--catalog", "/tmp/c.json"])).toBe(2); // no --mine
   });
 });
