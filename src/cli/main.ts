@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { type CnDeployDeps, runCnDeploy } from "./cn-deploy";
+import { runCnVerify } from "./cn-verify";
 import { RepoNavError, defaultTargets, installAlias, type RepoConfig } from "./repo-nav";
 
 /** std's own global registry path (XDG-aware), the SoT `alias --install` reads. */
@@ -41,11 +42,16 @@ usage: std <command> [options]
 commands:
   alias --install   (re)generate repo-nav + the _std completion from ~/.config/std/repos.ts
   cn deploy         bundle src/cn -> <vault>/Scripts/cn.js (one-way; the vault is build output only)
+  cn verify         check a vault against cn's declared plugin envelope (AD-6)
 
 cn deploy options:
   --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)
   --format <fmt>    bundle format: esm (default) or cjs
   --watch           deploy once, then stay resident and redeploy on every save under src/cn, src/core
+
+cn verify options:
+  --vault <dir>     the Obsidian vault to check (required)
+                    drift is reported and never fatal; a missing foundation exits 1
 
 flags:
   -h, --help        show this help`;
@@ -69,6 +75,9 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
   }
 
   if (cmd === "cn") {
+    // `verify` is synchronous and shares nothing with the deploy path but the `--vault` flag, so it
+    // dispatches here rather than inside runCnDeploy (whose own usage line owns `deploy` only).
+    if (rest[0] === "verify") return runCnVerify(rest.slice(1), { log });
     // SIGINT is registered HERE, at the callsite, and does nothing but call `stop()` — never inside
     // `runWatch`, or the loop could not be unit-tested without installing a real signal handler (and a
     // `process.exit` reachable from a test kills the test runner). `deps.onWatchStart` is only invoked

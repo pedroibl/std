@@ -130,6 +130,61 @@ describe("statGrid", () => {
   });
 });
 
+describe("AD-2 — the render boundary is asserted, not assumed (Story 7.3 AC5)", () => {
+  // A caller-local field must be INVISIBLE to a std renderer. That invisibility is the forcing
+  // function for promotion (AD-2 rule 3) — so it has to be a property the code holds, not one it
+  // happens to hold today.
+  type Extended = {
+    label: string;
+    value: string;
+    hint?: string;
+    mine: string;
+    owner: string;
+  };
+
+  // ⚠ A VARIABLE, not an inline literal. TypeScript's excess-property check fires on literals only,
+  // so a literal would be a compile error and would never reach the renderer — which is the opposite
+  // of the case being tested. A variable is exactly how a caller-local field reaches std in practice.
+  // ⚠ The assignability half is checked by `typecheck:cn` (via tsconfig.test.json), NOT by `bun test`,
+  // which does not typecheck at all. This file must stay inside that config's input set.
+  const extended: Extended = {
+    label: "Open",
+    value: "7",
+    // Distinctive sentinels: a no-occurrence assertion against ordinary words could pass by accident
+    // when the same characters appear in label/value text.
+    mine: "__AD2_MINE__",
+    owner: "__AD2_OWNER__",
+  };
+
+  test("statCard renders the declared fields ONLY — the extra ones leave no trace", () => {
+    const container = makeEl("div");
+    const card = as(statCard(container as unknown as HTMLElement, extended));
+
+    // EXACT child count, not "no extra node" — the loose form cannot fail.
+    expect(card.children).toHaveLength(2); // value + label, no hint given
+    const rendered = JSON.stringify(card);
+    expect(rendered).not.toContain("__AD2_MINE__");
+    expect(rendered).not.toContain("__AD2_OWNER__");
+    expect(rendered).not.toContain("mine");
+    expect(rendered).not.toContain("owner");
+  });
+
+  test("with a hint the card is exactly 3 nodes — still nothing from the caller's own fields", () => {
+    const container = makeEl("div");
+    const card = as(statCard(container as unknown as HTMLElement, { ...extended, hint: "since Tue" }));
+    expect(card.children).toHaveLength(3);
+    expect(JSON.stringify(card)).not.toContain("__AD2_");
+  });
+
+  test("statGrid passes the same boundary through to every card", () => {
+    const container = makeEl("div");
+    const grid = as(statGrid(container as unknown as HTMLElement, [extended, extended]));
+    expect(grid.children).toHaveLength(2);
+    expect(grid.children.every((c) => c.children.length === 2)).toBe(true);
+    expect(JSON.stringify(grid)).not.toContain("__AD2_");
+  });
+});
+
 describe("ensureStyles", () => {
   test("appends one <style> carrying the cn- rules", () => {
     ensureStyles();
