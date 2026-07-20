@@ -615,14 +615,19 @@ const DIGEST_SUBPATH = join("docs", "session-digest.md");
  */
 export function resolveDigestPath(roots: Roots, target: string): string {
   const resolved = resolve(target);
+  const out = join(resolved, DIGEST_SUBPATH);
   for (const forbidden of [roots.queueDir, roots.learningDir]) {
     const base = resolve(forbidden);
     // Segment-aware containment, so `/x/std-public` is not "inside" `/x/std`.
-    if (resolved === base || resolved.startsWith(base + sep)) {
-      throw new Error(`--target refuses a path inside the harvester's own write dir: ${resolved} is inside ${base}`);
+    // BOTH the target base AND the final write path are checked: guarding only the base lets
+    // `--target /x` slip a write into `/x/docs` when a forbidden dir IS `/x/docs`.
+    for (const candidate of [resolved, out]) {
+      if (candidate === base || candidate.startsWith(base + sep)) {
+        throw new Error(`--target refuses a path inside the harvester's own write dir: ${candidate} is inside ${base}`);
+      }
     }
   }
-  return join(resolved, DIGEST_SUBPATH);
+  return out;
 }
 
 /**
@@ -633,6 +638,23 @@ export function resolveDigestPath(roots: Roots, target: string): string {
  * prompt-echo candidates, and the digest must make that noise VISIBLE to the human reviewer rather
  * than launder it into clean-looking markdown (flag-don't-fix; the quality fix belongs to 15.3).
  */
+/**
+ * The ONE sanitizer for anything interpolated into the digest. LOAD-BEARING, not cosmetic.
+ *
+ * Every field rendered below is transcript- or filesystem-derived and therefore attacker-influenced:
+ * `content` is a raw 500-char slice, `timestamp`/`sessionId` come straight off the transcript JSON, and
+ * the project slug is a directory basename. Any of them may contain newlines. Interpolated verbatim, a
+ * value like "…\n## Injected" forges a sibling project heading, detaches the provenance sub-bullet from
+ * its entry (breaking AC3's provenance-to-the-line guarantee), or emits the `_No candidates mined._`
+ * sentinel so a full digest reads as empty.
+ *
+ * Route EVERY digest interpolation through this — collapsing one field and not its siblings is how the
+ * first fix for this shipped incomplete.
+ */
+function digestField(value: unknown): string {
+  return collapse(String(value));
+}
+
 export function buildDigest(groups: Map<string, MinedMemory[]>): string {
   const { p, toString } = lines();
   p("# Session digest");
@@ -645,18 +667,15 @@ export function buildDigest(groups: Map<string, MinedMemory[]>): string {
   for (const [project, mems] of groups) {
     if (mems.length === 0) continue;
     total += mems.length;
-    p(`## ${projectLabel(project)} (\`${project}\`)`);
+    p(`## ${digestField(projectLabel(project))} (\`${digestField(project)}\`)`);
     p();
     for (const mem of mems) {
       const prov = provenanceOf(mem); // single derivation — shared with the queue writer
-      // `collapse` is LOAD-BEARING, not cosmetic. `mem.content` is a RAW 500-char transcript slice
-      // (gap #3) — embedded newlines are the norm. Interpolated verbatim, a candidate containing
-      // "\n## x" would forge a sibling project heading, detach the provenance sub-bullet from its
-      // entry (breaking AC3's provenance-to-the-line guarantee), and could even emit the literal
-      // `_No candidates mined._` sentinel so a full digest reads as empty. One line per entry.
-      p(`- **[${mem.memoryType}]** (${(mem.confidence * 100).toFixed(0)}% confidence) ${collapse(mem.content)}`);
+      // Every interpolation goes through digestField() — see its docstring for why sanitizing only
+      // `content` (the shape this fix originally shipped in) leaves the same hole open via `timestamp`.
+      p(`- **[${digestField(mem.memoryType)}]** (${(mem.confidence * 100).toFixed(0)}% confidence) ${digestField(mem.content)}`);
       p(
-        `  - session \`${prov.sessionId}\` · line ${prov.sourceLine} · ${prov.timestamp} · project \`${prov.projectSlug}\``,
+        `  - session \`${digestField(prov.sessionId)}\` · line ${digestField(prov.sourceLine)} · ${digestField(prov.timestamp)} · project \`${digestField(prov.projectSlug)}\``,
       );
     }
     p();

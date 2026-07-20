@@ -447,6 +447,14 @@ describe("--target repo-scoped digest (15.1)", () => {
     expect(resolveDigestPath(roots, join(root, "sub", ".."))).toBe(join(root, "docs", "session-digest.md"));
   });
 
+  // Doctrine-tier cross-LLM review (grok-4.5, 2026-07-20) MINOR — the guard checked only the target
+  // BASE, so a target whose `docs/` subdir IS a forbidden dir slipped the final write path through.
+  test("AC4: the guard also rejects when the FINAL write path lands in a forbidden dir", () => {
+    const sneaky = { ...roots, learningDir: join(root, "sneaky", "docs") };
+    // The base `<root>/sneaky` is outside learningDir, but the write path <root>/sneaky/docs/... is not.
+    expect(() => resolveDigestPath(sneaky, join(root, "sneaky"))).toThrow(/own write dir/);
+  });
+
   test("AC5: --dry-run --target writes zero files (neither digest nor queue)", () => {
     const sid = "ffffffff-0000-0000-0000-000000000015";
     writeSession(
@@ -517,6 +525,28 @@ describe("--target digest hardening (15.1 review)", () => {
     const entry = lines_.findIndex((l) => l.startsWith("- **[decision]**"));
     expect(lines_[entry + 1].trim().startsWith("- session")).toBe(true);
     expect(lines_[entry]).toContain("## Injected heading"); // collapsed inline, not a heading
+  });
+
+  // Doctrine-tier cross-LLM review (grok-4.5, 2026-07-20) MAJOR — the fix above sanitized `content`
+  // and stopped there. `timestamp`/`sessionId`/`projectSlug` are equally transcript-derived, so the
+  // identical structural break was still reachable through any of them. Every field is asserted here
+  // so a future edit cannot re-open the hole one field at a time.
+  test("EVERY transcript-derived provenance field is collapsed, not just content", () => {
+    const hostile = "\n## Injected heading\n\n- forged bullet\n";
+    for (const field of ["timestamp", "sessionId", "project"] as const) {
+      const md = buildDigest(new Map([["proj-alpha", [mem({ [field]: `real-value${hostile}` })]]]));
+      expect(md.split("\n").filter((l) => l.startsWith("## "))).toEqual(["## proj/alpha (`proj-alpha`)"]);
+      expect(md.split("\n").some((l) => l.trim() === "- forged bullet")).toBe(false);
+      const ls = md.split("\n");
+      const entry = ls.findIndex((l) => l.startsWith("- **[decision]**"));
+      expect(ls[entry + 1].trim().startsWith("- session")).toBe(true);
+    }
+  });
+
+  // Same review, MINOR — a hostile PROJECT KEY reaches the `## ` heading directly.
+  test("a hostile project key cannot forge extra digest headings", () => {
+    const md = buildDigest(new Map([["alpha\n## forged heading", [mem({})]]]));
+    expect(md.split("\n").filter((l) => l.startsWith("## ")).length).toBe(1);
   });
 
   // MAJOR #2 — core.flagValue returns args[i+1] unconditionally; guard the three misparses.
