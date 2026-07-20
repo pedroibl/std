@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.json",
-  "//": "The other half of the src/cn/ typecheck. tsconfig.json covers the DEPLOYED slice with types: [] so a stray Bun/node global is a compile error; that same barrier makes `bun:test` unresolvable. Test files are never bundled into the vault, so they keep Bun's types — and get DOM, because they assert against DOM-typed signatures. Both configs run under `bun run typecheck:cn`; between them every .ts in src/cn/ is checked exactly once.",
+  "//": "The other half of the src/cn/ typecheck. tsconfig.json covers the DEPLOYED slice with types: [] so a stray Bun/node global is a compile error; that same barrier makes `bun:test` unresolvable. Test files are never bundled into the vault, so they keep Bun's types — and get DOM, because they assert against DOM-typed signatures. Both configs run under `bun run typecheck:cn`. COVERAGE, stated precisely: every .ts under src/cn/ is checked by AT LEAST ONE config, and every NON-TEST .ts is checked by the `types: []` config. index.ts is in fact checked twice — it enters here as an import of the test file, with Bun/node globals available — which is harmless only because both configs must pass and the strict one is what actually gates. Do not read this config as unable to relax the barrier; it can see index.ts, it just cannot excuse it.",
   "compilerOptions": {
     "lib": ["ESNext", "DOM"],
     "types": ["bun"]

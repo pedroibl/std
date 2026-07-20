@@ -9,7 +9,7 @@
 // tested live, in the vault (AC8). Fixtures test your assertions; contact tests your assumptions.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -37,6 +37,11 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
+
+/** Blank out `//` and block comments so a source scan sees code only, not prose about code. */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[^\n]*?\/\/.*$/gm, "");
+}
 
 /** Collect the CLI's stdout instead of printing it. */
 function sink() {
@@ -110,15 +115,39 @@ describe("buildBundle — the artifact contract (AC3, AC4, AC6)", () => {
     const code = await buildBundle();
     for (const name of ["getDataview", "statCard", "statGrid", "ensureStyles"]) {
       expect(code).toContain(`function ${name}(`);
-      expect(code).toContain(name);
     }
   });
 
-  test("bundles NO external module — no import/require of any non-std specifier (AC4)", async () => {
+  // AC4 is asserted on the SOURCE, not the bundle output. Grepping the output for `import`/`require`
+  // is a tautology: inlining those away is exactly what a bundler does, so the assertion holds no
+  // matter what src/cn/ imports. Adding `import { parse } from "yaml"` to the slice would take the
+  // artifact from ~1.6 KB to ~190 KB with yaml's internals inlined, and an output-grep would still
+  // pass — as would a cross-slice `import ... from "../core/cite"` (an AD-8/D1 violation).
+  test("src/cn/ imports NOTHING — asserted on the source, so a bundler cannot hide it (AC4)", () => {
+    const dir = join(import.meta.dir, "..", "cn");
+    const sources = readdirSync(dir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+    expect(sources.length).toBeGreaterThan(0); // a zero-file scan would pass vacuously
+
+    for (const f of sources) {
+      // Comments are masked first — the file's own doc-comment shows the vault's
+      // `await require("/Scripts/cn.js")` call, which is documentation, not a dependency.
+      // (Same discipline as scripts/check-no-consumer-ids.ts: mask comments, keep strings.)
+      const src = stripComments(readFileSync(join(dir, f), "utf-8"));
+      expect(src).not.toMatch(/^\s*import\s[\s\S]*?\sfrom\s/m); // value or type import
+      expect(src).not.toMatch(/^\s*import\s+["']/m); // bare side-effect import
+      expect(src).not.toMatch(/\brequire\s*\(/);
+      expect(src).not.toMatch(/\bimport\s*\(/); // dynamic import
+    }
+  });
+
+  // The backstop for anything the source scan's regexes miss: an external dep cannot be inlined
+  // without the artifact growing. The slice is one small file; the ceiling is ~5x its current size.
+  test("the artifact stays small — nothing external got inlined (AC4)", async () => {
+    expect((await buildBundle()).length).toBeLessThan(8_000);
+  });
+
+  test("the built artifact names no host plugin module", async () => {
     const code = await buildBundle();
-    // ESM `export { ... }` is expected; a bare `import ... from "x"` / `require("x")` is not.
-    expect(code).not.toMatch(/^\s*import\s/m);
-    expect(code).not.toMatch(/\brequire\s*\(/);
     for (const host of ["obsidian", "dataview", "js-engine"]) {
       expect(code.toLowerCase()).not.toContain(`"${host}"`);
       expect(code.toLowerCase()).not.toContain(`'${host}'`);
@@ -177,6 +206,38 @@ describe("runCnDeploy — end to end", () => {
 
   test("exit 2 on a missing --vault, and nothing is written", async () => {
     expect(await runCnDeploy(["deploy"], { log: () => {} })).toBe(2);
+    expect(existsSync(artifactPath(vault))).toBe(false); // the title's second clause, actually asserted
+  });
+
+  test("exit 2 on a valueless --format — the user's intent is not silently defaulted to esm", async () => {
+    expect(await runCnDeploy(["deploy", "--vault", vault, "--format"], { log: () => {} })).toBe(2);
+    expect(existsSync(artifactPath(vault))).toBe(false);
+  });
+
+  test("a usage error beats an I/O error — --format is validated before the vault is touched", async () => {
+    // Both are wrong; the usage code (2) must win, so the user is told what they can actually fix.
+    expect(await runCnDeploy(["deploy", "--vault", join(tmp, "nope"), "--format", "umd"], { log: () => {} })).toBe(2);
+  });
+
+  test("TOCTOU: a hand-authored file appearing DURING the build is not clobbered", async () => {
+    // resolveTarget runs before the build; the build is the one await in the function. Without a
+    // re-check after it, the write is unconditional and destroys work saved in that window.
+    const target = artifactPath(vault);
+    const original = "// hand-written mid-build\nexport const x = 1;\n";
+
+    const racer = runCnDeploy(["deploy", "--vault", vault], { log: () => {} });
+    mkdirSync(join(vault, "Scripts"), { recursive: true });
+    writeFileSync(target, original);
+
+    expect(await racer).toBe(1);
+    expect(readFileSync(target, "utf-8")).toBe(original); // survived
+  });
+
+  test("a real fs fault returns 1 in the house format — it does not escape as an unhandled rejection", async () => {
+    // A directory where the artifact should be: readIfExists throws EISDIR, a plain Error, not a
+    // CnDeployError. Rethrowing it would skip main.ts's process.exit and dump a stack trace.
+    mkdirSync(artifactPath(vault), { recursive: true });
+    expect(await runCnDeploy(["deploy", "--vault", vault], { log: () => {} })).toBe(1);
   });
 
   test("exit 2 on an unknown/absent subcommand", async () => {

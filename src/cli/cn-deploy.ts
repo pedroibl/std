@@ -20,7 +20,7 @@
 
 import { join } from "node:path";
 
-import { flagValue } from "../core/args";
+import { flagValue, hasFlag } from "../core/args";
 import { atomicWrite, exists, readIfExists } from "../fsx/index";
 
 /** Marker every generated artifact starts with — the clobber guard keys on this exact prefix. */
@@ -127,27 +127,39 @@ export async function runCnDeploy(argv: string[], deps: CnDeployDeps = {}): Prom
     return 2;
   }
 
+  // USAGE validation first, before any I/O — so `--vault <bad> --format umd` reports the usage error
+  // (exit 2) rather than the vault error (exit 1). `hasFlag` before `flagValue` because a trailing
+  // `--format` with no value yields `undefined`, which `?? "esm"` would silently accept as a default:
+  // the user asked for something and got something else, at exit 0.
+  const format = hasFlag(rest, "format") ? flagValue(rest, "format") : "esm";
+  if (format !== "esm" && format !== "cjs") {
+    console.error(`✗ --format must be esm or cjs (got '${format ?? "<no value>"}')`);
+    return 2;
+  }
+
   const vault = flagValue(rest, "vault");
   let target: string;
   try {
     target = resolveTarget(vault);
   } catch (e) {
+    // A missing --vault is a USAGE error; everything else is a real failure. A non-CnDeployError here
+    // is a genuine fs fault (permission, not-a-directory) — report it in the house `✗ ` format and
+    // return 1 rather than escaping as an unhandled rejection, which would dump a stack trace at the
+    // user, skip `main.ts`'s `process.exit(code)`, and satisfy the 0/1/2 contract only by luck.
     if (e instanceof CnDeployError) {
       console.error(`✗ ${e.message}`);
-      // A missing --vault is a USAGE error; everything else is a real failure.
       return vault === undefined || vault === "" ? 2 : 1;
     }
-    throw e;
-  }
-
-  const format = (flagValue(rest, "format") ?? "esm") as "esm" | "cjs";
-  if (format !== "esm" && format !== "cjs") {
-    console.error(`✗ --format must be esm or cjs (got '${format}')`);
-    return 2;
+    console.error(`✗ cannot inspect the deploy target in ${vault}: ${e}`);
+    return 1;
   }
 
   try {
     const code = await buildBundle(format);
+    // RE-CHECK after the await. `resolveTarget` ran before the build, and a real bundle takes long
+    // enough that a hand-authored file can appear in that window — writing unconditionally here would
+    // defeat the clobber guard entirely, which is the one safety property this command exists to hold.
+    resolveTarget(vault);
     atomicWrite(target, code);
     // Read-back verification, the Makefile discipline: never claim a write we did not confirm landed.
     const written = readIfExists(target);
@@ -157,10 +169,7 @@ export async function runCnDeploy(argv: string[], deps: CnDeployDeps = {}): Prom
     log(`✓ cn (${format}) → ${target}  ${code.length} bytes`);
     return 0;
   } catch (e) {
-    if (e instanceof CnDeployError) {
-      console.error(`✗ ${e.message}`);
-      return 1;
-    }
-    throw e; // unexpected — fail loud, never swallow (FR5)
+    console.error(`✗ ${e instanceof CnDeployError ? e.message : `deploy failed at ${target}: ${e}`}`);
+    return 1;
   }
 }
