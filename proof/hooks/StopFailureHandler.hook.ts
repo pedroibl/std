@@ -29,7 +29,10 @@ interface StopFailureInput {
 async function main() {
   let input: StopFailureInput;
   try {
-    input = JSON.parse(readFileSync('/dev/stdin', 'utf-8'));
+    // fd 0, NOT '/dev/stdin' — same pipe-read hazard fixed in ElicitationHandler.hook.ts; see the
+    // comment there. Untested today (no hook test covers this one), so it is fixed alongside rather
+    // than left as the surviving instance of a bug we just proved bites.
+    input = JSON.parse(readFileSync(0, 'utf-8'));
   } catch {
     // fail-OPEN (AD-9.4 Rule 2): no / malformed stdin → exit 0, non-blocking.
     process.exit(0);
