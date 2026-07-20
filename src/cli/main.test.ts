@@ -104,7 +104,8 @@ describe("cn dispatch + HELP (Story 7.2 — review finding: this branch had zero
       mkdirSync(join(vault, ".obsidian"), { recursive: true });
       // A FAKE watcher: this test must never open a real recursive watch — that surface is
       // platform-divergent (FSEvents vs inotify) and this suite runs on Linux in CI.
-      const watch = () => ({ close: () => {} });
+      let watchCalls = 0;
+      const watch = () => (watchCalls++, { close: () => {} });
 
       // No --watch → nothing goes resident, so no handler is installed.
       let stops = 0;
@@ -130,6 +131,10 @@ describe("cn dispatch + HELP (Story 7.2 — review finding: this branch had zero
         }),
       ).toBe(0);
       expect(typeof stop).toBe("function");
+      // Assert the FAKE was actually reached. Without this, deleting `watch: deps.watch` from main.ts
+      // stays green while these two cases silently open REAL recursive watchers on src/cn + src/core —
+      // the platform-divergent surface this suite must never touch on Linux CI.
+      expect(watchCalls).toBe(2); // src/cn + src/core, from the --watch run only
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -143,10 +148,11 @@ describe("cn dispatch + HELP (Story 7.2 — review finding: this branch had zero
     try {
       const vault = join(dir, "vault");
       mkdirSync(join(vault, ".obsidian"), { recursive: true });
+      let sigintWatchCalls = 0;
       const before = process.listeners("SIGINT");
       const p = runMain(["cn", "deploy", "--vault", vault, "--watch"], {
         log: () => {},
-        watch: () => ({ close: () => {} }),
+        watch: () => (sigintWatchCalls++, { close: () => {} }),
       });
 
       let added: ((...a: unknown[]) => void)[] = [];
@@ -156,6 +162,7 @@ describe("cn dispatch + HELP (Story 7.2 — review finding: this branch had zero
       }
       expect(added.length).toBe(1);
 
+      expect(sigintWatchCalls).toBe(2); // the fake reached runWatch — no real fs.watch opened
       added[0]!(); // ctrl-c
       expect(await p).toBe(0);
       process.removeListener("SIGINT", added[0]!);

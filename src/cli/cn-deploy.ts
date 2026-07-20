@@ -234,7 +234,12 @@ export function isBundleRelevant(filename: string): boolean {
   const base = basename(filename)
     .replace(/\.tmp[.\w-]*$/, "") // write-temp-then-rename: `index.ts.tmp.46812.0e28eeb8a7b3`
     .replace(/~$/, ""); // editor backup: `index.ts~`
-  if (base === "") return false;
+  // An empty stripped name means a dotfile temp we cannot identify (`.tmp8sK2ax`, `.tmp`). Everywhere
+  // else this function's rule is "under-triggering is the expensive failure because it is silent", so
+  // an information-free name must resolve to TRIGGER, not drop. A truly empty event filename never
+  // reaches here — onEvent's `filename === null` guard and the `""` case both come through as no name,
+  // and rebuilding on one costs an in-memory build with no vault write.
+  if (base === "") return filename !== "";
   if (/\.(test|spec)\.tsx?$/.test(base)) return false; // a test edit cannot change the bundle
   if (IGNORED_NAMES.includes(base)) return false;
   return !IGNORED_EXTENSIONS.some((ext) => base.endsWith(ext));
@@ -312,12 +317,30 @@ export function runWatch(dirs: string[], deps: WatchDeps): { done: Promise<numbe
           deps.log(`· unchanged (${t})`);
         }
       })
+      .catch((e) => {
+        // The chain must never reject: an injected sink that throws (WatchDeps exists precisely so
+        // callers supply their own) would otherwise escape as an unhandled rejection and TERMINATE the
+        // resident loop — measured: the process died before the next tick, exit 1, outside the 0/1/2
+        // contract. Report and stay alive, same discipline as a failed build.
+        try {
+          logError(`✗ watch loop error: ${e}`);
+        } catch {
+          /* even the error sink is broken — there is nowhere left to report, but do not die */
+        }
+      })
       .finally(() => {
         inFlight = false;
         if (stopped) {
           // stop() was called mid-deploy and DEFERRED the resolve to here, so `main.ts` does not
           // process.exit(0) — reporting a clean shutdown — while the save that is still building
           // never reaches the vault.
+          if (queued) {
+            // …but a save that was COALESCED behind this deploy is now dropped. Draining it would run
+            // a build after the user pressed ctrl-c; dropping it silently is the "worse than no loop"
+            // failure — you save, you quit, and Obsidian shows stale output with nothing said. So say it.
+            queued = false;
+            logError(`⚠ shutdown: a pending rebuild (${trigger}) was dropped — re-run deploy`);
+          }
           finish();
           return;
         }
@@ -368,7 +391,14 @@ export function runWatch(dirs: string[], deps: WatchDeps): { done: Promise<numbe
   };
 
   const stop = (): void => {
-    if (stopped) return;
+    if (stopped) {
+      // A SECOND ctrl-c gives up on the in-flight deploy. `main.ts` replaces the default SIGINT
+      // terminate behaviour with this handler, so if the first stop is waiting on a deploy that never
+      // settles (a wedged build, a stalled iCloud write) the process would be unkillable except by
+      // `kill -9`. Escalation is the user's escape hatch.
+      finish();
+      return;
+    }
     stopped = true;
     if (timer !== null) {
       deps.clearTimer(timer);

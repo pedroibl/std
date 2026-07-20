@@ -375,6 +375,8 @@ describe("runWatch — debounce, serialization, survival, shutdown (AC3, AC4, AC
     w.emit("index.ts");
     expect(clock.pending()).toBe(1); // each event replaced the previous timer — trailing debounce
     expect(clock.lastMs()).toBe(WATCH_DEBOUNCE_MS);
+    expect(WATCH_DEBOUNCE_MS).toBe(150); // AC3's stated default. `lastMs === CONST` is the constant
+    // compared against itself: measured, 150 → 1 and 150 → 400 both stayed green without this line.
     expect(calls).toBe(0); // nothing before the window closes
 
     clock.tick();
@@ -537,6 +539,14 @@ describe("runWatch — debounce, serialization, survival, shutdown (AC3, AC4, AC
       "XX7Eoqmy",
       "index.ts~",
       "4913", // vim's numeric write probe — cheap to rebuild on, expensive to miss a save
+      // Real save patterns measured across editors: all must reach the loop.
+      "___jb_tmp___", // JetBrains safe-write
+      "index.ts.vsctmp", // VS Code
+      ".goutputstream-a1b2c3", // gedit / GIO
+      "#index.ts#", // emacs autosave
+      ".#index.ts", // emacs lock
+      ".tmp8sK2ax", // a dotfile temp: strips to "" — an information-free name must TRIGGER, not drop
+      ".tmp",
       // Bun ships default loaders for these, so they ARE bundle inputs. FR20's CSS token system is
       // cn's next step: ignoring them by extension would reinstate the silent under-trigger.
       "tokens.json",
@@ -553,6 +563,8 @@ describe("runWatch — debounce, serialization, survival, shutdown (AC3, AC4, AC
       "index.spec.ts",
       "sub/cn.test.ts",
       "index.test.ts.tmp.9.abc",
+      "index.test.ts~",
+      "notes.md~",
       "README.md",
       "package.json", // by NAME, so other .json files stay watchable
       "tsconfig.json",
@@ -693,9 +705,132 @@ describe("runWatch — debounce, serialization, survival, shutdown (AC3, AC4, AC
     stop();
     expect(w.closed).toEqual(["a"]); // closed once, not twice
     w.emit("index.ts");
+    // Not just "no deploy" — no TIMER either. An unreferenced setTimeout scheduled after shutdown
+    // keeps the Bun process alive past the exit the user asked for.
+    expect(clock.pending()).toBe(0);
     clock.tick();
     await flush();
     expect(calls).toBe(0);
+    expect(await done).toBe(0);
+  });
+
+  test("a second stop() gives up on a wedged deploy — ctrl-c twice always exits", async () => {
+    // main.ts REPLACES the default SIGINT terminate behaviour with this handler. If the first stop
+    // waits on a deploy that never settles (a wedged build, a stalled iCloud write), every later
+    // ctrl-c hitting `if (stopped) return` leaves the user with only `kill -9`.
+    const clock = fakeClock();
+    const w = fakeWatchers();
+    const { done, stop } = runWatch(["a"], {
+      watch: w.watch,
+      deploy: () => new Promise<DeployResult>(() => {}), // never settles
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      log: () => {},
+    });
+
+    w.emit("index.ts");
+    clock.tick();
+    await flush();
+
+    stop(); // first ctrl-c — waits for the in-flight deploy
+    const sentinel = Symbol("wedged");
+    expect(await Promise.race([done, Promise.resolve(sentinel)])).toBe(sentinel);
+
+    stop(); // second ctrl-c — escalate
+    expect(await done).toBe(0);
+  });
+
+  test("a save coalesced behind a deploy is not silently lost at shutdown — it is REPORTED", async () => {
+    // Save A builds; you save B (coalesced); you ctrl-c. B never reaches the vault. Dropping it is
+    // defensible — draining would build after the user quit — but dropping it SILENTLY at exit 0 is
+    // the "you save, you quit, Obsidian shows stale output, nothing told you" failure.
+    const clock = fakeClock();
+    const w = fakeWatchers();
+    const errors: string[] = [];
+    let calls = 0;
+    let release!: () => void;
+    const { done, stop } = runWatch(["a"], {
+      watch: w.watch,
+      deploy: () => {
+        calls++;
+        return new Promise<DeployResult>((r) => {
+          release = () => r(OK);
+        });
+      },
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      log: () => {},
+      logError: (l) => errors.push(l),
+    });
+
+    w.emit("alpha.ts");
+    clock.tick();
+    await flush(); // deploy #1 in flight
+    w.emit("beta.ts");
+    clock.tick();
+    await flush(); // beta coalesced into `queued`
+    expect(calls).toBe(1);
+
+    stop();
+    release();
+    expect(await done).toBe(0);
+    expect(calls).toBe(1); // beta was NOT built — that is the (defensible) behaviour…
+    expect(errors.join("\n")).toContain("dropped"); // …but the user is told
+    expect(errors.join("\n")).toContain("beta.ts");
+  });
+
+  test("a throwing log sink does not kill the resident loop", async () => {
+    // `void deploy().then(...)` with no .catch: an injected sink that throws escapes as an unhandled
+    // rejection and terminates the process. WatchDeps exists so callers inject their own sinks, and
+    // Story 8.x's dashkit --watch is the named second caller.
+    const clock = fakeClock();
+    const w = fakeWatchers();
+    const errors: string[] = [];
+    let calls = 0;
+    const { done, stop } = runWatch(["a"], {
+      watch: w.watch,
+      deploy: async () => (calls++, OK),
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      log: () => {
+        throw new Error("sink exploded");
+      },
+      logError: (l) => errors.push(l),
+    });
+
+    w.emit("index.ts");
+    clock.tick();
+    await flush();
+    expect(errors.join("\n")).toContain("watch loop error");
+
+    w.emit("index.ts"); // still alive
+    clock.tick();
+    await flush();
+    expect(calls).toBe(2);
+    stop();
+    expect(await done).toBe(0);
+  });
+
+  test("one watcher whose close() throws does not strand its siblings", async () => {
+    // An already-closed / fd-gone FSWatcher throwing out of the shutdown loop would leave the rest
+    // open, and an open watcher keeps the Bun process alive after the loop was told to stop.
+    const clock = fakeClock();
+    const closed: string[] = [];
+    const { done, stop } = runWatch(["a", "b"], {
+      watch: (dir) => ({
+        close: () => {
+          if (dir === "a") throw new Error("EBADF");
+          closed.push(dir);
+        },
+      }),
+      deploy: async () => OK,
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      log: () => {},
+    });
+
+    expect(() => stop()).not.toThrow();
+    expect(closed).toEqual(["b"]); // the sibling still closed
     expect(await done).toBe(0);
   });
 });
