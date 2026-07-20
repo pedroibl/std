@@ -87,11 +87,17 @@ export type Bucket = "malformed" | "filtered" | "unrouted" | "no-target-section"
 export const PRECEDENCE: readonly Bucket[] = ["malformed", "filtered", "unrouted", "no-target-section", "routed"];
 
 /**
- * Heading probe, in order, first hit wins. `findSection` matches a LITERAL heading at
- * a fixed `#`-depth, but real skills vary: passing only `"## Gotchas"` would report
- * `no-target-section` for every `### Gotchas` skill — a false negative indistinguishable
- * from the genuine ~16% of skills that have no such section, silently corrupting the
- * counts. The three depths cover 100% of the live census.
+ * Heading probe — the depths to try. `findSection` matches a LITERAL heading at a fixed
+ * `#`-depth, but real skills vary: probing only `"## Gotchas"` would report `no-target-section`
+ * for every `### Gotchas` skill — a false negative indistinguishable from the genuine ~16% of
+ * skills that have no such section, silently corrupting the counts. These three cover 100% of
+ * the live census (47×`##`, 1×`###`, no `####+`).
+ *
+ * ORDER IS NOT PRECEDENCE. `locateGotchas` resolves by EARLIEST POSITION IN THE FILE, not by
+ * this array's order — a `### Gotchas` above a later `## Gotchas` wins. The list is a set of
+ * depths to look for; nothing reads its ordering. (It was probe-order-wins until the 15.2 code
+ * review; the array is unchanged, only the resolution rule moved, so do not read precedence
+ * back into it.)
  */
 export const HEADINGS: readonly string[] = ["## Gotchas", "### Gotchas", "# Gotchas"];
 
@@ -167,8 +173,13 @@ export function isCandidate(value: unknown): value is Candidate {
     typeof prov.projectSlug === "string" &&
     typeof prov.sessionId === "string" &&
     typeof prov.sourceLine === "number" &&
+    Number.isInteger(prov.sourceLine) &&
+    prov.sourceLine > 0 &&
     typeof prov.timestamp === "string" &&
     typeof c.confidence === "number" &&
+    !Number.isNaN(c.confidence) &&
+    c.confidence >= 0 &&
+    c.confidence <= 1 &&
     typeof c.content === "string"
   );
 }
@@ -181,6 +192,15 @@ export function isCandidate(value: unknown): value is Candidate {
  * `findSection` returns CHARACTER OFFSETS (`SectionBounds{start,bodyStart,bodyEnd}`), not
  * line numbers, and nothing in `core` converts them — so the line is derived here. Reporting
  * `bounds.start` as a line would emit a plausible-looking wrong anchor.
+ *
+ * RESOLUTION RULE (changed by the 15.2 code review): every depth in `HEADINGS` is probed and the
+ * EARLIEST match in the file wins — not the first depth that happens to hit. Probe-order-wins let
+ * a `## Gotchas` far down the file beat a `### Gotchas` near the top, which is the wrong anchor to
+ * hand a human. Known trade-off, recorded rather than hidden: a `### Gotchas` SUBSECTION nested
+ * under some earlier `##` now outranks the document's own top-level `## Gotchas`. That is
+ * unreachable in the live population (no skill carries two Gotchas headings — 47×`##` + 1×`###`,
+ * disjoint), so this buys correctness on the reviewer's case at no measured cost. If a skill ever
+ * grows both, revisit: the right rule then is probably "shallowest depth, earliest among equals".
  */
 export function locateGotchas(
   artifact: string,
@@ -188,9 +208,17 @@ export function locateGotchas(
 ): { heading: string; anchorLine: number } | null {
   const body = readArtifact(artifact);
   if (body === null) return null;
+  let earliest: { heading: string; start: number } | null = null;
   for (const heading of HEADINGS) {
     const bounds = findSection(body, heading);
-    if (bounds) return { heading, anchorLine: body.slice(0, bounds.start).split("\n").length };
+    if (bounds) {
+      if (earliest === null || bounds.start < earliest.start) {
+        earliest = { heading, start: bounds.start };
+      }
+    }
+  }
+  if (earliest) {
+    return { heading: earliest.heading, anchorLine: body.slice(0, earliest.start).split("\n").length };
   }
   return null;
 }
@@ -386,7 +414,7 @@ export function readQueue(queueDir: string): PromoterInput[] {
  */
 export function loadMap(mapPath: string): { map: SlugMap; present: boolean } {
   const raw = readIfExists(mapPath);
-  if (raw === null) return { map: {}, present: false };
+  if (raw === null) return { map: Object.create(null), present: false };
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -396,10 +424,13 @@ export function loadMap(mapPath: string): { map: SlugMap; present: boolean } {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(`routing map must be a JSON object of slug → artifact path: ${mapPath}`);
   }
-  const map: SlugMap = {};
+  const map: SlugMap = Object.create(null);
   for (const [slug, artifact] of Object.entries(parsed as Record<string, unknown>)) {
     if (typeof artifact !== "string") {
       throw new Error(`routing map entry "${slug}" must be a string artifact path: ${mapPath}`);
+    }
+    if (artifact === "") {
+      throw new Error(`routing map entry "${slug}" cannot be an empty path: ${mapPath}`);
     }
     map[slug] = artifact;
   }
@@ -412,11 +443,23 @@ const HELP = `gotchas-promoter — surface mined learnings as reviewable Gotchas
     --queue <dir>            candidate queue      (default <framework>/MEMORY/KNOWLEDGE/_harvest-queue)
     --map <file>             slug → artifact map  (default <framework>/MEMORY/KNOWLEDGE/gotchas-map.json)
     --min-confidence <n>     drop candidates below n (0-1). OFF by default; always reported when applied
-    --json                   machine envelope instead of markdown
+    --json                   the verdict array instead of markdown (one entry per queue file)
     --strict                 exit 1 when anything needs a human (routed or malformed). Default: exit 0
     --help                   this text
 
   It REPORTS candidates and never edits a skill. Applying one is a human's job, by design.`;
+
+/**
+ * Resolve the home directory the framework dir is derived from.
+ *
+ * `||`, deliberately NOT `??`: an EMPTY `HOME` is as unusable as an absent one, and `??` would
+ * happily pass `""` through — `resolveFrameworkDir("")` then builds relative paths off the process
+ * cwd and the tool silently reports "0 candidates" against the wrong tree. Extracted as a named
+ * function purely so that distinction is testable; it has no other seam.
+ */
+export function resolveHome(envHome: string | undefined, fallback: string): string {
+  return envHome || fallback;
+}
 
 export function main(argv: string[]): number {
   if (hasFlag(argv, "help")) {
@@ -424,7 +467,7 @@ export function main(argv: string[]): number {
     return 0;
   }
 
-  const home = process.env.HOME ?? homedir();
+  const home = resolveHome(process.env.HOME, homedir());
   const frameworkDir = resolveFrameworkDir(home);
   const queueDir = flagValue(argv, "queue") ?? join(frameworkDir, "MEMORY", "KNOWLEDGE", "_harvest-queue");
   const mapPath = flagValue(argv, "map") ?? join(frameworkDir, "MEMORY", "KNOWLEDGE", "gotchas-map.json");
@@ -433,8 +476,8 @@ export function main(argv: string[]): number {
   let minConfidence: number | null = null;
   if (rawMin !== undefined) {
     const n = Number(rawMin);
-    if (!Number.isFinite(n)) {
-      log(`✗ --min-confidence expects a number, got: ${rawMin}`);
+    if (!Number.isFinite(n) || n < 0 || n > 1) {
+      log(`✗ --min-confidence expects a number between 0 and 1, got: ${rawMin}`);
       return 2;
     }
     minConfidence = n;
@@ -452,7 +495,11 @@ export function main(argv: string[]): number {
 
   const report = buildReport(readQueue(queueDir), map, { readArtifact: readIfExists, minConfidence });
 
-  if (hasFlag(argv, "json")) emitJson(report);
+  // AC5: `--json` emits the CANDIDATE ARRAY (each with provenance + routing verdict) — not the
+  // wrapper. Nothing is lost: `total` is the array length, the five bucket counts and the
+  // `unroutedCoTagged` figure are recomputable from `bucket`/`unroutedCoTag` per entry, and the
+  // bucket-sum invariant AC2 demands is therefore still provable by a machine consumer.
+  if (hasFlag(argv, "json")) emitJson(report.verdicts);
   else console.log(renderHuman(report));
 
   // AC5: candidates are INFORMATION, not failure — exit 0 by default even when the queue is full.

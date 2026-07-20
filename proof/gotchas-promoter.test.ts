@@ -16,7 +16,9 @@ import {
   type Report,
   buildReport,
   loadMap,
+  locateGotchas,
   main,
+  resolveHome,
   readQueue,
   renderHuman,
 } from "./gotchas-promoter";
@@ -40,20 +42,22 @@ function write(path: string, body: string): string {
 }
 
 /** A well-formed queue candidate, shaped exactly like `queueCandidate` emits it. */
-function candidate(over: Record<string, unknown> = {}): Record<string, unknown> {
+function candidate(over: Record<string, any> = {}): Record<string, any> {
+  const prov = {
+    sessionId: "abcdef12-3456-7890-abcd-ef1234567890",
+    sourceLine: 412,
+    timestamp: "2026-07-20T04:00:00.000Z",
+    projectSlug: "-Users-pibl-Dev-personal-std",
+    ...(over.provenance || {}),
+  };
   return {
     title: "correction: something",
     content: "## Correction\n\nAlways pass the tz explicitly.",
     domain: "Ideas",
     type: "idea",
     confidence: 0.9,
-    provenance: {
-      sessionId: "abcdef12-3456-7890-abcd-ef1234567890",
-      sourceLine: 412,
-      timestamp: "2026-07-20T04:00:00.000Z",
-      projectSlug: "-Users-pibl-Dev-personal-std",
-    },
     ...over,
+    provenance: prov,
   };
 }
 
@@ -509,5 +513,121 @@ describe("renderHuman", () => {
     expect(md.indexOf("HIGHSIGNAL")).toBeLessThan(md.indexOf("LOWSIGNAL"));
     expect(md).toContain("95%");
     expect(md).toContain("30%");
+  });
+});
+
+describe("Patches and edge cases", () => {
+  test("sourceLine validation catches floats and negative numbers", () => {
+    const q1 = queueWith({ "a.json": candidate({ provenance: { sourceLine: 1.5 } }) });
+    expect(report(q1, {}).counts.malformed).toBe(1);
+
+    const q2 = queueWith({ "a.json": candidate({ provenance: { sourceLine: -5 } }) });
+    expect(report(q2, {}).counts.malformed).toBe(1);
+  });
+
+  test("confidence validation catches NaN and out of bounds", () => {
+    const q1 = queueWith({ "a.json": candidate({ confidence: NaN }) });
+    expect(report(q1, {}).counts.malformed).toBe(1);
+
+    const q2 = queueWith({ "a.json": candidate({ confidence: 1.5 }) });
+    expect(report(q2, {}).counts.malformed).toBe(1);
+
+    const q3 = queueWith({ "a.json": candidate({ confidence: -0.1 }) });
+    expect(report(q3, {}).counts.malformed).toBe(1);
+  });
+
+  test("CLI --min-confidence rejects out of bounds in main", () => {
+    const q = queueWith({ "a.json": candidate() });
+    expect(main(["--queue", q, "--min-confidence", "1.5"])).toBe(2);
+    expect(main(["--queue", q, "--min-confidence", "-0.5"])).toBe(2);
+    expect(main(["--queue", q, "--min-confidence", "not-a-number"])).toBe(2);
+  });
+
+  test("loadMap rejects empty path entries", () => {
+    const f = join(tmp("gp-map-"), "empty-path.json");
+    writeFileSync(f, JSON.stringify({ "-a": "" }), "utf-8");
+    expect(() => loadMap(f)).toThrow(/empty/i);
+  });
+
+  test("loadMap has prototype-pollution guard", () => {
+    const f = join(tmp("gp-map-"), "proto.json");
+    writeFileSync(f, '{"__proto__": "/some/path"}', "utf-8");
+    const { map } = loadMap(f);
+    expect(Object.getPrototypeOf(map)).toBeNull();
+    expect(map["__proto__"]).toBe("/some/path");
+  });
+
+  // The review changed `--json` from the wrapped Report to the bare verdict array (AC5 literal).
+  // That reshapes the machine contract, and nothing pinned it — so pin it, and prove the AC2
+  // bucket-sum invariant is still provable from the array alone.
+  test("--json emits the VERDICT ARRAY (AC5) and AC2's counts stay recomputable from it", () => {
+    const { paths } = skillsTree({ MySkill: "##", Bare: null });
+    const q = queueWith({
+      "routed.json": candidate({ confidence: 0.9 }),
+      "notarget.json": candidate({ confidence: 0.9, provenance: { projectSlug: "-bare" } }),
+      "unrouted.json": candidate({ confidence: 0.9, provenance: { projectSlug: "-nowhere" } }),
+      "bad.json": "{{{",
+    });
+    const mapFile = join(tmp("gp-map-"), "map.json");
+    writeFileSync(mapFile, JSON.stringify({ "-Users-pibl-Dev-personal-std": paths.MySkill, "-bare": paths.Bare }), "utf-8");
+
+    const chunks: string[] = [];
+    const original = process.stdout.write;
+    (process.stdout as { write: unknown }).write = (chunk: unknown) => {
+      chunks.push(String(chunk));
+      return true;
+    };
+    let code: number;
+    try {
+      code = main(["--queue", q, "--map", mapFile, "--json"]);
+    } finally {
+      (process.stdout as { write: unknown }).write = original;
+    }
+    expect(code).toBe(0);
+
+    const payload = JSON.parse(chunks.join(""));
+    // It is the ARRAY, not the wrapper — a wrapper would be an object with a `verdicts` key.
+    expect(Array.isArray(payload)).toBe(true);
+    expect(payload).toHaveLength(readdirSync(q).length);
+
+    // AC2's proof survives the reshape: every entry carries its terminal bucket, the counts are
+    // recomputable, and they sum to the queue file count.
+    const counts = payload.reduce((acc: Record<string, number>, v: { bucket: string }) => {
+      acc[v.bucket] = (acc[v.bucket] ?? 0) + 1;
+      return acc;
+    }, {});
+    expect(counts).toEqual({ routed: 1, "no-target-section": 1, unrouted: 1, malformed: 1 });
+    expect(Object.values(counts).reduce((a, b) => (a as number) + (b as number), 0)).toBe(payload.length);
+
+    // …and the per-candidate contract AC5 names: provenance + routing verdict.
+    const routed = payload.find((v: { bucket: string }) => v.bucket === "routed");
+    expect(routed.provenance.sessionId).toBe("abcdef12-3456-7890-abcd-ef1234567890");
+    expect(routed.provenance.sourceLine).toBe(412);
+    expect(routed.artifact).toBe(paths.MySkill);
+    expect(routed.anchorLine).toBeGreaterThan(0);
+  });
+
+  // `||` vs `??` for HOME: `??` passes an EMPTY string through, which resolves the framework dir
+  // off the cwd and silently reports against the wrong tree. Extracted so the distinction is testable.
+  test("resolveHome falls back on an EMPTY HOME, not just an absent one", () => {
+    expect(resolveHome("", "/fallback")).toBe("/fallback"); // the `??` bug: would return ""
+    expect(resolveHome(undefined, "/fallback")).toBe("/fallback");
+    expect(resolveHome("/real/home", "/fallback")).toBe("/real/home");
+  });
+
+  test("locateGotchas matches earliest heading by position, not loop index precedence", () => {
+    const body = `# Test
+Intro.
+
+### Gotchas
+First gotcha.
+
+## Gotchas
+Later gotcha.
+`;
+    const f = write(join(tmp("gp-earliest-"), "SKILL.md"), body);
+    const resolved = locateGotchas(f, reader());
+    expect(resolved).not.toBeNull();
+    expect(resolved!.heading).toBe("### Gotchas");
   });
 });
