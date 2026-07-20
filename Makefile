@@ -78,9 +78,10 @@ test:  ## bun test
 	@bun test
 
 .PHONY: typecheck
-typecheck:  ## tsc for src/ and proof/
+typecheck:  ## tsc for src/, proof/, and the src/cn/ Obsidian edge (its own scoped config)
 	@bun run typecheck
 	@bun run typecheck:proof
+	@bun run typecheck:cn
 
 .PHONY: checks
 checks:  ## the 4 fitness-function gates (core-purity, dep-root, single-source, no-consumer-ids)

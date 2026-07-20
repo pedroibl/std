@@ -51,6 +51,12 @@ jobs:
       - name: Typecheck proof
         run: bun run typecheck:proof
 
+      # Gate 3c — src/cn/ typecheck under its OWN scoped config (lib ESNext+DOM, types []). The root
+      # typecheck EXCLUDES src/cn/**, so without this step the Obsidian edge would ship untypechecked.
+      # `types: []` also makes a stray process/Bun/node:* in the slice a compile error (Story 7.1 AC5).
+      - name: Typecheck cn
+        run: bun run typecheck:cn
+
       # Gate 4 — core is runtime-neutral: no node:*/fs/DOM/network, no process/document (D1/NFR1/CM3).
       - name: Core purity
         run: bun run check:core-purity

@@ -30,7 +30,19 @@ export type Hit = { identifier: string; line: number; detail: string };
 // src/ / cli core) is not breached. The scan TARGET is src/** and NEVER scripts/, so this denylist can
 // never self-flag. A small static set is the simplest green path (AC4); it MAY be enriched at runtime
 // from STD_CONSUMERS basenames later (left out here to avoid coupling — flagged as a future option).
-const CONSUMER_NAMES = new Set(["loom", "sesh-harvest", "zsh-planning", "zshstd"]);
+// The two Obsidian VAULT consumers were added in Story 7.1 (Epic 7). Its Dev Notes had already flagged
+// the hole — "a `zDrafts` literal would NOT trip it today; that is a gap in the gate, not permission" —
+// and a cross-LLM review then demonstrated it: a `const DEFAULT_VAULT = "…/note-report"` in
+// src/cli/cn-deploy.ts passed this gate untouched. A vault path is consumer identity exactly as a repo
+// path is; std takes it as `--vault`, never baked in.
+const CONSUMER_NAMES = new Set([
+  "loom",
+  "sesh-harvest",
+  "zsh-planning",
+  "zshstd",
+  "zDrafts",
+  "note-report",
+]);
 
 // std's own identity is allowlisted BY CONSTRUCTION: `std`, `pedroibl/std`, `@pedroibl/std`, `std/<slice>`
 // share no path/slug segment with the denylist, so a denylist-driven match never flags them.

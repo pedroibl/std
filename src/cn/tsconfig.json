@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.json",
+  "//": "AC5 — src/cn/ is an OBSIDIAN edge, so it typechecks under its own config, not the root one. The root config is Bun-shaped (lib ESNext, types [\"bun\"]) and deliberately has NO DOM lib — that absence IS the compile-time barrier keeping DOM out of core. Adding DOM globally would tear it down, so cn is excluded from the root include and typechecked here instead (pattern precedent: proof/tsconfig.json).",
+  "//types": "compilerOptions.types is empty ON PURPOSE — it drops the inherited [\"bun\"]. With Bun's globals gone, a stray process/Bun/node:* in this slice is a COMPILE ERROR. This is the only barrier cn gets: Gate 4 (check:core-purity) scans src/core/** only and will not catch DOM-edge drift.",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM"],
+    "types": []
+  },
+  "include": ["**/*.ts"],
+  "//exclude": "Overriding the inherited exclude is MANDATORY, not cosmetic. TypeScript resolves an inherited relative path against the config that DECLARED it, so without an own `exclude` the slice inherits root's [\"src/cn/**\"] (repo-rooted) and ends up with ZERO input files — a typecheck that cannot fail. Verify with `tsc -p src/cn/tsconfig.json --listFiles`. Test files are carved out because they are NEVER bundled and legitimately import `bun:test`, which `types: []` (correctly) makes unresolvable; they are typechecked by tsconfig.test.json instead, so nothing here goes unchecked.",
+  "exclude": ["**/*.test.ts"]
+}
