@@ -243,11 +243,25 @@ export function markerFor(prov: Provenance): string {
  */
 export function highestAdrNumber(existing: string): number {
   let max = 0;
-  for (const m of existing.matchAll(/^## ADR-(\d{4})\b/gm)) {
+  // ⚠ `\d{4,}` not `\d{4}` (15.4 review, MAJOR 3): once a file reaches `## ADR-10000`, a 4-digit-only
+  // scan CANNOT SEE IT — `highestAdrNumber` would report 9999 and the next run would allocate 10000
+  // a SECOND time, emitting a duplicate heading and breaking the numbering contract silently.
+  // Rendering keeps `padStart(4)`, so ≤9999 is unchanged and >9999 simply widens.
+  for (const m of stripFences(existing).matchAll(/^## ADR-(\d{4,})\b/gm)) {
     const n = Number(m[1]);
     if (n > max) max = n;
   }
   return max;
+}
+
+/**
+ * Blank out fenced code blocks before scanning for headings (15.4 review, MINOR 3). A human ADR file
+ * that DOCUMENTS the format (```` ```\n## ADR-0042 — example\n``` ````) would otherwise inflate `max`
+ * and burn every number up to it. Replaced with same-length blanks rather than deleted, so any
+ * offsets a future caller derives stay honest.
+ */
+function stripFences(text: string): string {
+  return text.replace(/^```[\s\S]*?^```/gm, (block) => block.replace(/[^\n]/g, " "));
 }
 
 /** Every cursor marker already present in the out-file. Read ONCE per run; the run adds to it. */
@@ -256,18 +270,43 @@ export function existingMarkers(existing: string): Set<string> {
 }
 
 /**
- * The mined excerpt the producer sliced out of the transcript line, recovered from the candidate's
- * composed `content` field (`## <Type>\n\n<content>\n\n## Context\n\n<context>`). Returns `null`
- * when the content does not have that shape — the caller then has nothing to verify against and
- * treats it as unverifiable drift rather than pretending the check passed.
+ * Does the candidate's `content` have the producer's composed shape at all
+ * (`## <Type>\n\n<content>\n\n## Context\n\n<context>`)? A candidate that does not is UNVERIFIABLE,
+ * and an unverifiable claim is not a verified one — the caller reports it `stale` rather than
+ * trusting it.
  *
- * This is a READ of the producer's format, not a re-derivation of it: the excerpt is exactly
- * `text.slice(0, 500)` of the cited line, which is what makes the drift check below EXACT rather
- * than fuzzy.
+ * ⚠ THIS IS A SHAPE PROBE ONLY. It deliberately does NOT try to RECOVER the mined excerpt by
+ * splitting on the delimiter, because that split is AMBIGUOUS and the ambiguity fails OPEN
+ * (15.4 review, MAJOR 1): the producer writes `content` as `text.slice(0,500)`, and a transcript
+ * line whose own text contains `\n\n## Context\n\n` makes a non-greedy split stop EARLY. The
+ * recovered "excerpt" is then a short prefix, the prefix comparison checks fewer characters, and a
+ * line that has since drifted past that point PASSES verification — an ADR emitted citing text that
+ * is no longer there, which is precisely the silent-wrong-answer this tool exists to prevent.
+ * (Greedy fails symmetrically when the CONTEXT contains the delimiter; neither direction is
+ * decidable.) `recomposeContent` below sidesteps the split entirely.
  */
-export function minedExcerpt(content: string): string | null {
-  const m = /^## [^\n]+\n\n([\s\S]*?)\n\n## Context\n\n[\s\S]*$/.exec(content);
-  return m ? m[1] : null;
+export function hasProducerShape(content: string): boolean {
+  return /^## [^\n]+\n\n[\s\S]*\n\n## Context\n\n[\s\S]*$/.test(content);
+}
+
+/**
+ * Rebuild what the producer WOULD have written for this transcript line, so verification is an
+ * EXACT whole-string comparison instead of an ambiguous prefix one.
+ *
+ * The producer composes (`harvester.ts` `queueCandidate`):
+ *   `## ${Type}\n\n${m.content}\n\n## Context\n\n${m.context}`
+ * where, for a mined memory, BOTH halves come from the SAME line text:
+ *   `content: text.slice(0, 500)` · `context: text.slice(0, 300)`
+ *
+ * So the whole candidate `content` is a pure function of the line text and the memory type — no
+ * delimiter splitting required, and nothing the line's own text can spoof. Validated against the
+ * live queue: 8/8 decision candidates with a resolving cursor reconstruct byte-exactly.
+ *
+ * `type` is the memory type as the producer capitalised it (`decision` → `Decision`).
+ */
+export function recomposeContent(lineTextValue: string, type: string): string {
+  const heading = `${type.charAt(0).toUpperCase()}${type.slice(1)}`;
+  return `## ${heading}\n\n${lineTextValue.slice(0, 500)}\n\n## Context\n\n${lineTextValue.slice(0, 300)}`;
 }
 
 /** A JSONL transcript entry, as far as this tool cares. */
@@ -459,6 +498,12 @@ export interface BuildDeps {
   readTranscript: (sessionId: string) => string | null;
   /** sessionId → the resolved path, for reporting. `null` mirrors `readTranscript`. */
   transcriptPath?: (sessionId: string) => string | null;
+  /**
+   * Why `readTranscript` returned `null`, when the reason is better than "not found" — today, an
+   * AMBIGUOUS basename (see `buildTranscriptIndex`). Reported verbatim in the `stale` verdict so a
+   * human sees the competing paths instead of hunting a file that is actually there twice.
+   */
+  resolveError?: (sessionId: string) => string | null;
   /** Lines of context either side of the cited line. */
   radius: number;
 }
@@ -521,7 +566,9 @@ export function buildReport(inputs: AdrInput[], deps: BuildDeps): AdrReport {
       verdicts.push({
         bucket: "stale",
         file: input.file,
-        reason: `transcript not found for session ${candidate.provenance.sessionId}`,
+        reason:
+          deps.resolveError?.(candidate.provenance.sessionId) ??
+          `transcript not found for session ${candidate.provenance.sessionId}`,
         provenance: candidate.provenance,
         marker,
       });
@@ -539,8 +586,7 @@ export function buildReport(inputs: AdrInput[], deps: BuildDeps): AdrReport {
       });
       continue;
     }
-    const excerpt = minedExcerpt(candidate.content);
-    if (excerpt === null) {
+    if (!hasProducerShape(candidate.content)) {
       verdicts.push({
         bucket: "stale",
         file: input.file,
@@ -551,9 +597,10 @@ export function buildReport(inputs: AdrInput[], deps: BuildDeps): AdrReport {
       });
       continue;
     }
-    // EXACT, not fuzzy: the excerpt IS `text.slice(0, 500)` of this line, so an equal-length prefix
-    // comparison is the precise "still says what it said" check.
-    if (window.line.slice(0, excerpt.length) !== excerpt) {
+    // EXACT WHOLE-STRING comparison, never a prefix: rebuild what the producer would have written
+    // for the line that is there NOW and require byte-equality with what it DID write. A prefix
+    // check fails OPEN when the mined text contains the producer's own delimiter (review MAJOR 1).
+    if (recomposeContent(window.line, DECISION_TAG) !== candidate.content) {
       verdicts.push({
         bucket: "stale",
         file: input.file,
@@ -674,12 +721,41 @@ export function readQueue(queueDir: string): AdrInput[] {
  * tier's long shared `agent-*` prefixes, after which the verify step would happily confirm the
  * WRONG file. Do not copy that idiom.
  */
-export function buildTranscriptIndex(projectsRoot: string): Map<string, string> {
-  const index = new Map<string, string>();
+export function buildTranscriptIndex(projectsRoot: string): TranscriptIndex {
+  const byId = new Map<string, string>();
+  const ambiguous = new Map<string, string[]>();
   for (const p of walkFiles(projectsRoot, (p) => p.endsWith(".jsonl"))) {
-    index.set(basename(p, ".jsonl"), p);
+    const id = basename(p, ".jsonl");
+    const prior = byId.get(id);
+    if (prior === undefined) {
+      byId.set(id, p);
+      continue;
+    }
+    // ⚠ COLLISION — do NOT last-wins (15.4 review, MAJOR 2). Basename uniqueness is an ENVIRONMENT
+    // FACT (measured 2,762/2,762 on this tree), not a runtime invariant, and last-wins fails
+    // SILENTLY and WRONG: two same-named transcripts whose lines share the producer's ≤500-char
+    // prefix both satisfy the drift check, so the tool emits an ADR composed from the OTHER
+    // session while its provenance line still cites the original. Nothing looks broken.
+    // An ambiguous id is therefore UNRESOLVABLE, reported as `stale` with the competing paths —
+    // fail-safe and visible, never a confident wrong answer. `projectSlug` cannot break the tie
+    // (it is the literal "subagents" for ~15% of the tree — the whole reason resolution is by
+    // basename), so the disambiguation is a human's, and this hands them everything they need.
+    const seen = ambiguous.get(id) ?? [prior];
+    seen.push(p);
+    ambiguous.set(id, seen);
   }
-  return index;
+  for (const id of ambiguous.keys()) byId.delete(id);
+  return { byId, ambiguous };
+}
+
+/**
+ * The resolved transcript population. `byId` holds only UNAMBIGUOUS ids; anything whose basename
+ * repeated tree-wide is moved to `ambiguous` (id → every competing path) and is deliberately
+ * unresolvable — see the collision note in `buildTranscriptIndex`.
+ */
+export interface TranscriptIndex {
+  byId: Map<string, string>;
+  ambiguous: Map<string, string[]>;
 }
 
 const KNOWN_FLAGS = new Set([
@@ -694,19 +770,30 @@ const KNOWN_FLAGS = new Set([
   "help",
 ]);
 
+/** The bare-only flags. `--json=true` is a usage error, not a silent no-op — see `unknownFlags`. */
+const BOOLEAN_FLAGS = new Set(["dry-run", "json", "strict", "help"]);
+
 /**
  * Unknown-flag guard. A sibling tool inherits NOTHING from the harvester's own `KNOWN_FLAGS`
  * allowlist (good — zero merge collision), so it must own one or it silently accepts typos.
- * Value tokens are skipped so `--out --dry-run`-style mistakes are caught by `flagArg` below, and
- * a legitimate `--out --weird-looking-path` is not misread as a flag.
+ *
+ * ⚠ IT DOES NOT SKIP VALUE TOKENS (the comment here used to claim it did — 15.4 review, MINOR 9).
+ * Every `--`-prefixed token is classified, so a space-form value that looks like a flag
+ * (`--out --typo`) is reported here rather than by `flagArg`. Both exit 2, so the outcome is right
+ * either way; the message differs. Recorded rather than "fixed" because skipping value tokens would
+ * make `--out --typo` LEGAL as a path, which is worse.
+ *
+ * It also rejects an equals-form value on a BOOLEAN flag (MINOR 5): `core.hasFlag` matches the bare
+ * token only, so `--json=true` would otherwise be accepted here, ignored there, and the run would
+ * print human markdown and exit 0 while the caller believed it asked for JSON.
  */
 export function unknownFlags(argv: string[]): string[] {
   const out: string[] = [];
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
+  for (const a of argv) {
     if (!a.startsWith("--")) continue;
     const name = a.slice(2).split("=")[0];
     if (!KNOWN_FLAGS.has(name)) out.push(a);
+    else if (a.includes("=") && BOOLEAN_FLAGS.has(name)) out.push(a); // `--json=true` is not a bare flag
   }
   return out;
 }
@@ -714,16 +801,24 @@ export function unknownFlags(argv: string[]): string[] {
 const VALUE_FLAGS = ["queue", "projects", "root", "out", "window"] as const;
 
 /**
- * `core.flagValue` is VALUE-FLAG-BLIND: the space form returns `args[i + 1]` unconditionally, so
+ * `core.flagValue` is VALUE-FLAG-BLIND: the SPACE form returns `args[i + 1]` unconditionally, so
  * `--out --dry-run` yields `"--dry-run"` as the output path and the tool writes a file literally
  * named `--dry-run`. Reject a `--`-prefixed result as a USAGE error (exit 2) — never a silent
  * fallback to the default, which would be exactly the silent-wrong-answer class this story exists
  * to prevent. The unknown-flag guard does not rescue it: `--dry-run` IS a known flag.
+ *
+ * ⚠ The rejection applies to the SPACE FORM ONLY (15.4 review, MINOR 6). `--out=--weird.md` is
+ * UNAMBIGUOUS — the value is delimited by the `=`, `flagValue` checks the equals form first, and no
+ * flag can be swallowed — so rejecting it too would falsely refuse a legitimate (if odd) path and
+ * leave no escape hatch for one. The equals form IS that escape hatch.
  */
 export function flagArg(argv: string[], name: string): { value?: string; error?: string } {
   const raw = flagValue(argv, name);
   if (raw === undefined) return {};
-  if (raw.startsWith("--")) return { error: `--${name} expects a value, got the flag \`${raw}\`` };
+  const fromEquals = argv.some((a) => a.startsWith(`--${name}=`));
+  if (!fromEquals && raw.startsWith("--")) {
+    return { error: `--${name} expects a value, got the flag \`${raw}\` (use --${name}=${raw} for a literal path)` };
+  }
   if (raw === "") return { error: `--${name} expects a non-empty value` };
   return { value: raw };
 }
@@ -735,7 +830,8 @@ const HELP = `adr-generator — session transcript → structured ADR digest, wi
     --out <file>       ADR file to APPEND to    (default <root>/docs/DECISIONS.generated.md)
     --queue <dir>      candidate queue          (default <framework>/MEMORY/KNOWLEDGE/_harvest-queue)
     --projects <dir>   session transcripts root (default <claude-home>/projects)
-    --window <n>       transcript lines of context either side of the cursor (default 6)
+    --window <n>       PROSE MESSAGES of context either side of the cursor (default 6). Not raw
+                       lines — the scan steps past tool_use/tool_result records, which carry no text
     --dry-run          compose and report, write NOTHING
     --json             the verdict array instead of markdown (one entry per queue file)
     --strict           exit 1 when anything needs a human (stale or malformed). Default: exit 0
@@ -806,10 +902,16 @@ export function main(argv: string[]): number {
   const report = buildReport(readQueue(queueDir), {
     existing: readIfExists(out) ?? "",
     readTranscript: (sessionId) => {
-      const path = index.get(sessionId);
+      const path = index.byId.get(sessionId);
       return path === undefined ? null : readIfExists(path);
     },
-    transcriptPath: (sessionId) => index.get(sessionId) ?? null,
+    transcriptPath: (sessionId) => index.byId.get(sessionId) ?? null,
+    resolveError: (sessionId) => {
+      const competing = index.ambiguous.get(sessionId);
+      return competing
+        ? `AMBIGUOUS session id — ${competing.length} transcripts share this basename, so the cursor cannot be resolved safely: ${competing.join(", ")}`
+        : null;
+    },
     radius,
   });
 

@@ -30,7 +30,8 @@ import {
   lineText,
   main,
   markerFor,
-  minedExcerpt,
+  hasProducerShape,
+  recomposeContent,
   readQueue,
   readWindow,
   renderAdr,
@@ -158,9 +159,15 @@ describe("shape guard + selection", () => {
     expect(isDecisionShaped(candidate({ memoryType: "preference" }) as any)).toBe(false);
   });
 
-  test("minedExcerpt recovers exactly what the producer sliced", () => {
-    expect(minedExcerpt(candidate().content)).toBe(textOfLine(5));
-    expect(minedExcerpt("no producer shape here")).toBeNull();
+  test("hasProducerShape is a SHAPE PROBE and recomposeContent rebuilds the producer's output exactly", () => {
+    expect(hasProducerShape(candidate().content)).toBe(true);
+    expect(hasProducerShape("no producer shape here")).toBe(false);
+    expect(recomposeContent(textOfLine(5), "decision")).toBe(candidate().content);
+  });
+
+  test("recomposeContent applies the producer's 500/300 truncation", () => {
+    const long = "z".repeat(900);
+    expect(recomposeContent(long, "decision")).toBe(`## Decision\n\n${"z".repeat(500)}\n\n## Context\n\n${"z".repeat(300)}`);
   });
 
   test("markerFor is the cursor and is prefix-collision-safe", () => {
@@ -174,6 +181,17 @@ describe("shape guard + selection", () => {
     expect(highestAdrNumber("")).toBe(0);
     expect(highestAdrNumber("## ADR-0001 — a\n\n## ADR-0012 — b\n")).toBe(12);
     expect(highestAdrNumber("### ADR-0099 — not a top-level heading\n")).toBe(0);
+  });
+
+  test("REGRESSION (review MAJOR 3): numbers past 9999 are SEEN, so they can never be reused", () => {
+    // `\d{4}` reported 9999 here and the next run re-allocated 10000 → duplicate headings.
+    expect(highestAdrNumber("## ADR-9999 — a\n## ADR-10000 — b\n")).toBe(10000);
+    expect(highestAdrNumber("## ADR-123456 — big\n")).toBe(123456);
+  });
+
+  test("REGRESSION (review MINOR 3): a fenced example heading does not burn numbers", () => {
+    const doc = "# Doc\n\n```\n## ADR-0042 — example in a code fence\n```\n\n## ADR-0002 — the real one\n";
+    expect(highestAdrNumber(doc)).toBe(2);
   });
 
   test("lineText mirrors the producer's extractor and never throws", () => {
@@ -254,7 +272,7 @@ describe("subagent tier — a path-join resolver fails this, an exact-basename w
     });
     const index = buildTranscriptIndex(projects);
     // the subagent sessionId is NOT a UUID and its slug is unusable as a path component
-    expect(index.get("agent-awrite-your-last-2ed55d37")).toContain("/subagents/");
+    expect(index.byId.get("agent-awrite-your-last-2ed55d37")).toContain("/subagents/");
 
     const report = buildReport(
       inputsFrom([
@@ -265,7 +283,7 @@ describe("subagent tier — a path-join resolver fails this, an exact-basename w
       ]),
       deps({
         readTranscript: (id) => {
-          const p = index.get(id);
+          const p = index.byId.get(id);
           return p ? readFileSync(p, "utf-8") : null;
         },
       }),
@@ -281,7 +299,7 @@ describe("subagent tier — a path-join resolver fails this, an exact-basename w
       "p/decoy/real-session": "impostor with no extension\n",
     });
     const index = buildTranscriptIndex(projects);
-    expect(index.get("real-session")).toBe(join(projects, "p/real-session.jsonl"));
+    expect(index.byId.get("real-session")).toBe(join(projects, "p/real-session.jsonl"));
   });
 
   test("basenames resolve by EXACT equality, never substring (the producer's idiom collides here)", () => {
@@ -290,8 +308,8 @@ describe("subagent tier — a path-join resolver fails this, an exact-basename w
       "p/agent-alpha.jsonl": numberedTranscript(2),
     });
     const index = buildTranscriptIndex(projects);
-    expect(index.get("agent-alpha")).toBe(join(projects, "p/agent-alpha.jsonl"));
-    expect(index.get("agent-alpha-beta")).toBe(join(projects, "p/agent-alpha-beta.jsonl"));
+    expect(index.byId.get("agent-alpha")).toBe(join(projects, "p/agent-alpha.jsonl"));
+    expect(index.byId.get("agent-alpha-beta")).toBe(join(projects, "p/agent-alpha-beta.jsonl"));
   });
 });
 
@@ -325,6 +343,55 @@ describe("terminal buckets — every candidate lands in exactly one, and they su
     );
     expect(report.counts.stale).toBe(1);
     expect(report.verdicts[0].reason).toContain("no longer matches");
+  });
+
+  test("REGRESSION (review MAJOR 1): a mined body containing the producer's OWN delimiter cannot fail open", () => {
+    // The prefix check recovered a 17-char excerpt from this body and then PASSED against a line
+    // that had drifted past it — emitting an ADR citing text that was no longer there.
+    const minedBody = "I decided we need\n\n## Context\n\nmore details about the old architecture decision.";
+    const drifted = "I decided we need a totally different approach that is not the original ADR at all.";
+    const c = candidate({ provenance: { sourceLine: 2 }, mined: minedBody });
+    const raw = [msg("padding line one here"), msg(drifted), msg("padding line three here")].join("\n");
+    const report = buildReport(inputsFrom([c]), deps({ readTranscript: () => raw }));
+    expect(report.counts.emitted).toBe(0);
+    expect(report.counts.stale).toBe(1);
+    expect(report.verdicts[0].reason).toContain("no longer matches");
+
+    // …and the SAME body still verifies cleanly when the line genuinely has not drifted
+    const intact = [msg("padding line one here"), msg(minedBody), msg("padding line three here")].join("\n");
+    const ok = buildReport(inputsFrom([c]), deps({ readTranscript: () => intact }));
+    expect(ok.counts.emitted).toBe(1);
+  });
+
+  test("REGRESSION (review MAJOR 2): an AMBIGUOUS basename is stale, never a confident wrong file", () => {
+    // Two transcripts sharing a basename whose lines share the producer's <=500-char prefix: a
+    // last-wins Map emitted an ADR composed from the WRONG session with nothing looking broken.
+    const shared = "We decided the shared prefix text that both sessions begin with here.";
+    const projects = projectsWith({
+      [`projA/${SESSION}.jsonl`]: `${msg(`${shared} DETAILS ONLY IN A`)}\n`,
+      [`projB/${SESSION}.jsonl`]: `${msg(`${shared} DETAILS ONLY IN B`)}\n`,
+    });
+    const index = buildTranscriptIndex(projects);
+    expect(index.byId.has(SESSION)).toBe(false); // NOT last-wins
+    expect(index.ambiguous.get(SESSION)!.length).toBe(2);
+
+    const report = buildReport(inputsFrom([candidate({ provenance: { sourceLine: 1 }, mined: shared })]), {
+      existing: "",
+      radius: 3,
+      readTranscript: (id) => {
+        const p = index.byId.get(id);
+        return p ? readFileSync(p, "utf-8") : null;
+      },
+      resolveError: (id) => {
+        const c = index.ambiguous.get(id);
+        return c ? `AMBIGUOUS session id — ${c.length} transcripts share this basename: ${c.join(", ")}` : null;
+      },
+    });
+    expect(report.counts.emitted).toBe(0);
+    expect(report.counts.stale).toBe(1);
+    expect(report.verdicts[0].reason).toContain("AMBIGUOUS");
+    expect(report.verdicts[0].reason).toContain("projA");
+    expect(report.verdicts[0].reason).toContain("projB");
   });
 
   test("a candidate whose content is not in the producer's shape is `stale`, not silently trusted", () => {
@@ -462,6 +529,23 @@ describe("CLI guards", () => {
     expect(main(["--out", "--dry-run"])).toBe(2);
   });
 
+  test("REGRESSION (review MINOR 6): the EQUALS form is the escape hatch for a literal `--` path", () => {
+    // unambiguous — the `=` delimits the value, so no flag can be swallowed
+    expect(flagArg(["--out=--weird.md"], "out").value).toBe("--weird.md");
+    expect(flagArg(["--out=--weird.md"], "out").error).toBeUndefined();
+    // and the space-form rejection tells the user about it
+    expect(flagArg(["--out", "--x"], "out").error).toContain("--out=--x");
+  });
+
+  test("REGRESSION (review MINOR 5): an equals-form BOOLEAN flag is a usage error, not a silent no-op", () => {
+    // `core.hasFlag` matches the bare token only, so `--json=true` used to be accepted by the
+    // unknown-flag guard, ignored by hasFlag, and the run printed human markdown while exiting 0.
+    expect(unknownFlags(["--json=true"])).toEqual(["--json=true"]);
+    expect(main(["--json=true"])).toBe(2);
+    expect(main(["--dry-run=1"])).toBe(2);
+    expect(unknownFlags(["--json", "--dry-run"])).toEqual([]); // bare forms still fine
+  });
+
   test("--window is validated", () => {
     expect(main(["--window", "abc", "--dry-run"])).toBe(2);
     expect(main(["--window", "-1", "--dry-run"])).toBe(2);
@@ -517,52 +601,80 @@ describe("end to end (hermetic roots only)", () => {
     expect(readFileSync(out, "utf-8").match(/^## ADR-/gm)!.length).toBe(1);
   });
 
-  test("--dry-run writes NOTHING and reports the SAME five counts as the real run", () => {
+  /**
+   * Run `main` and capture the `--json` payload it actually emits. The parity tests below compare
+   * MAIN's OWN DIGESTS — the earlier version compared two `buildReport` recomputations of the same
+   * inputs, which is a tautology that would pass even if `main`'s dry-run path diverged completely
+   * (15.4 review, weak test #2/#3).
+   */
+  function mainJson(argv: string[]): { exit: number; verdicts: any[] } {
+    const captured: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (chunk: any) => {
+      captured.push(String(chunk));
+      return true;
+    };
+    let exit: number;
+    try {
+      exit = main([...argv, "--json"]);
+    } finally {
+      (process.stdout as any).write = orig;
+    }
+    return { exit, verdicts: JSON.parse(captured.join("")) };
+  }
+
+  const bucketCounts = (verdicts: any[]): Record<string, number> => {
+    const c: Record<string, number> = { malformed: 0, skipped: 0, stale: 0, duplicate: 0, emitted: 0 };
+    for (const v of verdicts) c[v.bucket] += 1;
+    return c;
+  };
+
+  test("--dry-run writes NOTHING and MAIN's own digest reports the same five counts as the real run", () => {
     const { projects, queue, out } = tree();
     const argv = ["--queue", queue, "--projects", projects, "--out", out];
 
-    const dryDeps = () => {
-      const index = buildTranscriptIndex(projects);
-      return buildReport(readQueue(queue), {
-        existing: "",
-        readTranscript: (id) => (index.get(id) ? readFileSync(index.get(id)!, "utf-8") : null),
-        radius: 6,
-      });
-    };
-    const dry = dryDeps();
-    expect(main([...argv, "--dry-run"])).toBe(0);
+    const dry = mainJson([...argv, "--dry-run"]);
+    expect(dry.exit).toBe(0);
     expect(() => readFileSync(out, "utf-8")).toThrow(); // nothing written
 
-    expect(main(argv)).toBe(0);
-    const real = dryDeps(); // recomputed against the now-empty-of-markers baseline == same shape
-    expect(real.counts).toEqual(dry.counts);
-    expect(sumOf(dry.counts)).toBe(dry.total);
+    const real = mainJson(argv); // same virgin out-file, now actually written
+    expect(real.exit).toBe(0);
+    expect(bucketCounts(real.verdicts)).toEqual(bucketCounts(dry.verdicts));
+    expect(real.verdicts.length).toBe(dry.verdicts.length);
+    expect(readFileSync(out, "utf-8")).toContain("## ADR-0001 — ");
   });
 
-  test("--dry-run bucket parity holds for a DUPLICATE (the write-path-detector trap)", () => {
+  test("--dry-run bucket parity holds for a DUPLICATE, through MAIN (the write-path-detector trap)", () => {
     // Two candidate files sharing one cursor. A `duplicate` detector built on appendIfMissing's
     // return can never fire under --dry-run: it would report emitted=2 here, and the sum test
-    // would not catch it. The marker PRE-CHECK reports 1 + 1 either way.
+    // would not catch it. Asserted through main so it is CLI parity, not just core logic.
     const projects = projectsWith({ [`slug/${SESSION}.jsonl`]: numberedTranscript(20) });
     const queue = queueWith({
       "a.json": candidate({ provenance: { sourceLine: 5 } }),
       "b.json": candidate({ provenance: { sourceLine: 5 } }),
     });
-    const index = buildTranscriptIndex(projects);
-    const read = (id: string) => (index.get(id) ? readFileSync(index.get(id)!, "utf-8") : null);
-    const report = buildReport(readQueue(queue), { existing: "", readTranscript: read, radius: 6 });
-    expect(report.counts.emitted).toBe(1);
-    expect(report.counts.duplicate).toBe(1);
-    expect(sumOf(report.counts)).toBe(2);
+    const out = join(tmp("adr-dup-"), "gen.md");
+    const argv = ["--queue", queue, "--projects", projects, "--out", out];
+
+    const dry = bucketCounts(mainJson([...argv, "--dry-run"]).verdicts);
+    const real = bucketCounts(mainJson(argv).verdicts);
+    expect(dry).toEqual({ malformed: 0, skipped: 0, stale: 0, duplicate: 1, emitted: 1 });
+    expect(real).toEqual(dry);
+    expect(readFileSync(out, "utf-8").match(/^## ADR-/gm)!.length).toBe(1);
   });
 
-  test("THE NEVER-CLOBBER GUARD: a human-authored ADR file is byte-identical after a full run", () => {
+  const HUMAN_BODY =
+    "# Decisions — hand written\n\n> Pedro's prose.\n\n## ADR-0001 — a human decision\n**Status:** Accepted\n**Context:** because.\n**Decision:** do it.\n**Consequences:** fine.\n";
+
+  test("THE NEVER-CLOBBER GUARD: the human ADR file on its REAL path is byte-identical after a full run", () => {
     const { projects, queue, outDir } = tree();
-    const human = join(outDir, "DECISIONS.md");
-    mkdirSync(outDir, { recursive: true });
-    const humanBody =
-      "# Decisions — hand written\n\n> Pedro's prose.\n\n## ADR-0001 — a human decision\n**Status:** Accepted\n**Context:** because.\n**Decision:** do it.\n**Consequences:** fine.\n";
-    writeFileSync(human, humanBody, "utf-8");
+    // ⚠ the fixture sits at the REAL prior-art layout `docs/DECISIONS.md` — a sibling of the
+    // default out-file, not at the repo root (15.4 review, weak test #1: the old fixture was one
+    // directory away from the default, so the test passed on path LUCK and would have kept passing
+    // if the default had been changed to `docs/DECISIONS.md`).
+    const human = join(outDir, "docs", "DECISIONS.md");
+    mkdirSync(join(outDir, "docs"), { recursive: true });
+    writeFileSync(human, HUMAN_BODY, "utf-8");
     const before = sha(human);
 
     // A bare-ish run (default --out) must never land on the human file, and the default is anchored
@@ -570,9 +682,40 @@ describe("end to end (hermetic roots only)", () => {
     expect(main(["--queue", queue, "--projects", projects, "--root", outDir])).toBe(0);
 
     expect(sha(human)).toBe(before);
-    expect(readFileSync(human, "utf-8")).toBe(humanBody);
+    expect(readFileSync(human, "utf-8")).toBe(HUMAN_BODY);
     // the tool wrote to the file it OWNS instead
     expect(readFileSync(join(outDir, "docs", "DECISIONS.generated.md"), "utf-8")).toContain("## ADR-0001 — ");
+  });
+
+  test("even a HOSTILE --out at the human file only APPENDS — prior bytes are never replaced", () => {
+    // The dangerous path the old fixture never exercised (15.4 review, weak test #1 + MINOR 1).
+    // Explicit --out is the documented escape hatch, so it CAN write there — what must hold is that
+    // it can never truncate, reorder, or replace what the human wrote.
+    const { projects, queue, outDir } = tree({ sourceLine: 6 });
+    const human = join(outDir, "docs", "DECISIONS.md");
+    mkdirSync(join(outDir, "docs"), { recursive: true });
+    writeFileSync(human, HUMAN_BODY, "utf-8");
+
+    expect(main(["--queue", queue, "--projects", projects, "--out", human])).toBe(0);
+    const after = readFileSync(human, "utf-8");
+    expect(after.startsWith(HUMAN_BODY)).toBe(true); // every prior byte, in order, still first
+    expect(after.length).toBeGreaterThan(HUMAN_BODY.length);
+    expect(after).toContain("## ADR-0002 — "); // continued from the human's ADR-0001
+    expect(after).not.toContain("Status legend:"); // header skipped: writeIfAbsent cannot clobber
+    // and it is idempotent even here — a second hostile run changes nothing
+    const hash = sha(human);
+    expect(main(["--queue", queue, "--projects", projects, "--out", human])).toBe(0);
+    expect(sha(human)).toBe(hash);
+  });
+
+  test("an out-file that already exists is never re-headered (writeIfAbsent, not atomicWrite)", () => {
+    const { projects, queue, out } = tree();
+    mkdirSync(join(out, ".."), { recursive: true });
+    writeFileSync(out, "# pre-existing generated file\n", "utf-8");
+    expect(main(["--queue", queue, "--projects", projects, "--out", out])).toBe(0);
+    const after = readFileSync(out, "utf-8");
+    expect(after.startsWith("# pre-existing generated file\n")).toBe(true);
+    expect(after).not.toContain("Status legend:");
   });
 
   test("appending to an existing ADR file continues numbering and leaves prior bytes untouched", () => {
