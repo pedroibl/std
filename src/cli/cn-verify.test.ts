@@ -115,6 +115,26 @@ describe("readVaultPlugins — the two cases that are NOT guard failures", () =>
     expect(readVaultPlugins(vault).versions).toEqual({ dataview: "0.5.68" });
   });
 
+  test("a manifest that is exactly `null` is skipped, not a raw TypeError (7.3 review, MINOR 2)", () => {
+    // `loadJson` only fail-softs MISSING or UNPARSEABLE; `null` parses fine and comes back, and
+    // `m.id` on it threw a TypeError that reached the user as `✗ TypeError: null is not an object`.
+    writeEnabled(vault, ["dataview"]);
+    const d = join(vault, ".obsidian", "plugins", "dataview");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "manifest.json"), "null");
+    expect(readVaultPlugins(vault).versions).toEqual({});
+  });
+
+  test("a manifest that is an ARRAY or a bare string is skipped too", () => {
+    writeEnabled(vault, ["dataview", "fix-require-modules"]);
+    for (const [dir, body] of [["dataview", "[1,2]"], ["fix-require-modules", '"nope"']] as const) {
+      const d = join(vault, ".obsidian", "plugins", dir);
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, "manifest.json"), body);
+    }
+    expect(readVaultPlugins(vault).versions).toEqual({});
+  });
+
   test("a manifest with no version is treated as no manifest at all", () => {
     writeEnabled(vault, ["dataview"]);
     writeManifest(vault, "dataview", "dataview", null);

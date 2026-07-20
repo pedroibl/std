@@ -79,7 +79,13 @@ export function readVaultPlugins(vault: string | undefined): VaultPlugins {
 
   const versions: Record<string, string> = {};
   for (const path of manifests) {
-    const m = loadJson<{ id?: unknown; version?: unknown }>(path, {});
+    const m = loadJson<{ id?: unknown; version?: unknown } | null>(path, {});
+    // `loadJson` only fail-softs a MISSING or UNPARSEABLE file. A manifest containing exactly `null`
+    // (or an array, or a bare string) parses fine and comes straight back — and `m.id` on it threw a
+    // raw TypeError that reached the user as `✗ TypeError: null is not an object`, bypassing the
+    // injected sink. A junk manifest is "no manifest", which is already a finding the comparator
+    // reports properly.
+    if (m === null || typeof m !== "object" || Array.isArray(m)) continue;
     // The manifest's own `id` is the source of truth; the directory name is only a fallback for a
     // hand-renamed plugin dir. A manifest with no usable version is treated as no manifest at all.
     const id = typeof m.id === "string" && m.id !== "" ? m.id : basename(dirname(path));

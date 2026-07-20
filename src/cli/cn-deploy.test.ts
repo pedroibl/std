@@ -61,6 +61,36 @@ function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[^\n]*?\/\/.*$/gm, "");
 }
 
+/**
+ * Every module-graph edge in `src` that is NOT the one form `src/cn/` is allowed to have.
+ *
+ * ALLOWED, and only this: `import type { … } from "../core/…"` (or `import type * as X`). AC2 mandates
+ * the single `Severity` vocabulary, and `verbatimModuleSyntax` ERASES a type-only import at build, so
+ * it cannot contribute a byte to the vault artifact.
+ *
+ * BANNED: every value import, re-export, bare side-effect import, `require(` and dynamic `import(` —
+ * and, for a type import, any specifier that is not a DOWNWARD `../core/` one (sideways to another
+ * edge is D1/AD-8).
+ *
+ * ⚠ SCANS THE WHOLE SOURCE, NOT LINE BY LINE. `import` / `export … from` are multi-line statements;
+ * a per-line filter is blind to any whose first line is a bare `import`, which is exactly how the
+ * first version of this guard was bypassed. Returns the offending statements so a failure names them.
+ */
+function externalImportViolations(src: string): string[] {
+  const out: string[] = [];
+  for (const m of src.matchAll(/^[ \t]*(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/gm)) {
+    const stmt = m[0];
+    const spec = m[1]!;
+    const isTypeOnly = /^[ \t]*import\s+type\s*[{*]/.test(stmt);
+    if (!isTypeOnly || !spec.startsWith("../core/")) out.push(stmt);
+  }
+  for (const re of [/^[ \t]*import\s*["']/m, /\brequire\s*\(/, /\bimport\s*\(/]) {
+    const hit = src.match(re);
+    if (hit) out.push(hit[0]);
+  }
+  return out;
+}
+
 /** Collect the CLI's stdout instead of printing it. */
 function sink() {
   const lines: string[] = [];
@@ -141,6 +171,32 @@ describe("buildBundle — the artifact contract (AC3, AC4, AC6)", () => {
   // matter what src/cn/ imports. Adding `import { parse } from "yaml"` to the slice would take the
   // artifact from ~1.6 KB to ~190 KB with yaml's internals inlined, and an output-grep would still
   // pass — as would a cross-slice `import ... from "../core/cite"` (an AD-8/D1 violation).
+  test("the import scan sees the evasions a LINE-based filter misses (7.3 review, MAJOR 1)", () => {
+    // ⚠ THIS TEST EXISTS BECAUSE THE SCANNER ITSELF WAS WRONG. Story 7.3 narrowed 7.1's blanket
+    // import ban to allow the one mandated `import type { Severity } from "../core/severity"`, and
+    // implemented the narrowing LINE BY LINE — which cannot see a statement whose first line is a
+    // bare `import`. A cross-LLM review demonstrated it: a three-line `import\n {GLYPH}\n from
+    // "../core/severity"` in the BUNDLED `index.ts` shipped its code into the vault artifact
+    // (1619 → 1798 bytes, `SMUGGLED` present) with the whole merge bar green. 7.1's original regex
+    // caught it; the narrowing reopened the hole.
+    //
+    // So the scanner is now tested on synthetic sources instead of only being run against files that
+    // happen to be clean today. Each case below is a real evasion that shipped green before the fix.
+    const evasions = [
+      'import\n  { GLYPH }\n  from "../core/severity";', // multi-line: the line filter's blind spot
+      'import type from "../core/severity";', // a DEFAULT VALUE import whose binding is named `type`
+      'export { GLYPH } from "../core/severity";', // a re-export — never scanned at all before
+      'import { parse } from "yaml";', // the plain external dependency 7.1's ceiling test was about
+      'import { cite } from "../report/index";', // cross-slice: down-to-core only (D1/AD-8)
+    ];
+    for (const src of evasions) {
+      expect(externalImportViolations(src)).not.toEqual([]);
+    }
+    // …and the one form AC2 mandates stays legal, or the fix would just be the old blanket ban.
+    expect(externalImportViolations('import type { Severity } from "../core/severity";')).toEqual([]);
+    expect(externalImportViolations('import type * as S from "../core/severity";')).toEqual([]);
+  });
+
   test("src/cn/ imports NO VALUE — asserted on the source, so a bundler cannot hide it (AC4)", () => {
     const dir = join(import.meta.dir, "..", "cn");
     const sources = readdirSync(dir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
@@ -151,23 +207,10 @@ describe("buildBundle — the artifact contract (AC3, AC4, AC6)", () => {
       // `await require("/Scripts/cn.js")` call, which is documentation, not a dependency.
       // (Same discipline as scripts/check-no-consumer-ids.ts: mask comments, keep strings.)
       const src = stripComments(readFileSync(join(dir, f), "utf-8"));
-      // ⚠ NARROWED BY STORY 7.3, deliberately. 7.1 banned EVERY import; `plugins.ts` now carries
-      // `import type { Severity } from "../core/severity"` — the one severity vocabulary, which AC2
-      // mandates and which `verbatimModuleSyntax` ERASES at build (a type import cannot contribute a
-      // byte, so the tautology 7.1 killed does not come back through this door). Everything the
-      // original assertion actually guarded against — a VALUE import, a bare side-effect import,
-      // require(), dynamic import() — is still banned, and the 8 KB ceiling below still backstops it.
-      const valueImports = src
-        .split("\n")
-        .filter((l) => /^\s*import\s/.test(l) && !/^\s*import\s+type\s/.test(l));
-      expect(valueImports).toEqual([]);
-      expect(src).not.toMatch(/^\s*import\s+["']/m); // bare side-effect import
-      expect(src).not.toMatch(/\brequire\s*\(/);
-      expect(src).not.toMatch(/\bimport\s*\(/); // dynamic import
-      // A type-only import must resolve DOWN to core, never sideways to another edge (D1/AD-8).
-      for (const spec of src.match(/^\s*import\s+type\s[\s\S]*?from\s+["']([^"']+)["']/gm) ?? []) {
-        expect(spec).toMatch(/["']\.\.\/core\//);
-      }
+      expect({ file: f, violations: externalImportViolations(src) }).toEqual({
+        file: f,
+        violations: [],
+      });
     }
   });
 

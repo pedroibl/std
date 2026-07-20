@@ -48,6 +48,15 @@ describe("CN_PLUGIN_CONTRACT", () => {
     }
   });
 
+  test("ids are UNIQUE — the invariant is mechanical, not implied by the id snapshot", () => {
+    // `scripts/STD_CONSUMERS.ts` is the shape this contract mirrors: data PLUS a test that makes its
+    // invariant mechanical. Without this, a duplicate row (say a second `dataview` marked ambient)
+    // produces BOTH `ok` and `info` for one id — and the only thing that noticed was a hard-coded
+    // five-id snapshot, which states an inventory, not a rule.
+    const ids = CN_PLUGIN_CONTRACT.map((e) => e.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   test("js-engine is declared absent, never omitted", () => {
     const js = CN_PLUGIN_CONTRACT.find((e) => e.id === "js-engine")!;
     expect(js.role).toBe("ambient");
@@ -148,6 +157,13 @@ describe("verifyPlugins — the role-keyed severity mapping", () => {
       ),
     });
     expect(sev(findings, "color-folders-files")).toBe("info");
+  });
+
+  test("a DUPLICATE enabled id is reported once, not twice (7.3 review, MINOR 3)", () => {
+    // A hand-edited or sync-conflicted community-plugins.json can list an id twice. Reporting it
+    // twice also inflated the summary tally, so the printed `ℹ n` disagreed with the vault.
+    const findings = verifyPlugins({ enabled: ["obsidian-git", "obsidian-git"], versions: {} });
+    expect(findings.filter((f) => f.id === "obsidian-git")).toHaveLength(1);
   });
 
   test("an unversioned id absent from the contract -> info", () => {

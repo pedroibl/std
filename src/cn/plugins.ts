@@ -195,7 +195,10 @@ export function verifyPlugins(
   }
 
   const declared = new Set(contract.map((e) => e.id));
-  for (const id of observed.enabled) {
+  // Iterate the SET, not the raw array: a hand-edited or sync-conflicted `community-plugins.json` can
+  // list an id twice, which reported the same finding twice and inflated the summary tally by one.
+  // A Set preserves insertion order, so the report order is unchanged.
+  for (const id of enabled) {
     if (declared.has(id)) continue;
     const installed = Object.prototype.hasOwnProperty.call(observed.versions, id)
       ? observed.versions[id]!
