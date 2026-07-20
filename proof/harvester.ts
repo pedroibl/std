@@ -61,9 +61,9 @@
  * two originals + doc refs) is the Pedro-run staged step (Task 9).
  */
 
-import { charOverlap, flagValue, hasFlag, parseNdjson } from "std/core";
-import { ensureDir, resolveFrameworkDir, saveJson, walkFiles } from "std/fsx";
-import { writeIfAbsent } from "std/report";
+import { charOverlap, collapse, flagValue, hasFlag, parseNdjson } from "std/core";
+import { atomicWrite, ensureDir, resolveFrameworkDir, saveJson, walkFiles } from "std/fsx";
+import { lines, writeIfAbsent } from "std/report";
 
 // PAI domain helper — the one real shared edge dependency, stays in the tool (D4).
 // VENDORED into proof/ for the hermetic self-test; production imports the real
@@ -73,7 +73,7 @@ import { getLearningCategory, isLearningCapture } from "./learning-utils";
 import { statSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 // ============================================================================
 // EDGE — configuration + PAI write-layout. Roots are injectable (the self-test
@@ -227,8 +227,9 @@ export interface Selection {
   project?: string;
 }
 
-/** The dormant Epic-15 provenance tuple stamped on every queued candidate. */
-interface Provenance {
+/** The Epic-15 provenance tuple stamped on every queued candidate. Exported since 15.1 — the
+ *  digest renders it too, and 15.2/15.4 consume the same contract (do NOT re-declare it locally). */
+export interface Provenance {
   sessionId: string;
   sourceLine: number;
   timestamp: string;
@@ -555,13 +556,14 @@ export function queueFilename(m: MinedMemory): string {
   return `mine_${ts}_${m.memoryType}_${m.project}_${sessionShort}_L${m.sourceLine}.json`;
 }
 
+/** The ONE derivation of the provenance tuple — shared by the queue writer and the 15.1 digest so
+ *  neither re-derives it (and no consumer has to cast off `Record<string, unknown>`). */
+export function provenanceOf(m: MinedMemory): Provenance {
+  return { sessionId: m.sessionId, sourceLine: m.sourceLine, timestamp: m.timestamp, projectSlug: m.project };
+}
+
 export function queueCandidate(m: MinedMemory): Record<string, unknown> {
-  const provenance: Provenance = {
-    sessionId: m.sessionId,
-    sourceLine: m.sourceLine,
-    timestamp: m.timestamp,
-    projectSlug: m.project,
-  };
+  const provenance = provenanceOf(m);
   return {
     title: `${m.memoryType}: ${m.content.substring(0, 60)}...`,
     content: `## ${m.memoryType.charAt(0).toUpperCase() + m.memoryType.slice(1)}\n\n${m.content}\n\n## Context\n\n${m.context}`,
@@ -584,6 +586,118 @@ function writeToQueue(roots: Roots, m: MinedMemory): string {
   const path = join(roots.queueDir, queueFilename(m));
   saveJson(path, queueCandidate(m)); // Δ2 — trailing newline
   return path;
+}
+
+// ============================================================================
+// DIGEST (Epic 15.1) — a repo-local RENDER of the same mine pass that populates
+// the queue. NOT a second producer and NOT a queue reader (AC-D4): digest and
+// queue derive from one pass, so there is no rival emit path (NFR4).
+// ============================================================================
+
+/** Where the digest lands under `--target`. */
+const DIGEST_SUBPATH = join("docs", "session-digest.md");
+
+/**
+ * Resolve `--target` to the digest file path, refusing targets that land inside the harvester's own
+ * write dirs.
+ *
+ * ⚠ DO NOT DELETE AS REDUNDANT — this is a RUNTIME guard, not a compile-time one. It stops a digest
+ * from being written back into the queue/learning trees the harvester itself owns (NFR4).
+ *
+ * Scope honestly: this is NOT a MEMORY-wide guard and cannot be. The injected `Roots` carries only
+ * `projectsRoot`/`learningDir`/`queueDir` — there is no `frameworkDir` to widen against (a deliberate
+ * consequence of D4 injection), and deriving one by walking up from `queueDir` is invalid for injected
+ * fixtures. Guard the two dirs actually reachable; claim no more.
+ *
+ * `resolve()` only — never `realpathSync`: `queueDir` may not exist yet, and `realpathSync` would throw
+ * on a perfectly legitimate target. No `..` string check either: `--target` IS the base dir, so there is
+ * nothing to traverse out of and a literal `..` test would reject `--target ../my-repo`.
+ */
+export function resolveDigestPath(roots: Roots, target: string): string {
+  const resolved = resolve(target);
+  const out = join(resolved, DIGEST_SUBPATH);
+  for (const forbidden of [roots.queueDir, roots.learningDir]) {
+    const base = resolve(forbidden);
+    // Segment-aware containment, so `/x/std-public` is not "inside" `/x/std`.
+    // BOTH the target base AND the final write path are checked: guarding only the base lets
+    // `--target /x` slip a write into `/x/docs` when a forbidden dir IS `/x/docs`.
+    for (const candidate of [resolved, out]) {
+      if (candidate === base || candidate.startsWith(base + sep)) {
+        throw new Error(`--target refuses a path inside the harvester's own write dir: ${candidate} is inside ${base}`);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Render the mine pass as markdown. PURE — no disk, no clock. Takes the grouped candidates so an
+ * unfiltered `--target` renders a grouped-by-project digest; a single-project digest is a one-entry Map.
+ *
+ * `confidence` is rendered per entry ON PURPOSE: the mine path currently yields many low-confidence
+ * prompt-echo candidates, and the digest must make that noise VISIBLE to the human reviewer rather
+ * than launder it into clean-looking markdown (flag-don't-fix; the quality fix belongs to 15.3).
+ */
+/**
+ * The ONE sanitizer for anything interpolated into the digest. LOAD-BEARING, not cosmetic.
+ *
+ * Every field rendered below is transcript- or filesystem-derived and therefore attacker-influenced:
+ * `content` is a raw 500-char slice, `timestamp`/`sessionId` come straight off the transcript JSON, and
+ * the project slug is a directory basename. Any of them may contain newlines. Interpolated verbatim, a
+ * value like "…\n## Injected" forges a sibling project heading, detaches the provenance sub-bullet from
+ * its entry (breaking AC3's provenance-to-the-line guarantee), or emits the `_No candidates mined._`
+ * sentinel so a full digest reads as empty.
+ *
+ * Route EVERY digest interpolation through this — collapsing one field and not its siblings is how the
+ * first fix for this shipped incomplete.
+ */
+function digestField(value: unknown): string {
+  return collapse(String(value));
+}
+
+export function buildDigest(groups: Map<string, MinedMemory[]>): string {
+  const { p, toString } = lines();
+  p("# Session digest");
+  p();
+  p("Mined memory candidates for this repo, rendered from the harvester mine pass.");
+  p("Every entry carries its provenance to the source line.");
+  p();
+
+  let total = 0;
+  for (const [project, mems] of groups) {
+    if (mems.length === 0) continue;
+    total += mems.length;
+    p(`## ${digestField(projectLabel(project))} (\`${digestField(project)}\`)`);
+    p();
+    for (const mem of mems) {
+      const prov = provenanceOf(mem); // single derivation — shared with the queue writer
+      // Every interpolation goes through digestField() — see its docstring for why sanitizing only
+      // `content` (the shape this fix originally shipped in) leaves the same hole open via `timestamp`.
+      p(`- **[${digestField(mem.memoryType)}]** (${(mem.confidence * 100).toFixed(0)}% confidence) ${digestField(mem.content)}`);
+      p(
+        `  - session \`${digestField(prov.sessionId)}\` · line ${digestField(prov.sourceLine)} · ${digestField(prov.timestamp)} · project \`${digestField(prov.projectSlug)}\``,
+      );
+    }
+    p();
+  }
+
+  // Explicit empty state — never a stray empty file (an untouched builder would render "").
+  if (total === 0) p("_No candidates mined._");
+
+  return toString();
+}
+
+/** Write (or, under `--dry-run`, print) the digest. The ONLY caller-side write in the digest path. */
+function emitDigest(roots: Roots, groups: Map<string, MinedMemory[]>, target: string, dryRun: boolean): void {
+  const path = resolveDigestPath(roots, target);
+  const md = buildDigest(groups);
+  if (dryRun) {
+    console.log(`\n\u{1F4C4} digest (dry run) → ${path}\n`);
+    console.log(md);
+    return;
+  }
+  atomicWrite(path, `${md}\n`); // atomicWrite self-ensureDir()s — no caller-side ensureDir
+  console.log(`\n\u{1F4C4} digest → ${path}`);
 }
 
 function confidenceIcon(c: number): string {
@@ -656,10 +770,14 @@ export function runHarvest(roots: Roots, sel: Selection, opts: { dryRun?: boolea
   return learnings.length;
 }
 
-export function runMine(roots: Roots, sel: Selection, opts: { dryRun?: boolean } = {}): number {
+export function runMine(roots: Roots, sel: Selection, opts: { dryRun?: boolean; target?: string } = {}): number {
+  // Validate the target BEFORE mining, so a hostile path fails fast instead of after the work.
+  if (opts.target !== undefined) resolveDigestPath(roots, opts.target);
+
   const sessions = [...discoverSessions(roots.projectsRoot, sel)];
   if (sessions.length === 0) {
     console.log("No sessions found to harvest");
+    if (opts.target !== undefined) emitDigest(roots, new Map(), opts.target, opts.dryRun === true);
     return 0;
   }
 
@@ -674,15 +792,21 @@ export function runMine(roots: Roots, sel: Selection, opts: { dryRun?: boolean }
     else byProject.set(ref.project, [ref]);
   }
 
+  // `byProject` holds SessionRefs, not candidates — the MinedMemory values only exist inside the loop
+  // below, so the digest accumulates them as they are produced, reusing byProject for grouping ORDER.
+  const digestGroups = new Map<string, MinedMemory[]>();
+
   let totalMined = 0;
   for (const [project, refs] of byProject) {
     let projectMined = 0;
     const out: string[] = [];
+    const projectCandidates: MinedMemory[] = [];
     for (const ref of refs) {
       const raw = readFileSync(ref.path, "utf-8");
       const { mined } = harvestSession(ref, raw);
       for (const mem of mined) {
         if (!opts.dryRun) writeToQueue(roots, mem);
+        projectCandidates.push(mem);
         out.push(
           `  ${confidenceIcon(mem.confidence)} [${mem.memoryType}] ${mem.content.substring(0, 80)}... (${(mem.confidence * 100).toFixed(0)}%)`,
         );
@@ -693,8 +817,11 @@ export function runMine(roots: Roots, sel: Selection, opts: { dryRun?: boolean }
     if (projectMined > 0) {
       console.log(`\n\u{1F4C1} ${projectLabel(project)}: ${projectMined} candidate(s)`);
       out.forEach((l) => console.log(l));
+      digestGroups.set(project, projectCandidates);
     }
   }
+
+  if (opts.target !== undefined) emitDigest(roots, digestGroups, opts.target, opts.dryRun === true);
 
   console.log(`\n\u{2705} ${totalMined} candidate(s) ${opts.dryRun ? "found (dry run)" : "queued for review"}`);
   if (!opts.dryRun && totalMined > 0) {
@@ -721,6 +848,9 @@ Usage:
   harvester --project STR   Only scan projects whose slug contains STR
   harvester --dry-run       Preview without writing files
   harvester --mine          Mine for decisions, preferences, milestones, problems
+  harvester --target DIR    With --mine: also render the pass as a repo-local
+                            digest at DIR/docs/session-digest.md. Orthogonal to
+                            --project: unfiltered, the digest is grouped by project.
   harvester --help          Show this help
 
 Examples:
@@ -728,19 +858,44 @@ Examples:
   harvester --all --dry-run
   harvester --project pipis --recent 10
   harvester --mine --recent 5
+  harvester --mine --project pipis --target ~/Dev/pipis
+  harvester --mine --target ~/Dev/pipis --dry-run
 
 Output (tagged by project of origin):
   Harvest: MEMORY/LEARNING/{ALGORITHM|SYSTEM}/YYYY-MM/
   Mine:    MEMORY/KNOWLEDGE/_harvest-queue/ (review queue)
+  Digest:  <target>/docs/session-digest.md (with --target)
 `;
 
-const KNOWN_FLAGS = new Set(["recent", "all", "session", "project", "dry-run", "mine", "help"]);
+const KNOWN_FLAGS = new Set(["recent", "all", "session", "project", "dry-run", "mine", "target", "help"]);
 
 /** Tokens starting with `--` whose name isn't a known flag (gap #4: core/args is
  *  per-flag and does not reject unknowns the way the originals' strict parseArgs did,
  *  so the tool restores that guard itself). Values never start with `--`. */
-function unknownFlags(argv: string[]): string[] {
+export function unknownFlags(argv: string[]): string[] {
   return argv.filter((t) => t.startsWith("--") && !KNOWN_FLAGS.has(t.slice(2).split("=")[0]));
+}
+
+/**
+ * Read `--target`, rejecting the three ways `core.flagValue` misparses a value-flag given no value.
+ * `flagValue` returns `args[i + 1]` unconditionally, so without this guard:
+ *   `--target --project foo` → target `"--project"` → writes `./--project/docs/…`
+ *   `--target=`              → target `""` → `resolve("")` is cwd → writes into whatever repo you stand in
+ *   `--target` (last token)  → `undefined` → SILENT no-op, exit 0, user believes it worked
+ * The tool fails loud everywhere else (`unknownFlags` → 2, `resolveDigestPath` throws); this closes the
+ * one input path that didn't. Returns `undefined` only when `--target` is genuinely absent.
+ *
+ * The underlying `core.flagValue` look-ahead gap is shared by `--project`/`--session`/`--recent` and is
+ * flagged for a Rule-of-Three conversation — fixing it in `src/core/args.ts` would breach AC6's
+ * zero-`src`-delta requirement, so it is guarded caller-side here.
+ */
+export function targetFromArgv(argv: string[]): string | undefined {
+  if (!hasFlag(argv, "target") && !argv.some((t) => t.startsWith("--target="))) return undefined;
+  const value = flagValue(argv, "target");
+  if (value === undefined || value === "" || value.startsWith("--")) {
+    throw new Error("--target requires a directory value (e.g. --target ~/Dev/my-repo)");
+  }
+  return value;
 }
 
 export function main(argv: string[]): number {
@@ -764,10 +919,27 @@ export function main(argv: string[]): number {
     project: flagValue(argv, "project"),
   };
   const dryRun = hasFlag(argv, "dry-run");
+
+  // `--target` is orthogonal to `--project`: it selects WHERE the digest lands, never WHICH sessions
+  // are mined. Unfiltered, the digest is simply grouped by project. Parsed BEFORE `defaultRoots()` so a
+  // malformed value is a usage error (exit 2), not a half-run. Only this parse is wrapped — widening the
+  // catch over the dispatch would swallow `runHarvest`'s fail-loud I/O errors (FR5).
+  let target: string | undefined;
+  try {
+    target = targetFromArgv(argv);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 2;
+  }
+  if (target !== undefined && !hasFlag(argv, "mine")) {
+    console.error("--target applies to the mine path only; add --mine");
+    return 2; // fail loud rather than silently ignoring the flag
+  }
+
   const roots = defaultRoots();
 
   if (hasFlag(argv, "mine")) {
-    runMine(roots, sel, { dryRun });
+    runMine(roots, sel, { dryRun, target });
   } else {
     runHarvest(roots, sel, { dryRun });
   }

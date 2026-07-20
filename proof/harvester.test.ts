@@ -9,6 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -22,14 +23,20 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
+  buildDigest,
   defaultRoots,
   discoverSessions,
   harvestSession,
   main,
+  provenanceOf,
   reduceLearnings,
+  resolveDigestPath,
   runHarvest,
   runMine,
+  targetFromArgv,
+  unknownFlags,
   type HarvestedLearning,
+  type MinedMemory,
   type Roots,
   type SessionRef,
 } from "./harvester";
@@ -362,5 +369,215 @@ describe("RT-2 framework-dir resolution (AD-9.3)", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Digest / --target (Story 15.1)
+// ---------------------------------------------------------------------------
+
+describe("--target repo-scoped digest (15.1)", () => {
+  // AC1 — the unknown-flag guard accepts `--target`. Tested against `unknownFlags` directly rather
+  // than `main`, because `main` calls `defaultRoots()` unconditionally and would mine the real tree.
+  test("AC1: --target is allowlisted; a neighbouring typo is still rejected", () => {
+    expect(unknownFlags(["--mine", "--target", "/tmp/x", "--dry-run"])).toEqual([]);
+    expect(unknownFlags(["--mine", "--target=/tmp/x"])).toEqual([]);
+    expect(unknownFlags(["--mine", "--targett", "/tmp/x"])).toEqual(["--targett"]);
+  });
+
+  test("AC3: the digest carries all four provenance fields plus confidence, grouped by project", () => {
+    const sid = "dddddddd-0000-0000-0000-000000000015";
+    const body = [
+      JSON.stringify({ type: "user", message: { content: "hello there, just a short opener line" }, timestamp: "2026-07-03T10:00:00.000Z" }),
+      JSON.stringify({ type: "assistant", message: { content: DECISION }, timestamp: "2026-07-03T10:01:00.000Z" }),
+    ].join("\n");
+    writeSession("proj-alpha", sid, body);
+    const target = mkdtempSync(join(tmpdir(), "harvester-target-"));
+
+    try {
+      expect(runMine(roots, {}, { target })).toBe(1);
+
+      const digest = readFileSync(join(target, "docs", "session-digest.md"), "utf-8");
+      expect(digest).toContain("# Session digest");
+      expect(digest).toContain("`proj-alpha`"); // grouped by project
+      expect(digest).toContain(`session \`${sid}\``);
+      expect(digest).toContain("line 2");
+      expect(digest).toContain("2026-07-03T10:01:00.000Z");
+      expect(digest).toContain("project `proj-alpha`");
+      expect(digest).toMatch(/\d+% confidence/); // noise stays visible (flag-don't-fix)
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  test("AC3: buildDigest is pure and renders one derivation of the provenance tuple", () => {
+    const mem: MinedMemory = {
+      sessionId: "eeeeeeee-0000-0000-0000-000000000015",
+      project: "proj-beta",
+      timestamp: "2026-07-04T09:00:00.000Z",
+      memoryType: "decision",
+      content: "We decided to keep the digest a pure renderer.",
+      context: "ctx",
+      confidence: 0.75,
+      sourcePattern: "decided to",
+      sourceLine: 7,
+    };
+    const md = buildDigest(new Map([["proj-beta", [mem]]]));
+    const prov = provenanceOf(mem);
+    expect(prov).toEqual({
+      sessionId: mem.sessionId,
+      sourceLine: 7,
+      timestamp: mem.timestamp,
+      projectSlug: "proj-beta",
+    });
+    expect(md).toContain("75% confidence");
+    expect(md).toContain(`session \`${prov.sessionId}\` · line 7`);
+    expect(md).not.toContain("_No candidates mined._");
+  });
+
+  test("AC4: the guard rejects a target inside queueDir or learningDir, and allows a sibling", () => {
+    expect(() => resolveDigestPath(roots, roots.queueDir)).toThrow(/own write dir/);
+    expect(() => resolveDigestPath(roots, join(roots.queueDir, "nested"))).toThrow(/own write dir/);
+    expect(() => resolveDigestPath(roots, roots.learningDir)).toThrow(/own write dir/);
+    // Segment-aware: a sibling that merely shares a prefix is NOT inside.
+    expect(resolveDigestPath(roots, `${roots.queueDir}-public`)).toBe(
+      join(`${roots.queueDir}-public`, "docs", "session-digest.md"),
+    );
+    // `--target ../repo` is legitimate — resolve() normalizes it, no `..` string check.
+    expect(resolveDigestPath(roots, join(root, "sub", ".."))).toBe(join(root, "docs", "session-digest.md"));
+  });
+
+  // Doctrine-tier cross-LLM review (grok-4.5, 2026-07-20) MINOR — the guard checked only the target
+  // BASE, so a target whose `docs/` subdir IS a forbidden dir slipped the final write path through.
+  test("AC4: the guard also rejects when the FINAL write path lands in a forbidden dir", () => {
+    const sneaky = { ...roots, learningDir: join(root, "sneaky", "docs") };
+    // The base `<root>/sneaky` is outside learningDir, but the write path <root>/sneaky/docs/... is not.
+    expect(() => resolveDigestPath(sneaky, join(root, "sneaky"))).toThrow(/own write dir/);
+  });
+
+  test("AC5: --dry-run --target writes zero files (neither digest nor queue)", () => {
+    const sid = "ffffffff-0000-0000-0000-000000000015";
+    writeSession(
+      "proj-alpha",
+      sid,
+      JSON.stringify({ type: "assistant", message: { content: DECISION }, timestamp: "2026-07-05T10:00:00.000Z" }),
+    );
+    const target = mkdtempSync(join(tmpdir(), "harvester-target-"));
+
+    try {
+      expect(runMine(roots, {}, { dryRun: true, target })).toBe(1);
+      expect(existsSync(join(target, "docs"))).toBe(false);
+      expect(readdirSync(target).length).toBe(0);
+      expect(existsSync(roots.queueDir)).toBe(false);
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  test("AC3: a zero-candidate target writes an explicit empty-state digest, not a stray empty file", () => {
+    const target = mkdtempSync(join(tmpdir(), "harvester-target-"));
+    try {
+      // No sessions at all — the early-return path still emits.
+      expect(runMine(roots, {}, { target })).toBe(0);
+      const digest = readFileSync(join(target, "docs", "session-digest.md"), "utf-8");
+      expect(digest).toContain("# Session digest");
+      expect(digest).toContain("_No candidates mined._");
+      expect(digest.trim().length).toBeGreaterThan(0);
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Digest hardening — cross-LLM review findings (15.1, Forge pass)
+// ---------------------------------------------------------------------------
+
+describe("--target digest hardening (15.1 review)", () => {
+  function mem(over: Partial<MinedMemory> = {}): MinedMemory {
+    return {
+      sessionId: "11111111-0000-0000-0000-000000000015",
+      project: "proj-alpha",
+      timestamp: "2026-07-06T10:00:00.000Z",
+      memoryType: "decision",
+      content: "We decided X.",
+      context: "ctx",
+      confidence: 0.5,
+      sourcePattern: "decided",
+      sourceLine: 3,
+      ...over,
+    };
+  }
+
+  // MAJOR #1 — `mem.content` is a RAW transcript slice, so newlines are the norm. Verbatim
+  // interpolation would forge sibling headings, detach the provenance sub-bullet from its entry,
+  // and could emit the empty-state sentinel from inside a non-empty digest.
+  test("multi-line candidate content is collapsed to one line and cannot forge digest structure", () => {
+    const hostile = "We decided X.\n\n## Injected heading\n\n- injected bullet\n\n_No candidates mined._";
+    const md = buildDigest(new Map([["proj-alpha", [mem({ content: hostile })]]]));
+
+    // Exactly two headings: the document title and the one real project heading.
+    expect(md.split("\n").filter((l) => l.startsWith("## "))).toEqual(["## proj/alpha (`proj-alpha`)"]);
+    // The sentinel never appears at line start in a non-empty digest.
+    expect(md.split("\n").some((l) => l.trim() === "_No candidates mined._")).toBe(false);
+    // The provenance sub-bullet is still adjacent to its entry.
+    const lines_ = md.split("\n");
+    const entry = lines_.findIndex((l) => l.startsWith("- **[decision]**"));
+    expect(lines_[entry + 1].trim().startsWith("- session")).toBe(true);
+    expect(lines_[entry]).toContain("## Injected heading"); // collapsed inline, not a heading
+  });
+
+  // Doctrine-tier cross-LLM review (grok-4.5, 2026-07-20) MAJOR — the fix above sanitized `content`
+  // and stopped there. `timestamp`/`sessionId`/`projectSlug` are equally transcript-derived, so the
+  // identical structural break was still reachable through any of them. Every field is asserted here
+  // so a future edit cannot re-open the hole one field at a time.
+  test("EVERY transcript-derived provenance field is collapsed, not just content", () => {
+    const hostile = "\n## Injected heading\n\n- forged bullet\n";
+    for (const field of ["timestamp", "sessionId", "project"] as const) {
+      const md = buildDigest(new Map([["proj-alpha", [mem({ [field]: `real-value${hostile}` })]]]));
+      expect(md.split("\n").filter((l) => l.startsWith("## "))).toEqual(["## proj/alpha (`proj-alpha`)"]);
+      expect(md.split("\n").some((l) => l.trim() === "- forged bullet")).toBe(false);
+      const ls = md.split("\n");
+      const entry = ls.findIndex((l) => l.startsWith("- **[decision]**"));
+      expect(ls[entry + 1].trim().startsWith("- session")).toBe(true);
+    }
+  });
+
+  // Same review, MINOR — a hostile PROJECT KEY reaches the `## ` heading directly.
+  test("a hostile project key cannot forge extra digest headings", () => {
+    const md = buildDigest(new Map([["alpha\n## forged heading", [mem({})]]]));
+    expect(md.split("\n").filter((l) => l.startsWith("## ")).length).toBe(1);
+  });
+
+  // MAJOR #2 — core.flagValue returns args[i+1] unconditionally; guard the three misparses.
+  test("--target with a missing or flag-shaped value is a usage error, never a silent write", () => {
+    expect(() => targetFromArgv(["--mine", "--target", "--project", "foo"])).toThrow(/requires a directory/);
+    expect(() => targetFromArgv(["--mine", "--target="])).toThrow(/requires a directory/);
+    expect(() => targetFromArgv(["--mine", "--target"])).toThrow(/requires a directory/);
+    // Absent is fine; well-formed values in both syntaxes are returned verbatim.
+    expect(targetFromArgv(["--mine", "--recent", "5"])).toBeUndefined();
+    expect(targetFromArgv(["--mine", "--target", "/tmp/x"])).toBe("/tmp/x");
+    expect(targetFromArgv(["--mine", "--target=/tmp/x"])).toBe("/tmp/x");
+  });
+
+  // These main() calls all return BEFORE defaultRoots(), so they stay hermetic.
+  test("main exits 2 on a malformed --target and on --target without --mine", () => {
+    expect(main(["--mine", "--target"])).toBe(2);
+    expect(main(["--mine", "--target", "--dry-run"])).toBe(2);
+    expect(main(["--target", "/tmp/x"])).toBe(2); // no --mine
+  });
+
+  // MINOR #5 — AC2's grouped-by-project claim, actually exercised with N>1.
+  test("an unfiltered digest groups by project, preserving byProject insertion order", () => {
+    const md = buildDigest(
+      new Map([
+        ["proj-alpha", [mem()]],
+        ["proj-beta", [mem({ project: "proj-beta", memoryType: "preference" })]],
+      ]),
+    );
+    const headings = md.split("\n").filter((l) => l.startsWith("## "));
+    expect(headings).toEqual(["## proj/alpha (`proj-alpha`)", "## proj/beta (`proj-beta`)"]);
+    // Each entry sits under its own project heading.
+    expect(md.indexOf("proj-alpha`\n")).toBeLessThan(md.indexOf("## proj/beta"));
   });
 });
