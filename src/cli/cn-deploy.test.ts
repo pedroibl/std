@@ -22,6 +22,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { makeVaultFixture } from "./vault-fixture";
 import {
   BANNER,
   BANNER_PREFIX,
@@ -35,6 +36,7 @@ import {
   entrypoint,
   isBundleRelevant,
   makeWatchAdapter,
+  preflightVault,
   resolveTarget,
   runCnDeploy,
   runWatch,
@@ -42,13 +44,12 @@ import {
 } from "./cn-deploy";
 
 let tmp: string;
-/** A temp dir shaped like an Obsidian vault (has .obsidian/). */
+/** A temp dir shaped like an Obsidian vault (has .obsidian/ AND a contract-satisfying plugin set). */
 let vault: string;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "std-cn-"));
-  vault = join(tmp, "vault");
-  mkdirSync(join(vault, ".obsidian"), { recursive: true });
+  vault = makeVaultFixture(join(tmp, "vault"));
 });
 
 afterEach(() => {
@@ -140,7 +141,7 @@ describe("buildBundle — the artifact contract (AC3, AC4, AC6)", () => {
   // matter what src/cn/ imports. Adding `import { parse } from "yaml"` to the slice would take the
   // artifact from ~1.6 KB to ~190 KB with yaml's internals inlined, and an output-grep would still
   // pass — as would a cross-slice `import ... from "../core/cite"` (an AD-8/D1 violation).
-  test("src/cn/ imports NOTHING — asserted on the source, so a bundler cannot hide it (AC4)", () => {
+  test("src/cn/ imports NO VALUE — asserted on the source, so a bundler cannot hide it (AC4)", () => {
     const dir = join(import.meta.dir, "..", "cn");
     const sources = readdirSync(dir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
     expect(sources.length).toBeGreaterThan(0); // a zero-file scan would pass vacuously
@@ -150,11 +151,33 @@ describe("buildBundle — the artifact contract (AC3, AC4, AC6)", () => {
       // `await require("/Scripts/cn.js")` call, which is documentation, not a dependency.
       // (Same discipline as scripts/check-no-consumer-ids.ts: mask comments, keep strings.)
       const src = stripComments(readFileSync(join(dir, f), "utf-8"));
-      expect(src).not.toMatch(/^\s*import\s[\s\S]*?\sfrom\s/m); // value or type import
+      // ⚠ NARROWED BY STORY 7.3, deliberately. 7.1 banned EVERY import; `plugins.ts` now carries
+      // `import type { Severity } from "../core/severity"` — the one severity vocabulary, which AC2
+      // mandates and which `verbatimModuleSyntax` ERASES at build (a type import cannot contribute a
+      // byte, so the tautology 7.1 killed does not come back through this door). Everything the
+      // original assertion actually guarded against — a VALUE import, a bare side-effect import,
+      // require(), dynamic import() — is still banned, and the 8 KB ceiling below still backstops it.
+      const valueImports = src
+        .split("\n")
+        .filter((l) => /^\s*import\s/.test(l) && !/^\s*import\s+type\s/.test(l));
+      expect(valueImports).toEqual([]);
       expect(src).not.toMatch(/^\s*import\s+["']/m); // bare side-effect import
       expect(src).not.toMatch(/\brequire\s*\(/);
       expect(src).not.toMatch(/\bimport\s*\(/); // dynamic import
+      // A type-only import must resolve DOWN to core, never sideways to another edge (D1/AD-8).
+      for (const spec of src.match(/^\s*import\s+type\s[\s\S]*?from\s+["']([^"']+)["']/gm) ?? []) {
+        expect(spec).toMatch(/["']\.\.\/core\//);
+      }
     }
+  });
+
+  test("plugins.ts is NOT in the bundle — the contract data never ships to the vault", async () => {
+    // `index.ts` does not import it, and only the entrypoint's reachable graph is bundled. Asserted
+    // because "it happens not to be reached" is one careless import away from shipping the contract
+    // (and, through it, `../core/severity`) into every note.
+    const code = await buildBundle();
+    expect(code).not.toContain("CN_PLUGIN_CONTRACT");
+    expect(code).not.toContain("verifyPlugins");
   });
 
   // The backstop for anything the source scan's regexes miss: an external dep cannot be inlined
@@ -196,6 +219,65 @@ describe("buildBundle — the artifact contract (AC3, AC4, AC6)", () => {
     const code = await buildBundle("cjs");
     expect(code.split("\n")[0]).toBe(BANNER);
     expect(code).toContain("statGrid");
+  });
+});
+
+describe("the plugin-envelope preflight (Story 7.3 AC4)", () => {
+  test("an error vault ABORTS with exit 1 and writes NOTHING", async () => {
+    const broken = makeVaultFixture(join(tmp, "broken"), { omit: ["fix-require-modules"] });
+    expect(await runCnDeploy(["deploy", "--vault", broken], { log: () => {} })).toBe(1);
+    // The whole point: refusing beats deploying a bundle the loader cannot load.
+    expect(existsSync(artifactPath(broken))).toBe(false);
+  });
+
+  test("a DRIFT vault deploys normally — drift is a warn, never a block (AD-6)", async () => {
+    const drifted = makeVaultFixture(join(tmp, "drifted"), { versions: { dataview: "0.5.99" } });
+    const out = sink();
+    expect(await runCnDeploy(["deploy", "--vault", drifted], { log: out.log })).toBe(0);
+    expect(existsSync(artifactPath(drifted))).toBe(true);
+    expect(out.lines.join("\n")).toContain("drift from the observed");
+  });
+
+  test("the preflight PRINTS its warn/info findings on a normal deploy", async () => {
+    const out = sink();
+    expect(await runCnDeploy(["deploy", "--vault", vault], { log: out.log })).toBe(0);
+    // Ambient + declared-absent rows are info, so a healthy deploy still reports the envelope it saw.
+    expect(out.lines.join("\n")).toContain("js-engine");
+    expect(out.lines.join("\n")).toContain("ambient, outside cn's envelope");
+  });
+
+  test("preflightVault returns lines for a healthy vault and throws for a broken one", () => {
+    expect(preflightVault(vault).join("\n")).toContain("ℹ 3");
+    const broken = makeVaultFixture(join(tmp, "broken2"), { omit: ["dataview"] });
+    expect(() => preflightVault(broken)).toThrow(CnDeployError);
+    expect(() => preflightVault(broken)).toThrow(/refusing to deploy/);
+  });
+
+  test("a vault-read failure is re-badged as a CnDeployError — the 0/1/2 contract holds", async () => {
+    // No community-plugins.json: readVaultPlugins throws CnVerifyError, which runCnDeploy does not
+    // catch by type. Without the re-badge it escapes as an unhandled rejection past process.exit.
+    const bare = join(tmp, "bare");
+    mkdirSync(join(bare, ".obsidian"), { recursive: true });
+    expect(await runCnDeploy(["deploy", "--vault", bare], { log: () => {} })).toBe(1);
+    expect(existsSync(artifactPath(bare))).toBe(false);
+  });
+
+  test("SUPERSEDES 7.2's 'one-shot is byte-for-byte 7.1's': both paths run the SAME preflight", async () => {
+    // 7.2 asserted the one-shot path was unchanged from 7.1. It is not, and deliberately so — the
+    // preflight is on both paths now. What must still hold is that they behave IDENTICALLY: the same
+    // vault yields the same outcome whether or not --watch follows.
+    const broken = makeVaultFixture(join(tmp, "broken3"), { omit: ["fix-require-modules"] });
+    let watchCalls = 0;
+    const watch = () => (watchCalls++, { close: () => {} });
+
+    expect(await runCnDeploy(["deploy", "--vault", broken], { log: () => {} })).toBe(1);
+    expect(
+      await runCnDeploy(["deploy", "--vault", broken, "--watch"], { log: () => {}, watch }),
+    ).toBe(1);
+    // …and a startup error means the watcher NEVER registers, so the loop cannot go resident on a
+    // vault that cannot load the artifact.
+    expect(watchCalls).toBe(0);
+    expect(existsSync(artifactPath(broken))).toBe(false);
   });
 });
 

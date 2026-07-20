@@ -13,6 +13,16 @@
 //
 // Keep helpers pure and side-effect-free. Never eval() user input.
 // All emitted markup uses the `cn-` class prefix to stay scoped.
+//
+// AD-2 (rule 3) IN CN'S TERMS: a std renderer renders the DECLARED record only. `statCard`'s parameter
+// is the structural `{ label, value, hint? }` — a caller passing a wider object (a variable, which is
+// how a caller-local field actually reaches std, since TS's excess-property check fires on literals
+// only) assigns cleanly, and the extra field is invisible: the body reads three fields and emits three
+// nodes. THAT INVISIBILITY IS THE FORCING FUNCTION, not an oversight — when a SECOND caller needs the
+// same extra field, it earns promotion into the shared record. Until then it stays caller-local, and
+// `src/core/status.ts`'s OQ1 stands: the per-item stat record is an edge concern with one caller, so it
+// is deliberately NOT promoted into core (Rule of Three / D2). `index.test.ts` proves the invisibility
+// is real rather than accidental.
 
 /** The slice of Dataview's API cn uses. Structural — erases at build, never an import (AD-5 rule 3). */
 export type DvApi = {
