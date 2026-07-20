@@ -42,6 +42,7 @@ dest = $(word 1,$(subst :, ,$(1)))
 src  = $(word 2,$(subst :, ,$(1)))
 
 BRANCH ?=
+CHECK_WAIT ?= 120
 MSG    ?=
 YES    ?=
 
@@ -212,7 +213,20 @@ ship:  ## FULL PIPELINE: gates -> branch+commit -> push -> PR -> merge -> re-gat
 	   || echo "   (PR already exists — reusing it)"
 	@gh pr view --json url --jq .url
 	@echo "── 5/8 wait for checks"
-	@gh pr checks --watch --fail-fast || { echo "❌ checks failed — nothing merged"; exit 1; }
+	@# `gh pr checks` exits NON-ZERO when no checks have REGISTERED yet, which on a fresh push
+	@# is a race, not a failure — treating it as failure once aborted a perfectly good ship.
+	@# So: poll until checks appear (up to CHECK_WAIT s), THEN watch them.
+	@waited=0; \
+	 until gh pr checks >/dev/null 2>&1 || [ $$waited -ge $(CHECK_WAIT) ]; do \
+	   sleep 5; waited=$$((waited+5)); printf "\r   waiting for checks to register... %ss" "$$waited"; \
+	 done; echo; \
+	 if ! gh pr checks >/dev/null 2>&1; then \
+	   echo "⚠ no checks registered after $(CHECK_WAIT)s — this PR has no CI to gate on."; \
+	   if [ -z "$(YES)" ]; then read -p "   Merge anyway? [y/N] " a; [ "$$a" = "y" ] || { echo "stopped"; exit 1; }; \
+	   else echo "   YES=1 set — proceeding without a CI gate (local gates were green)."; fi; \
+	 else \
+	   gh pr checks --watch --fail-fast || { echo "❌ checks failed — nothing merged"; exit 1; }; \
+	 fi
 	@if [ -z "$(YES)" ]; then \
 	   read -p "Checks green. MERGE to main and redeploy live? [y/N] " a; \
 	   [ "$$a" = "y" ] || { echo "stopped before merge; branch + PR are pushed"; exit 1; }; fi
