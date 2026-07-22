@@ -13,6 +13,7 @@
     "lib": ["ESNext"]
   },
   "include": ["src/**/*.ts", "scripts/**/*.ts"],
+  "//exclude-dashkit": "src/dashkit/ is the second Obsidian DOM edge (note-report vault); like src/cn/ it typechecks under its own scoped config via `bun run typecheck:dashkit` (Gate 3d), never here.",
   "//exclude": "src/cn/ is an Obsidian DOM edge and cannot typecheck under this Bun-shaped config (no DOM lib — that absence IS the barrier keeping DOM out of core). It typechecks under its own src/cn/tsconfig.json via `bun run typecheck:cn`, wired into CI and `make gates`. proof/tsconfig.json declares its own exclude, so this one never reaches it.",
-  "exclude": ["src/cn/**"]
+  "exclude": ["src/cn/**", "src/dashkit/**"]
 }
