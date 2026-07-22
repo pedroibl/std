@@ -28,12 +28,17 @@
 //     (Decision 2 amended 2026-06-29 per Sourcery review). A write that can't complete must surface,
 //     not silently lose data (the `report/write.ts` discipline).
 //
-// CONCURRENCY & SINGLE-WRITER BOUNDARY (Epic-10 AI#3 / Epic-11 retro AI#4):
-// These filesystem edges (atomicWrite/saveJson) guarantee safety against torn writes by writing
-// to a sibling temp file and renameSync-ing. They operate under a SINGLE-WRITER scope (one CLI invocation
-// or one bot execution runs at a time per workspace/backup). At this concurrency scale, they do NOT require
-// unique random temp paths or locking primitives; a fixed sibling ".tmp" filename/directory is safe and
-// simplifies state-cleanup. Later tool migrations and bot passes must accept this design constraint.
+// CONCURRENCY & PER-WRITE-UNIQUE TEMP (Epic-10 AI#3 / Epic-11 retro AI#4 / Story 18.1):
+// These filesystem edges (atomicWrite/saveJson) guarantee safety against torn writes by writing to a temp
+// sibling and renameSync-ing it over the target. The temp sibling is PER-WRITE UNIQUE
+// (`<path>.tmp.<pid>.<counter>`), NOT a fixed ".tmp": Story 8.3 shipped `std ... deploy --watch`, the
+// estate's first resident long-lived writer, which made two concurrent writers on one target dir realistic
+// (two watch processes on a vault, or a one-shot deploy racing a resident watcher). A shared fixed temp
+// would let one process renameSync a HALF-WRITTEN temp over the artifact, or let one writer delete another's
+// in-flight temp. A per-write-unique temp removes that shared object entirely: neither collision is
+// possible. The final renameSync stays atomic and last-writer-wins by design (two deploys of the same
+// source produce byte-identical output). No lockfile or locking primitive is used or needed — unique-temp +
+// atomic-rename is the whole mechanism, which keeps the slice's "no locking primitives" charter intact.
 //
 // node:fs is allowed here (a Bun edge); it is forbidden only in `core`.
 import {
@@ -43,6 +48,7 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -186,19 +192,47 @@ export function statMtime(path: string): number {
 }
 
 /**
- * Write `content` to `path` atomically: ensure the parent dir, write to a temp sibling (`<path>.tmp`),
- * then `rename` it over the target. The rename is atomic on the same filesystem, so a reader sees either
- * the whole old file or the whole new one — never a torn partial — even if the process dies mid-write.
- * On success no `.tmp` is left behind. Fail-loud: a real I/O error re-throws (FR5).
+ * Monotonic per-process counter for {@link atomicWrite}'s temp names. Paired with `process.pid`, it makes
+ * every temp sibling unique per process AND per call, so concurrent writers on one target dir never collide
+ * on a shared temp (Story 18.1). Module-scoped so the uniqueness spans every call in the process.
+ */
+let tmpCounter = 0;
+
+/**
+ * Write `content` to `path` atomically: ensure the parent dir, write to a PER-WRITE-UNIQUE temp sibling
+ * (`<path>.tmp.<pid>.<counter>`), then `rename` it over the target. The rename is atomic on the same
+ * filesystem, so a reader sees either the whole old file or the whole new one — never a torn partial —
+ * even if the process dies mid-write. Because the temp name is unique per process AND per call, two
+ * concurrent writers on the same target dir cannot corrupt each other's write or race the same temp file
+ * (Story 18.1 — `--watch` made a second concurrent std writer realistic). On success no temp sibling is
+ * left behind; on a failed write the temp is cleaned up too. Fail-loud: a real I/O error re-throws (FR5).
  *
  * (This is the extraction map's `writeFileAtomic`, named `atomicWrite` to match the in-repo proof
  * consumers — `report` and `cli` — that import it.)
  */
 export function atomicWrite(path: string, content: string): void {
   ensureDir(dirname(path));
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, content);
-  renameSync(tmp, path);
+  // Per-write-unique temp sibling. `process.pid` makes it unique ACROSS concurrent processes (distinct
+  // live processes have distinct pids); the module-level monotonic counter makes it unique WITHIN a
+  // process. Together they cover exactly the two break cases the single-writer note used to disclaim: two
+  // `deploy --watch` processes on one vault, and a one-shot deploy racing a resident watcher. No shared
+  // temp means no half-written temp can be renamed into place and no writer can delete another's in-flight
+  // temp. (`mkstempSync` would also serve; pid+counter keeps it dependency-free and deterministic to read,
+  // and its `.tmp.<n>.<n>` shape is already what the deploy watcher's temp-strip regex expects.)
+  const tmp = `${path}.tmp.${process.pid}.${tmpCounter++}`;
+  try {
+    writeFileSync(tmp, content);
+    renameSync(tmp, path);
+  } catch (err) {
+    // Cleanup-on-throw: a failed write (e.g. a rename that can't complete) must leave no temp behind.
+    // Best-effort — if even the cleanup fails, the ORIGINAL fault is what the caller needs to see.
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      /* the temp may never have been created, or is already gone — nothing to recover here */
+    }
+    throw err; // fail-loud (FR5): a write that can't complete must surface, not silently lose data
+  }
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 
@@ -33,11 +33,96 @@ describe("atomicWrite — tmp+rename torn-write-proof writer (FR5 fail-loud)", (
     });
   });
 
-  test("leaves no stray .tmp sibling on success", () => {
+  test("leaves no stray temp sibling on success (name-agnostic — readdir the dir, not a fixed name)", () => {
     inTmp((dir) => {
-      const path = join(dir, "out.txt");
+      // Write into a dedicated subdir so the assertion can be "exactly the target, nothing else" — this
+      // catches a stray temp under ANY name (the per-write-unique name is no longer a fixed `${path}.tmp`).
+      const sub = join(dir, "out");
+      const path = join(sub, "out.txt");
       atomicWrite(path, "x");
-      expect(existsSync(`${path}.tmp`)).toBe(false);
+      expect(readdirSync(sub)).toEqual(["out.txt"]);
+    });
+  });
+});
+
+describe("atomicWrite — concurrency-safe per-write-unique temp (Story 18.1)", () => {
+  test("two+ concurrent writers on ONE path → final file is exactly one full payload, never torn, no temp left (AC3)", async () => {
+    // The real risk this story fixes is CROSS-PROCESS: `--watch` (Story 8.3) made two resident std writers
+    // on one target dir realistic. Single-threaded sync calls cannot actually interleave, so genuine
+    // concurrency needs real processes. Several children each atomicWrite a DISTINCT large payload to the
+    // same path at once; with a per-write-unique temp the invariant holds under every interleaving.
+    const dir = mkdtempSync(join(tmpdir(), "std-fsx-conc-"));
+    try {
+      const targetDir = join(dir, "out");
+      mkdirSync(targetDir, { recursive: true });
+      const path = join(targetDir, "target.txt");
+      const N = 400_000; // large enough that a shared temp would tear across write() syscalls
+      const labels = ["A", "B", "C", "D"];
+      const fsxIndex = join(import.meta.dir, "index.ts");
+      const runner = join(dir, "runner.ts"); // lives OUTSIDE targetDir, so it never pollutes the readdir
+      writeFileSync(
+        runner,
+        `import { atomicWrite } from ${JSON.stringify(fsxIndex)};\n` +
+          `atomicWrite(process.argv[2], process.argv[3].repeat(${N}));\n`,
+      );
+      const procs = labels.map((label) => Bun.spawn(["bun", runner, path, label]));
+      const codes = await Promise.all(procs.map((p) => p.exited));
+      // (c) Neither call throws — a shared temp would surface as an ENOENT on the rename (one writer
+      // deleting another's in-flight temp) → a nonzero exit.
+      expect(codes).toEqual(labels.map(() => 0));
+      const final = readFileSync(path, "utf-8");
+      // (a) The whole file equals exactly ONE payload in full — never an interleaved/torn mix.
+      expect(final.length).toBe(N);
+      expect(labels.map((label) => label.repeat(N)).includes(final)).toBe(true);
+      // (b) No `*.tmp*` sibling remains in the target dir.
+      expect(readdirSync(targetDir)).toEqual(["target.txt"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("scratch proof: a FIXED shared temp tears/collides under interleave; a per-writer UNIQUE temp does not (AC3 mutation proof)", () => {
+    // Deterministic (no timing): interleave two writers as A.write, B.write, A.rename, B.rename using LOCAL
+    // reimplementations. This proves the DESIGN difference crisply; the shipped code is proven by the real
+    // concurrent test above. It must NOT weaken that shipped test.
+    inTmp((dir) => {
+      // --- OLD behavior: one FIXED shared temp name for both writers ---
+      const fixedPath = join(dir, "fixed.txt");
+      const sharedTmp = `${fixedPath}.tmp`;
+      writeFileSync(sharedTmp, "AAAA"); // writer A stages
+      writeFileSync(sharedTmp, "BBBB"); // writer B stages — OVERWRITES A's temp (they share the name)
+      renameSync(sharedTmp, fixedPath); // A "commits" — but moves B's bytes: A silently wrote the wrong content
+      expect(readFileSync(fixedPath, "utf-8")).toBe("BBBB"); // A intended "AAAA" — corruption of intent
+      // B "commits" — its temp is already gone (A consumed the shared file): the second writer throws ENOENT.
+      expect(() => renameSync(sharedTmp, fixedPath)).toThrow();
+
+      // --- FIX: each writer stages its OWN per-write-unique temp ---
+      const uniquePath = join(dir, "unique.txt");
+      const tmpA = `${uniquePath}.tmp.1.0`;
+      const tmpB = `${uniquePath}.tmp.1.1`;
+      writeFileSync(tmpA, "AAAA"); // A stages its own temp
+      writeFileSync(tmpB, "BBBB"); // B stages its own temp — no collision
+      renameSync(tmpA, uniquePath); // A commits its own bytes
+      expect(readFileSync(uniquePath, "utf-8")).toBe("AAAA"); // A wrote exactly what it intended
+      renameSync(tmpB, uniquePath); // B commits its own bytes — atomic last-writer-wins, no throw
+      expect(readFileSync(uniquePath, "utf-8")).toBe("BBBB");
+      // No temp siblings remain for either writer.
+      expect(readdirSync(dir).filter((f) => f.startsWith("unique.txt.tmp"))).toEqual([]);
+    });
+  });
+
+  test("cleans up the temp sibling when the write fails, and still throws (AC4 fail-loud + cleanup-on-throw)", () => {
+    inTmp((dir) => {
+      const targetDir = join(dir, "out");
+      mkdirSync(targetDir, { recursive: true });
+      // Make the TARGET an existing directory: ensureDir(dirname) succeeds and the temp write succeeds, but
+      // renameSync(tmp, <existing dir>) fails (EISDIR/ENOTDIR) — the "temp created, rename fails" path that
+      // would LEAK a temp without cleanup.
+      const path = join(targetDir, "target");
+      mkdirSync(path, { recursive: true });
+      expect(() => atomicWrite(path, "x")).toThrow(); // fail-loud: the real I/O error surfaces
+      // cleanup-on-throw: the failed write left no `*.tmp*` sibling behind (only the target dir remains).
+      expect(readdirSync(targetDir).filter((f) => f.includes(".tmp"))).toEqual([]);
     });
   });
 });
