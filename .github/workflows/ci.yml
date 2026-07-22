@@ -57,6 +57,13 @@ jobs:
       - name: Typecheck cn
         run: bun run typecheck:cn
 
+      # Gate 3d — src/dashkit/ typecheck under its OWN scoped config (lib ESNext+DOM, types []),
+      # mirroring Gate 3c. The root typecheck EXCLUDES src/dashkit/**, so without this step the
+      # note-report Obsidian edge would ship untypechecked. `types: []` also makes a stray
+      # process/Bun/node:* in the slice a compile error (Story 8.2 AC1/AC14).
+      - name: Typecheck dashkit
+        run: bun run typecheck:dashkit
+
       # Gate 4 — core is runtime-neutral: no node:*/fs/DOM/network, no process/document (D1/NFR1/CM3).
       - name: Core purity
         run: bun run check:core-purity
