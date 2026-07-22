@@ -5,9 +5,12 @@
 // taken at a point in time, not an invariant. Drift is a `warn`, forever; only a missing foundation is
 // an `error`.
 //
-// PURE (D1-shaped, though this is the cn edge not core): data + a comparator. No fs, no DOM, no
-// `process`, no `node:*`. The vault READ lives in `src/cli/cn-verify.ts`, a Bun edge — fs code inside
-// `src/cn/` would enter the graph `Bun.build` walks and end up inside the deployed vault artifact.
+// DATA ONLY (Story 8.4 D-2). The record types and the `verifyPlugins` comparator were PROMOTED to
+// `src/core/plugin-contract.ts` when dashkit became the second edge to need them (AD-8: what two edges
+// share is promoted DOWN into core, never reused sideways). This file now holds ONLY `CN_PLUGIN_CONTRACT`
+// and imports the vocabulary type-only from core — so the cn source-scan (which forbids a VALUE import in
+// `src/cn/`) still sees nothing but an erased `import type`. The comparator lives once, in core; cn's
+// callers (`cn-verify.ts` / `cn-deploy.ts`) get it from there and pass the `"cn"` edge label.
 //
 // IDENTITY-FREE (D4/NFR3). Plugin ids are cn's own runtime contract, the same way `Severity` is core's
 // own vocabulary — they belong here. A VAULT PATH or vault NAME does not, in any string including a
@@ -15,30 +18,19 @@
 //
 // NOT A CI GATE, deliberately. GitHub Actions runs on Linux with no vault, so a vault check could only
 // ever SKIP — a check whose every execution is a no-op has never evaluated its subject. The comparator
-// below is pure and therefore gets real fixture coverage in CI; the vault read is a CLI command.
+// (now in core) gets real fixture coverage in CI; the vault read is a CLI command.
 
-import type { Severity } from "../core/severity";
+import type { PluginContractEntry } from "../core/plugin-contract";
 
-/**
- * What a plugin is TO CN — not how important it is to the vault.
- *
- * `foundation` — cn genuinely cannot run without it. `ambient` — installed in the vault, and cn never
- * calls it. Listing the ambient ones is load-bearing, not decoration: a contract naming only what it
- * needs cannot distinguish "cn does not use Advanced Tables" from "nobody checked".
- */
-export type PluginRole = "foundation" | "ambient";
-
-/** One declared row of cn's envelope. Closed record — every field always present. */
-export interface PluginContractEntry {
-  readonly id: string;
-  readonly name: string;
-  readonly role: PluginRole;
-  /** True only for a `foundation` cn calls at runtime. An absent required id is an `error`. */
-  readonly required: boolean;
-  /** The version SEEN when this contract was last reconciled — never a pin. `null` = not installed. */
-  readonly observedVersion: string | null;
-  readonly why: string;
-}
+// Re-export the promoted vocabulary types so cn's existing importers of `../cn/plugins` keep resolving
+// (erased `export type`, legal under the cn source-scan). The comparator VALUE is NOT re-exported here —
+// it would be a value import from core, which the scan forbids for `src/cn/`; callers import it from core.
+export type {
+  PluginContractEntry,
+  PluginFinding,
+  PluginRole,
+  VaultPlugins,
+} from "../core/plugin-contract";
 
 /**
  * cn's declared envelope. Flat, closed, and CLOSED-WORLD: every plugin enabled in the target vault at
@@ -90,125 +82,8 @@ export const CN_PLUGIN_CONTRACT: readonly PluginContractEntry[] = [
     required: false,
     observedVersion: null,
     // ⚠ Names no vault, deliberately (D4/NFR3). "the other edge's" is the whole fact; which vault that
-    // is belongs caller-side. The no-consumer-ids denylist would not catch a vault name here, which
-    // makes it a SILENT doctrine violation — worse than a red one.
+    // is belongs caller-side. (This vault name WOULD be caught by check:no-consumer-ids' denylist — the
+    // guard was widened in Story 7.1 — but keeping it out of the string is the primary discipline.)
     why: "the other Obsidian edge's foundation; deliberately not installed in this edge's vault",
   },
 ];
-
-/** Already-parsed vault state. `verifyPlugins` takes THIS, never a path — that is what keeps it pure. */
-export interface VaultPlugins {
-  /** ids from `.obsidian/community-plugins.json` (the enabled array). */
-  readonly enabled: readonly string[];
-  /** id -> version, one entry per installed `plugins/<id>/manifest.json`. */
-  readonly versions: Readonly<Record<string, string>>;
-}
-
-/** One line of the report. `severity` is core's ONE vocabulary — never a local union, never a new glyph map. */
-export interface PluginFinding {
-  readonly id: string;
-  readonly severity: Severity;
-  readonly message: string;
-}
-
-/**
- * Compare an observed vault against the contract. Pure — no I/O, no clock, no globals.
- *
- * ⚠ THE MAPPING KEYS ON `role`, NOT ON CONTRACT MEMBERSHIP. Ambient entries ARE in the contract, so a
- * membership test would report them `ok` and claim cn depends on Advanced Tables.
- *
- *   foundation, absent or disabled ................ error  (the envelope is broken; cn cannot run)
- *   foundation, enabled, no manifest .............. error  (registered but not installed)
- *   foundation, enabled, version differs .......... warn   (drift — never fatal, AD-6 forbids pins)
- *   foundation, enabled, version matches .......... ok
- *   ambient, anything ............................. info   (never ok/warn/error; version never compared)
- *   enabled id absent from the contract entirely .. info
- *
- * An `observedVersion: null` entry can never produce a drift `warn` — there is nothing to compare to.
- *
- * Order is contract order first, then any extras, so the rendered report is stable across runs.
- */
-export function verifyPlugins(
-  observed: VaultPlugins,
-  contract: readonly PluginContractEntry[] = CN_PLUGIN_CONTRACT,
-): PluginFinding[] {
-  const enabled = new Set(observed.enabled);
-  const findings: PluginFinding[] = [];
-
-  for (const entry of contract) {
-    const isEnabled = enabled.has(entry.id);
-    const installed = Object.prototype.hasOwnProperty.call(observed.versions, entry.id)
-      ? observed.versions[entry.id]!
-      : null;
-
-    if (entry.role === "ambient") {
-      // Never ok/warn/error, and the version is never compared — that is what "outside the envelope"
-      // MEANS. The only thing that varies is how the message reads.
-      if (!isEnabled) {
-        findings.push({
-          id: entry.id,
-          severity: "info",
-          message:
-            entry.observedVersion === null
-              ? `${entry.name} — deliberately absent from this vault (${entry.why})`
-              : `${entry.name} — declared ambient, not enabled here`,
-        });
-      } else {
-        findings.push({
-          id: entry.id,
-          severity: "info",
-          message: `${entry.name} ${installed ?? "(no manifest)"} — ambient, outside cn's envelope`,
-        });
-      }
-      continue;
-    }
-
-    if (!isEnabled) {
-      findings.push({
-        id: entry.id,
-        severity: "error",
-        message: `${entry.name} — required foundation not enabled; cn cannot run without it`,
-      });
-      continue;
-    }
-    if (installed === null) {
-      findings.push({
-        id: entry.id,
-        severity: "error",
-        message: `${entry.name} — enabled but not installed (no manifest.json); cn cannot run without it`,
-      });
-      continue;
-    }
-    if (entry.observedVersion === null || installed === entry.observedVersion) {
-      findings.push({
-        id: entry.id,
-        severity: "ok",
-        message: `${entry.name} ${installed} — foundation present`,
-      });
-      continue;
-    }
-    findings.push({
-      id: entry.id,
-      severity: "warn",
-      message: `${entry.name} ${installed} — drift from the observed ${entry.observedVersion} (not fatal)`,
-    });
-  }
-
-  const declared = new Set(contract.map((e) => e.id));
-  // Iterate the SET, not the raw array: a hand-edited or sync-conflicted `community-plugins.json` can
-  // list an id twice, which reported the same finding twice and inflated the summary tally by one.
-  // A Set preserves insertion order, so the report order is unchanged.
-  for (const id of enabled) {
-    if (declared.has(id)) continue;
-    const installed = Object.prototype.hasOwnProperty.call(observed.versions, id)
-      ? observed.versions[id]!
-      : null;
-    findings.push({
-      id,
-      severity: "info",
-      message: `${installed ?? "(no manifest)"} — enabled in the vault, not in cn's contract`,
-    });
-  }
-
-  return findings;
-}

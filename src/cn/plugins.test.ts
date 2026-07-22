@@ -1,23 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-import { CN_PLUGIN_CONTRACT, type VaultPlugins, verifyPlugins } from "./plugins";
+import { CN_PLUGIN_CONTRACT } from "./plugins";
 
-/** The contract's own view of a healthy vault: every declared id enabled at its observed version. */
-function healthyVault(): VaultPlugins {
-  const enabled: string[] = [];
-  const versions: Record<string, string> = {};
-  for (const e of CN_PLUGIN_CONTRACT) {
-    if (e.observedVersion === null) continue; // js-engine — declared absent ON PURPOSE
-    enabled.push(e.id);
-    versions[e.id] = e.observedVersion;
-  }
-  return { enabled, versions };
-}
-
-/** Severity for one id, or `undefined` if the comparator produced no finding for it at all. */
-function sev(findings: ReturnType<typeof verifyPlugins>, id: string): string | undefined {
-  return findings.find((f) => f.id === id)?.severity;
-}
+// The COMPARATOR tests (`verifyPlugins — the role-keyed severity mapping`) moved to
+// `src/core/plugin-contract.test.ts` when `verifyPlugins` was promoted to core (Story 8.4 D-2), each
+// assertion byte-identical. This file keeps the CONTRACT-SHAPE tests: they belong with cn's data.
 
 describe("CN_PLUGIN_CONTRACT", () => {
   test("declares all five rows, two of them cn's required foundations", () => {
@@ -62,138 +49,5 @@ describe("CN_PLUGIN_CONTRACT", () => {
     expect(js.role).toBe("ambient");
     expect(js.required).toBe(false);
     expect(js.observedVersion).toBeNull();
-  });
-});
-
-describe("verifyPlugins — the role-keyed severity mapping", () => {
-  test("both foundations present and matching -> ok x2", () => {
-    const findings = verifyPlugins(healthyVault());
-    expect(findings.filter((f) => f.severity === "ok").map((f) => f.id)).toEqual([
-      "fix-require-modules",
-      "dataview",
-    ]);
-  });
-
-  test("a foundation absent entirely -> error", () => {
-    const v = healthyVault();
-    const findings = verifyPlugins({
-      enabled: v.enabled.filter((id) => id !== "fix-require-modules"),
-      versions: Object.fromEntries(
-        Object.entries(v.versions).filter(([id]) => id !== "fix-require-modules"),
-      ),
-    });
-    expect(sev(findings, "fix-require-modules")).toBe("error");
-  });
-
-  test("a foundation INSTALLED but disabled -> error (installed is not enabled)", () => {
-    const v = healthyVault();
-    const findings = verifyPlugins({
-      enabled: v.enabled.filter((id) => id !== "fix-require-modules"),
-      versions: v.versions, // manifest still on disk — the plugin dir was never removed
-    });
-    expect(sev(findings, "fix-require-modules")).toBe("error");
-  });
-
-  test("a foundation at a different version -> warn, never error", () => {
-    const v = healthyVault();
-    const findings = verifyPlugins({
-      enabled: v.enabled,
-      versions: { ...v.versions, dataview: "0.5.99" },
-    });
-    expect(sev(findings, "dataview")).toBe("warn");
-    expect(findings.some((f) => f.severity === "error")).toBe(false);
-    expect(findings.find((f) => f.id === "dataview")!.message).toContain("0.5.68");
-  });
-
-  test("an ambient entry is info, NEVER ok — even at its observed version", () => {
-    const findings = verifyPlugins(healthyVault());
-    expect(sev(findings, "table-editor-obsidian")).toBe("info");
-    expect(sev(findings, "color-folders-files")).toBe("info");
-  });
-
-  test("an ambient entry at a DRIFTED version is still info — versions are never compared", () => {
-    const v = healthyVault();
-    const findings = verifyPlugins({
-      enabled: v.enabled,
-      versions: { ...v.versions, "table-editor-obsidian": "9.9.9" },
-    });
-    expect(sev(findings, "table-editor-obsidian")).toBe("info");
-  });
-
-  test("an enabled id absent from the contract -> info", () => {
-    const v = healthyVault();
-    const findings = verifyPlugins({
-      enabled: [...v.enabled, "obsidian-git"],
-      versions: { ...v.versions, "obsidian-git": "2.24.0" },
-    });
-    expect(sev(findings, "obsidian-git")).toBe("info");
-    // …and it renders AFTER every contract row, so the report order is stable.
-    expect(findings[findings.length - 1]!.id).toBe("obsidian-git");
-  });
-
-  test("js-engine (observedVersion null, not enabled) -> info, never error, never ok", () => {
-    const findings = verifyPlugins(healthyVault());
-    const js = findings.find((f) => f.id === "js-engine")!;
-    expect(js.severity).toBe("info");
-    expect(js.message).toContain("deliberately absent");
-  });
-
-  test("an enabled FOUNDATION with no manifest -> error (registered, not installed)", () => {
-    const v = healthyVault();
-    const findings = verifyPlugins({
-      enabled: v.enabled,
-      versions: Object.fromEntries(Object.entries(v.versions).filter(([id]) => id !== "dataview")),
-    });
-    expect(sev(findings, "dataview")).toBe("error");
-    expect(findings.find((f) => f.id === "dataview")!.message).toContain("no manifest.json");
-  });
-
-  test("an enabled AMBIENT with no manifest -> info", () => {
-    const v = healthyVault();
-    const findings = verifyPlugins({
-      enabled: v.enabled,
-      versions: Object.fromEntries(
-        Object.entries(v.versions).filter(([id]) => id !== "color-folders-files"),
-      ),
-    });
-    expect(sev(findings, "color-folders-files")).toBe("info");
-  });
-
-  test("a DUPLICATE enabled id is reported once, not twice (7.3 review, MINOR 3)", () => {
-    // A hand-edited or sync-conflicted community-plugins.json can list an id twice. Reporting it
-    // twice also inflated the summary tally, so the printed `ℹ n` disagreed with the vault.
-    const findings = verifyPlugins({ enabled: ["obsidian-git", "obsidian-git"], versions: {} });
-    expect(findings.filter((f) => f.id === "obsidian-git")).toHaveLength(1);
-  });
-
-  test("an unversioned id absent from the contract -> info", () => {
-    const findings = verifyPlugins({ enabled: ["obsidian-git"], versions: {} });
-    expect(sev(findings, "obsidian-git")).toBe("info");
-  });
-
-  test("an empty vault -> both foundations error, ambients info, exit-worthy", () => {
-    const findings = verifyPlugins({ enabled: [], versions: {} });
-    expect(findings.filter((f) => f.severity === "error").map((f) => f.id)).toEqual([
-      "fix-require-modules",
-      "dataview",
-    ]);
-    expect(findings.filter((f) => f.severity === "info")).toHaveLength(3);
-    expect(findings.some((f) => f.severity === "ok")).toBe(false);
-  });
-
-  test("takes an injected contract — the comparator holds no vault knowledge of its own", () => {
-    const findings = verifyPlugins({ enabled: ["x"], versions: { x: "1.0.0" } }, [
-      { id: "x", name: "X", role: "foundation", required: true, observedVersion: "1.0.0", why: "test" },
-    ]);
-    expect(findings).toEqual([
-      { id: "x", severity: "ok", message: "X 1.0.0 — foundation present" },
-    ]);
-  });
-
-  test("is pure — the same input twice yields deeply equal output and mutates nothing", () => {
-    const v = healthyVault();
-    const before = JSON.stringify(v);
-    expect(verifyPlugins(v)).toEqual(verifyPlugins(v));
-    expect(JSON.stringify(v)).toBe(before);
   });
 });

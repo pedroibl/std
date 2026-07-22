@@ -12,6 +12,13 @@ export { configValue, tryParse } from "./config";
 export { dateParts, type DateParts, daysSince, isoDate, isoOffset } from "./date";
 export { extractJson, parseFrontmatter, parseNdjson } from "./parse";
 export {
+  type PluginContractEntry,
+  type PluginFinding,
+  type PluginRole,
+  type VaultPlugins,
+  verifyPlugins,
+} from "./plugin-contract";
+export {
   collapse,
   contentHash,
   escapeHtml,
