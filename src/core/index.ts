@@ -43,3 +43,19 @@ export {
   scoreRules,
   tokenize,
 } from "./similarity";
+export {
+  isClosed,
+  isDone,
+  isOpsKey,
+  isProg,
+  isStoryKey,
+  parseOps,
+  parseSprint,
+  parseStatusMap,
+  SPRINT_CLOSED,
+  SPRINT_DONE,
+  SPRINT_PROG,
+  type SprintRow,
+  type SprintSummary,
+  summarize,
+} from "./sprint";
