@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { CN_PLUGIN_CONTRACT } from "../cn/plugins";
 import { HELP, globalReposPath, runMain } from "./main";
 import { makeVaultFixture } from "./vault-fixture";
 
@@ -101,7 +102,7 @@ describe("cn dispatch + HELP (Story 7.2 — review finding: this branch had zero
   test("--watch registers the shutdown hook AT THE CALLSITE, and only when resident (AC5)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "std-main-cn-"));
     try {
-      const vault = makeVaultFixture(join(dir, "vault"));
+      const vault = makeVaultFixture(join(dir, "vault"), CN_PLUGIN_CONTRACT);
       // A FAKE watcher: this test must never open a real recursive watch — that surface is
       // platform-divergent (FSEvents vs inotify) and this suite runs on Linux in CI.
       let watchCalls = 0;
@@ -146,7 +147,7 @@ describe("cn dispatch + HELP (Story 7.2 — review finding: this branch had zero
     // registers IS the handle, and invoking it is what ctrl-c does.
     const dir = mkdtempSync(join(tmpdir(), "std-main-sigint-"));
     try {
-      const vault = makeVaultFixture(join(dir, "vault"));
+      const vault = makeVaultFixture(join(dir, "vault"), CN_PLUGIN_CONTRACT);
       let sigintWatchCalls = 0;
       const before = process.listeners("SIGINT");
       const p = runMain(["cn", "deploy", "--vault", vault, "--watch"], {
