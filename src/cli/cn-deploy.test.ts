@@ -1261,14 +1261,18 @@ describe("deployOnce — AC4 on the REAL bytes (review finding)", () => {
   });
 
   test("a write that cannot land returns ok:false and claims nothing", async () => {
-    // ⚠ HONEST SCOPE: this exercises the atomicWrite FAILURE path, NOT the read-back comparison.
-    // Deleting the `readIfExists(target) !== code` check leaves this test green — verified by reverting
-    // it in isolation. That guard fires only if the filesystem accepts a write and then returns
-    // different bytes, which no seam here can stage; it is kept as a tripwire, not as covered code.
+    // ⚠ HONEST SCOPE: this drives deployOnce's failure contract — a real filesystem fault on the target
+    // path surfaces as ok:false with NOTHING claimed written. It no longer pre-places a directory at a
+    // FIXED `${target}.tmp`: Story 18.1 made atomicWrite's temp sibling PER-WRITE-UNIQUE
+    // (`.tmp.<pid>.<counter>`), so that name cannot be blocked ahead of time, and any fs fixture that would
+    // break the write also trips the target read in `resolveTarget` first. A FILE where the `Scripts/`
+    // directory must go makes the target unwritable/unreadable (a non-directory in the path), which
+    // deployOnce catches. atomicWrite's own fail-loud + cleanup-on-throw is covered directly in
+    // src/fsx/index.test.ts.
     const target = artifactPath(vault);
-    mkdirSync(join(vault, "Scripts"), { recursive: true });
-    // A directory at the temp sibling path makes the rename fail, so the write never lands.
-    mkdirSync(`${target}.tmp`, { recursive: true });
+    // A file, not a directory, at <vault>/Scripts — the artifact's parent. The target cannot be written
+    // (nor read) under a non-directory, so the deploy fails before anything lands.
+    writeFileSync(join(vault, "Scripts"), "i am a file, not a directory");
     const res = await deployOnce(vault, "esm");
     expect(res.ok).toBe(false);
     expect(existsSync(target)).toBe(false); // nothing was claimed to be written
