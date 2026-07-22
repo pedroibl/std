@@ -1,9 +1,18 @@
 {
   "name": "std",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Pedro's personal standard — shared Bun+TypeScript vocabulary for reports, notes, and CLIs.",
+  "//publish": "name stays 'std' until the publish story flips it to '@pedroibl/std' (consumers alias: bun add std@npm:@pedroibl/std). private:true is the publish safety latch — do NOT flip until the name-flip + std/* self-reference decoupling lands (proof/ has 116 `std/*` self-imports resolved via package self-referencing).",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./core": "./src/core/index.ts",
