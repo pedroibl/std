@@ -22,7 +22,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { CN_PLUGIN_CONTRACT } from "../cn/plugins";
 import { makeVaultFixture } from "./vault-fixture";
+import {
+  CN_SCAN_POLICY,
+  externalImportViolations,
+  stripComments,
+} from "./edge-deploy.test-helpers";
 import {
   BANNER,
   BANNER_PREFIX,
@@ -49,47 +55,12 @@ let vault: string;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "std-cn-"));
-  vault = makeVaultFixture(join(tmp, "vault"));
+  vault = makeVaultFixture(join(tmp, "vault"), CN_PLUGIN_CONTRACT);
 });
 
 afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
-
-/** Blank out `//` and block comments so a source scan sees code only, not prose about code. */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[^\n]*?\/\/.*$/gm, "");
-}
-
-/**
- * Every module-graph edge in `src` that is NOT the one form `src/cn/` is allowed to have.
- *
- * ALLOWED, and only this: `import type { … } from "../core/…"` (or `import type * as X`). AC2 mandates
- * the single `Severity` vocabulary, and `verbatimModuleSyntax` ERASES a type-only import at build, so
- * it cannot contribute a byte to the vault artifact.
- *
- * BANNED: every value import, re-export, bare side-effect import, `require(` and dynamic `import(` —
- * and, for a type import, any specifier that is not a DOWNWARD `../core/` one (sideways to another
- * edge is D1/AD-8).
- *
- * ⚠ SCANS THE WHOLE SOURCE, NOT LINE BY LINE. `import` / `export … from` are multi-line statements;
- * a per-line filter is blind to any whose first line is a bare `import`, which is exactly how the
- * first version of this guard was bypassed. Returns the offending statements so a failure names them.
- */
-function externalImportViolations(src: string): string[] {
-  const out: string[] = [];
-  for (const m of src.matchAll(/^[ \t]*(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/gm)) {
-    const stmt = m[0];
-    const spec = m[1]!;
-    const isTypeOnly = /^[ \t]*import\s+type\s*[{*]/.test(stmt);
-    if (!isTypeOnly || !spec.startsWith("../core/")) out.push(stmt);
-  }
-  for (const re of [/^[ \t]*import\s*["']/m, /\brequire\s*\(/, /\bimport\s*\(/]) {
-    const hit = src.match(re);
-    if (hit) out.push(hit[0]);
-  }
-  return out;
-}
 
 /** Collect the CLI's stdout instead of printing it. */
 function sink() {
@@ -190,11 +161,11 @@ describe("buildBundle — the artifact contract (AC3, AC4, AC6)", () => {
       'import { cite } from "../report/index";', // cross-slice: down-to-core only (D1/AD-8)
     ];
     for (const src of evasions) {
-      expect(externalImportViolations(src)).not.toEqual([]);
+      expect(externalImportViolations(src, CN_SCAN_POLICY)).not.toEqual([]);
     }
     // …and the one form AC2 mandates stays legal, or the fix would just be the old blanket ban.
-    expect(externalImportViolations('import type { Severity } from "../core/severity";')).toEqual([]);
-    expect(externalImportViolations('import type * as S from "../core/severity";')).toEqual([]);
+    expect(externalImportViolations('import type { Severity } from "../core/severity";', CN_SCAN_POLICY)).toEqual([]);
+    expect(externalImportViolations('import type * as S from "../core/severity";', CN_SCAN_POLICY)).toEqual([]);
   });
 
   test("src/cn/ imports NO VALUE — asserted on the source, so a bundler cannot hide it (AC4)", () => {
@@ -207,7 +178,7 @@ describe("buildBundle — the artifact contract (AC3, AC4, AC6)", () => {
       // `await require("/Scripts/cn.js")` call, which is documentation, not a dependency.
       // (Same discipline as scripts/check-no-consumer-ids.ts: mask comments, keep strings.)
       const src = stripComments(readFileSync(join(dir, f), "utf-8"));
-      expect({ file: f, violations: externalImportViolations(src) }).toEqual({
+      expect({ file: f, violations: externalImportViolations(src, CN_SCAN_POLICY) }).toEqual({
         file: f,
         violations: [],
       });
@@ -267,14 +238,14 @@ describe("buildBundle — the artifact contract (AC3, AC4, AC6)", () => {
 
 describe("the plugin-envelope preflight (Story 7.3 AC4)", () => {
   test("an error vault ABORTS with exit 1 and writes NOTHING", async () => {
-    const broken = makeVaultFixture(join(tmp, "broken"), { omit: ["fix-require-modules"] });
+    const broken = makeVaultFixture(join(tmp, "broken"), CN_PLUGIN_CONTRACT, { omit: ["fix-require-modules"] });
     expect(await runCnDeploy(["deploy", "--vault", broken], { log: () => {} })).toBe(1);
     // The whole point: refusing beats deploying a bundle the loader cannot load.
     expect(existsSync(artifactPath(broken))).toBe(false);
   });
 
   test("a DRIFT vault deploys normally — drift is a warn, never a block (AD-6)", async () => {
-    const drifted = makeVaultFixture(join(tmp, "drifted"), { versions: { dataview: "0.5.99" } });
+    const drifted = makeVaultFixture(join(tmp, "drifted"), CN_PLUGIN_CONTRACT, { versions: { dataview: "0.5.99" } });
     const out = sink();
     expect(await runCnDeploy(["deploy", "--vault", drifted], { log: out.log })).toBe(0);
     expect(existsSync(artifactPath(drifted))).toBe(true);
@@ -291,7 +262,7 @@ describe("the plugin-envelope preflight (Story 7.3 AC4)", () => {
 
   test("preflightVault returns lines for a healthy vault and throws for a broken one", () => {
     expect(preflightVault(vault).join("\n")).toContain("ℹ 3");
-    const broken = makeVaultFixture(join(tmp, "broken2"), { omit: ["dataview"] });
+    const broken = makeVaultFixture(join(tmp, "broken2"), CN_PLUGIN_CONTRACT, { omit: ["dataview"] });
     expect(() => preflightVault(broken)).toThrow(CnDeployError);
     expect(() => preflightVault(broken)).toThrow(/refusing to deploy/);
   });
@@ -309,7 +280,7 @@ describe("the plugin-envelope preflight (Story 7.3 AC4)", () => {
     // 7.2 asserted the one-shot path was unchanged from 7.1. It is not, and deliberately so — the
     // preflight is on both paths now. What must still hold is that they behave IDENTICALLY: the same
     // vault yields the same outcome whether or not --watch follows.
-    const broken = makeVaultFixture(join(tmp, "broken3"), { omit: ["fix-require-modules"] });
+    const broken = makeVaultFixture(join(tmp, "broken3"), CN_PLUGIN_CONTRACT, { omit: ["fix-require-modules"] });
     let watchCalls = 0;
     const watch = () => (watchCalls++, { close: () => {} });
 

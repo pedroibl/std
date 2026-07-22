@@ -11,6 +11,7 @@ import { join } from "node:path";
 
 import { type CnDeployDeps, runCnDeploy } from "./cn-deploy";
 import { runCnVerify } from "./cn-verify";
+import { runDashkitDeploy } from "./dashkit-deploy";
 import { RepoNavError, defaultTargets, installAlias, type RepoConfig } from "./repo-nav";
 
 /** std's own global registry path (XDG-aware), the SoT `alias --install` reads. */
@@ -43,11 +44,16 @@ commands:
   alias --install   (re)generate repo-nav + the _std completion from ~/.config/std/repos.ts
   cn deploy         bundle src/cn -> <vault>/Scripts/cn.js (one-way; the vault is build output only)
   cn verify         check a vault against cn's declared plugin envelope (AD-6)
+  dashkit deploy    bundle src/dashkit -> <vault>/Scripts/dashkit.js (one-way; the vault is build output only)
 
 cn deploy options:
   --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)
   --format <fmt>    bundle format: esm (default) or cjs
   --watch           deploy once, then stay resident and redeploy on every save under src/cn, src/core
+
+dashkit deploy options:
+  --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)
+  --watch           deploy once, then stay resident and redeploy on every save under src/dashkit, src/core
 
 cn verify options:
   --vault <dir>     the Obsidian vault to check (required)
@@ -83,6 +89,18 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     // `process.exit` reachable from a test kills the test runner). `deps.onWatchStart` is only invoked
     // when `--watch` actually goes resident, so the one-shot path installs no handler.
     return await runCnDeploy(rest, {
+      log,
+      onWatchStart: deps.onWatchStart ?? ((stop) => process.on("SIGINT", stop)),
+      watch: deps.watch,
+    });
+  }
+
+  if (cmd === "dashkit") {
+    // SIGINT is registered HERE, at the callsite, exactly as for cn — never inside `runWatch` (a signal
+    // handler or `process.exit` reachable from a test kills the test runner). `deps.onWatchStart` fires only
+    // when `--watch` goes resident, so the one-shot path installs no handler. dashkit has no `verify`
+    // subcommand yet (8.4), so the whole command delegates straight to the deploy runner.
+    return await runDashkitDeploy(rest, {
       log,
       onWatchStart: deps.onWatchStart ?? ((stop) => process.on("SIGINT", stop)),
       watch: deps.watch,
@@ -128,7 +146,7 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     }
   }
 
-  console.error(`std: unknown command '${cmd ?? ""}'. Known: alias, cn`);
+  console.error(`std: unknown command '${cmd ?? ""}'. Known: alias, cn, dashkit`);
   return 2;
 }
 
