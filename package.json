@@ -1,6 +1,6 @@
 {
   "name": "@pedroibl/std",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Pedro's personal standard — shared Bun+TypeScript vocabulary for reports, notes, and CLIs.",
   "//publish": "Published as @pedroibl/std ('std' unscoped is an abandoned-but-owned 2011 pkg). Consumers keep byte-identical imports via the npm alias: `bun add std@npm:@pedroibl/std` → `import { cite } from \"std/core\"`. Internal `std/*` self-imports (proof/ has 116) resolve via tsconfig.json compilerOptions.paths — NOT package self-referencing — so they survive this scoped name. Bun-only (raw .ts exports).",
@@ -26,8 +26,9 @@
     "./fsx": "./src/fsx/index.ts",
     "./stdio": "./src/stdio/index.ts"
   },
+  "//bin": "bin value has NO leading './' — npm normalization rejects './…' ('script name … was invalid', drops the entry); a bare relative path is kept. .ts is fine (Bun-only, runs via shebang).",
   "bin": {
-    "std": "./src/cli/main.ts"
+    "std": "src/cli/main.ts"
   },
   "scripts": {
     "test": "bun test",
