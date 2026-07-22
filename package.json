@@ -1,10 +1,9 @@
 {
-  "name": "std",
+  "name": "@pedroibl/std",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Pedro's personal standard — shared Bun+TypeScript vocabulary for reports, notes, and CLIs.",
-  "//publish": "name stays 'std' until the publish story flips it to '@pedroibl/std' (consumers alias: bun add std@npm:@pedroibl/std). private:true is the publish safety latch — do NOT flip until the name-flip + std/* self-reference decoupling lands (proof/ has 116 `std/*` self-imports resolved via package self-referencing).",
+  "//publish": "Published as @pedroibl/std ('std' unscoped is an abandoned-but-owned 2011 pkg). Consumers keep byte-identical imports via the npm alias: `bun add std@npm:@pedroibl/std` → `import { cite } from \"std/core\"`. Internal `std/*` self-imports (proof/ has 116) resolve via tsconfig.json compilerOptions.paths — NOT package self-referencing — so they survive this scoped name. Bun-only (raw .ts exports).",
   "files": [
     "src",
     "README.md",

@@ -10,8 +10,14 @@
     "skipLibCheck": true,
     "noEmit": true,
     "types": ["bun"],
-    "lib": ["ESNext"]
+    "lib": ["ESNext"],
+    "baseUrl": ".",
+    "paths": {
+      "std": ["./src/index.ts"],
+      "std/*": ["./src/*/index.ts"]
+    }
   },
+  "//paths": "The compilerOptions.paths above decouple `std/*` self-imports (proof/ has 116) from the package `name`, so resolution survives the name flip to @pedroibl/std. Before this, `std/core` resolved ONLY via Bun package self-referencing (name===\"std\"); Bun + tsc both honor these paths, and they mirror how a published consumer resolves via node_modules/std.",
   "include": ["src/**/*.ts", "scripts/**/*.ts"],
   "//exclude-dashkit": "src/dashkit/ is the second Obsidian DOM edge (note-report vault); like src/cn/ it typechecks under its own scoped config via `bun run typecheck:dashkit` (Gate 3d), never here.",
   "//exclude": "src/cn/ is an Obsidian DOM edge and cannot typecheck under this Bun-shaped config (no DOM lib — that absence IS the barrier keeping DOM out of core). It typechecks under its own src/cn/tsconfig.json via `bun run typecheck:cn`, wired into CI and `make gates`. proof/tsconfig.json declares its own exclude, so this one never reaches it.",
