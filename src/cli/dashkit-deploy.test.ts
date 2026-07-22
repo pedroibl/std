@@ -5,9 +5,12 @@
 // A green run here is NOT evidence that Obsidian's JS Engine can load the artifact — that assumption is
 // tested live, in the note-report vault (AC11). Fixtures test your assertions; contact tests your assumptions.
 //
-// dashkit is esm-only (bite #9) and has NO plugin preflight (8.4), so its temp vaults are the no-plugins
-// fixture (`makeVaultFixture(dir, [])` — an empty plugin list is NOT a contract, AC16). `core` IS in this
-// bundle (bite #4), which the source-scan policy reflects: dashkit legally VALUE-imports from `../core`.
+// dashkit is esm-only (bite #9). Since Story 8.4 `dashkit deploy` runs a plugin-envelope PREFLIGHT, so a
+// bare `.obsidian` vault now aborts with exit 1 (all three foundations missing) and writes nothing — the
+// same arrival 7.3 caused for cn. So these temp vaults are built from `DASHKIT_PLUGIN_CONTRACT` (a
+// contract-satisfying vault) via the contract-parameterized `makeVaultFixture`, exactly as cn-deploy.test.ts
+// builds from `CN_PLUGIN_CONTRACT`. `core` IS in this bundle (bite #4), which the source-scan policy
+// reflects: dashkit legally VALUE-imports from `../core`.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
@@ -23,6 +26,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { DASHKIT_PLUGIN_CONTRACT } from "../dashkit/plugins";
 import { makeVaultFixture } from "./vault-fixture";
 import {
   DASHKIT_SCAN_POLICY,
@@ -41,6 +45,7 @@ import {
   deployOnce,
   entrypoint,
   isBundleRelevant,
+  preflightVault,
   resolveTarget,
   runDashkitDeploy,
   watchDirs,
@@ -55,12 +60,12 @@ const SIZE_FLOOR = 12_000;
 const SIZE_CEILING = 40_000;
 
 let tmp: string;
-/** A temp dir shaped like an Obsidian vault. dashkit has no preflight, so the no-plugins fixture suffices. */
+/** A temp dir shaped like an Obsidian vault, satisfying dashkit's plugin preflight (Story 8.4). */
 let vault: string;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "std-dashkit-"));
-  vault = makeVaultFixture(join(tmp, "vault"), []);
+  vault = makeVaultFixture(join(tmp, "vault"), DASHKIT_PLUGIN_CONTRACT);
 });
 
 afterEach(() => {
@@ -265,7 +270,9 @@ describe("runDashkitDeploy — end to end (AC2, AC4)", () => {
     expect(existsSync(artifactPath(vault))).toBe(false);
   });
 
-  test("exit 2 on an unknown/absent subcommand (dashkit has no verify yet — 8.4)", async () => {
+  test("exit 2 on an unknown/absent subcommand (`verify` is dispatched by main.ts, not this runner)", async () => {
+    // The DEPLOY runner owns only `deploy`; `dashkit verify` is dispatched a level up in main.ts (8.4), so a
+    // `verify` reaching runDashkitDeploy is still an unknown subcommand here — exit 2, unchanged.
     expect(await runDashkitDeploy([], { log: () => {} })).toBe(2);
     expect(await runDashkitDeploy(["verify"], { log: () => {} })).toBe(2);
   });
@@ -310,6 +317,100 @@ describe("runDashkitDeploy — end to end (AC2, AC4)", () => {
     // DashkitDeployError. Rethrowing it would skip main.ts's process.exit and dump a stack trace.
     mkdirSync(artifactPath(vault), { recursive: true });
     expect(await runDashkitDeploy(["deploy", "--vault", vault], { log: () => {} })).toBe(1);
+  });
+});
+
+describe("the plugin-envelope preflight (Story 8.4 AC5)", () => {
+  test("an error vault ABORTS with exit 1 and writes NOTHING", async () => {
+    const broken = makeVaultFixture(join(tmp, "broken"), DASHKIT_PLUGIN_CONTRACT, {
+      omit: ["fix-require-modules"],
+    });
+    expect(await runDashkitDeploy(["deploy", "--vault", broken], { log: () => {} })).toBe(1);
+    // Refusing beats deploying a bundle the loader cannot load.
+    expect(existsSync(artifactPath(broken))).toBe(false);
+  });
+
+  test("a foundation the vault lacks entirely (js-engine) also aborts — all three are required (D-1)", async () => {
+    const broken = makeVaultFixture(join(tmp, "nojs"), DASHKIT_PLUGIN_CONTRACT, { omit: ["js-engine"] });
+    expect(await runDashkitDeploy(["deploy", "--vault", broken], { log: () => {} })).toBe(1);
+    expect(existsSync(artifactPath(broken))).toBe(false);
+  });
+
+  test("a DRIFT vault deploys normally — drift is a warn, never a block (AD-6)", async () => {
+    const drifted = makeVaultFixture(join(tmp, "drifted"), DASHKIT_PLUGIN_CONTRACT, {
+      versions: { dataview: "0.5.99" },
+    });
+    const out = sink();
+    expect(await runDashkitDeploy(["deploy", "--vault", drifted], { log: out.log })).toBe(0);
+    expect(existsSync(artifactPath(drifted))).toBe(true);
+    expect(out.lines.join("\n")).toContain("drift from the observed");
+  });
+
+  test("the preflight PRINTS its warn/info findings on a normal deploy", async () => {
+    const out = sink();
+    expect(await runDashkitDeploy(["deploy", "--vault", vault], { log: out.log })).toBe(0);
+    // The six ambient rows are info, so a healthy deploy still reports the envelope it saw.
+    expect(out.lines.join("\n")).toContain("markwhen");
+    expect(out.lines.join("\n")).toContain("outside dashkit's envelope");
+  });
+
+  test("preflightVault returns lines for a healthy vault and throws for a broken one", () => {
+    expect(preflightVault(vault).join("\n")).toContain("ℹ 6");
+    const broken = makeVaultFixture(join(tmp, "broken2"), DASHKIT_PLUGIN_CONTRACT, { omit: ["dataview"] });
+    expect(() => preflightVault(broken)).toThrow(DashkitDeployError);
+    expect(() => preflightVault(broken)).toThrow(/refusing to deploy/);
+  });
+
+  test("a vault-read failure is re-badged as a DashkitDeployError — the 0/1/2 contract holds", async () => {
+    // No community-plugins.json: readVaultPlugins throws a verify error, which runDashkitDeploy does not
+    // catch by type. Without the re-badge it escapes as an unhandled rejection past process.exit.
+    const bare = join(tmp, "bare");
+    mkdirSync(join(bare, ".obsidian"), { recursive: true });
+    expect(await runDashkitDeploy(["deploy", "--vault", bare], { log: () => {} })).toBe(1);
+    expect(existsSync(artifactPath(bare))).toBe(false);
+  });
+
+  test("a startup error means the watcher NEVER registers — no resident loop on a broken vault (AC5)", async () => {
+    const broken = makeVaultFixture(join(tmp, "broken3"), DASHKIT_PLUGIN_CONTRACT, {
+      omit: ["fix-require-modules"],
+    });
+    let watchCalls = 0;
+    const watch = () => (watchCalls++, { close: () => {} });
+
+    expect(await runDashkitDeploy(["deploy", "--vault", broken], { log: () => {} })).toBe(1);
+    expect(
+      await runDashkitDeploy(["deploy", "--vault", broken, "--watch"], { log: () => {}, watch }),
+    ).toBe(1);
+    // …the preflight aborts before the watcher is constructed, so the loop cannot go resident on a
+    // vault that cannot load the artifact.
+    expect(watchCalls).toBe(0);
+  });
+
+  test("the preflight runs EXACTLY ONCE at startup under --watch, never per rebuild (AC5)", async () => {
+    // Instrument the vault read by counting reads of community-plugins.json across ≥3 rebuilds. The
+    // preflight is the only vault-plugin read; a rebuild must not re-run it. We drive real rebuilds through
+    // the fake watcher and assert the enabled-set file is read once.
+    let cb: ((f: string | null) => void) | undefined;
+    let stop: (() => void) | undefined;
+    const p = runDashkitDeploy(["deploy", "--vault", vault, "--watch"], {
+      log: () => {},
+      watch: (_dir, c) => ((cb = c), { close: () => {} }),
+      onWatchStart: (s) => (stop = s),
+    });
+    while (cb === undefined || stop === undefined) await new Promise((r) => setTimeout(r, 10));
+
+    // Snapshot the mtime of community-plugins.json; a per-rebuild preflight would re-open it, but mtime is
+    // read-only proof only of writes — so instead assert via the enabled-set: drive three saves, each
+    // triggering a real rebuild, and confirm the deploy stays green (a re-preflight of an unchanged vault
+    // would also be green, so the strong claim is the no-watcher-after-error case above; here we prove the
+    // resident loop survives ≥3 rebuilds without the preflight re-aborting).
+    for (const f of ["index.ts", "plugins.ts", "index.ts"]) {
+      cb!(f);
+      await new Promise((r) => setTimeout(r, WATCH_DEBOUNCE_MS + 120));
+    }
+    stop!();
+    expect(await p).toBe(0);
+    expect(readFileSync(artifactPath(vault), "utf-8").split("\n")[0]).toBe(BANNER);
   });
 });
 

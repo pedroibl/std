@@ -18,7 +18,8 @@
 
 import { join } from "node:path";
 
-import { CN_PLUGIN_CONTRACT, verifyPlugins } from "../cn/plugins";
+import { CN_PLUGIN_CONTRACT } from "../cn/plugins";
+import { verifyPlugins } from "../core/plugin-contract";
 import { CnVerifyError, readVaultPlugins, renderFindings } from "./cn-verify";
 import {
   type DeployResult,
@@ -76,7 +77,7 @@ export type CnDeployDeps = EdgeDeployDeps;
 export function preflightVault(vault: string): string[] {
   let findings;
   try {
-    findings = verifyPlugins(readVaultPlugins(vault), CN_PLUGIN_CONTRACT);
+    findings = verifyPlugins(readVaultPlugins(vault), CN_PLUGIN_CONTRACT, "cn");
   } catch (e) {
     // Re-badge so the caller's single `EdgeDeployError` catch keeps the 0/1/2 contract. The guards are
     // the same guards `resolveTarget` already ran, plus this command's own community-plugins.json ones.

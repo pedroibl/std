@@ -14,9 +14,12 @@
 // builds esm. The one pre-authorized fallback (a `target:"bun"` build) is NOT invented speculatively (D-3);
 // AC7 proves the browser-target bundle loads under bare bun by execution, and only a real failure would earn it.
 //
-// NO PREFLIGHT here. dashkit's plugin contract + `verifyPlugins` + `dashkit verify` are Story 8.4 (AC16), so
-// this spec omits `preflight` — the engine skips it. `core` IS in this bundle (bite #4): a `src/core/**` edit
-// WRITES and the bytes change, the inverse of cn's "imports nothing from core" contact observation.
+// PREFLIGHT (Story 8.4, AC5). dashkit's plugin contract + the shared `verifyPlugins` + `dashkit verify` land
+// in 8.4, and this spec FILLS 8.3's `EdgeSpec.preflight` hook (no second seam): `dashkit deploy` runs the
+// envelope check against the target vault BEFORE building, so an `error` finding (a missing foundation)
+// aborts with exit 1 having written NOTHING, and under `--watch` the watcher never registers. `core` IS in
+// this bundle (bite #4): a `src/core/**` edit WRITES and the bytes change, the inverse of cn's "imports
+// nothing from core" contact observation.
 //
 // ONE-WAY (AD-5, GIT-SoT / D-6). `src/dashkit/` is the source of truth; the target vault holds build
 // output only. The artifact carries dashkit's generated banner, and deploy REFUSES to clobber a target that
@@ -29,6 +32,9 @@
 
 import { join } from "node:path";
 
+import { DASHKIT_PLUGIN_CONTRACT } from "../dashkit/plugins";
+import { verifyPlugins } from "../core/plugin-contract";
+import { DashkitVerifyError, readVaultPlugins, renderFindings } from "./dashkit-verify";
 import {
   type DeployResult,
   type EdgeDeployDeps,
@@ -62,6 +68,45 @@ export type { DeployResult, WatchHandle };
 /** The deps shape main.ts threads through for the `dashkit deploy --watch` callsite. */
 export type DashkitDeployDeps = EdgeDeployDeps;
 
+/**
+ * Run dashkit's plugin-envelope contract against the target vault BEFORE building (8.4 AC5) — declared ≠
+ * decorative. The exact sibling of cn's `preflightVault`, wired to dashkit's contract + edge label.
+ *
+ * An `error` finding means a required foundation (CodeScript Toolkit, JS Engine, or Dataview) is missing,
+ * disabled, or registered-but-not-installed. Deploying a bundle the loader cannot `require`, or that no
+ * js-engine block can render, is a guaranteed dead dashboard — so this throws and the caller aborts with
+ * exit 1 having written NOTHING (fail-loud, FR5). `warn`/`info` findings are returned as lines to print;
+ * drift never blocks a deploy (AD-6: no hard version-pins).
+ *
+ * IMPORT EDGE: this reaches `src/dashkit/plugins.ts` (pure data) + `src/core/plugin-contract.ts` (the pure
+ * comparator) via `dashkit-verify`'s reader. It never imports `src/dashkit/index.ts`, which would drag DOM
+ * types into the Bun typecheck graph — and it never imports `src/cn/**` (AD-8).
+ *
+ * ONCE PER INVOCATION, never per rebuild: the engine calls `spec.preflight` ahead of the first build, so
+ * `--watch` preflights at startup only. The plugin set does not change on a source save, and re-reading the
+ * vault on every keystroke would hammer iCloud.
+ */
+export function preflightVault(vault: string): string[] {
+  let findings;
+  try {
+    findings = verifyPlugins(readVaultPlugins(vault), DASHKIT_PLUGIN_CONTRACT, "dashkit");
+  } catch (e) {
+    // Re-badge so the caller's single `EdgeDeployError` catch keeps the 0/1/2 contract. The guards are
+    // the same guards `resolveTarget` already ran, plus this command's own community-plugins.json ones.
+    throw e instanceof DashkitVerifyError ? new EdgeDeployError(e.message) : e;
+  }
+  const errors = findings.filter((f) => f.severity === "error");
+  if (errors.length > 0) {
+    throw new EdgeDeployError(
+      `plugin envelope check failed — refusing to deploy into ${vault}\n` +
+        renderFindings(errors)
+          .map((l) => (l === "" ? l : `  ${l}`)) // never indent the blank separator into whitespace
+          .join("\n"),
+    );
+  }
+  return renderFindings(findings.filter((f) => f.severity !== "ok"));
+}
+
 /** The `src/dashkit/index.ts` entrypoint, resolved relative to THIS file — never a hardcoded absolute path. */
 export function entrypoint(): string {
   return join(import.meta.dir, "..", "dashkit", "index.ts");
@@ -77,7 +122,7 @@ export function watchDirs(): string[] {
 /**
  * dashkit's `EdgeSpec`: the only thing the promoted engine needs to build/watch/deploy the dashkit edge.
  * The banner prefix is dashkit-SPECIFIC (never a shared literal) so a cn artifact cannot satisfy dashkit's
- * clobber guard and vice versa. No `formats` (esm-only) and no `preflight` (8.4) — both omitted on purpose.
+ * clobber guard and vice versa. No `formats` (esm-only). The `preflight` fills 8.3's hook (8.4 AC5).
  */
 export const DASHKIT_SPEC: EdgeSpec = {
   name: "dashkit",
@@ -87,7 +132,9 @@ export const DASHKIT_SPEC: EdgeSpec = {
   bannerPrefix: BANNER_PREFIX,
   banner: BANNER,
   usage:
-    "usage: std dashkit deploy --vault <dir> [--watch]   # bundle src/dashkit -> <vault>/Scripts/dashkit.js",
+    "usage: std dashkit deploy --vault <dir> [--watch]   # bundle src/dashkit -> <vault>/Scripts/dashkit.js\n" +
+    "       std dashkit verify --vault <dir>             # check the vault against dashkit's plugin envelope",
+  preflight: preflightVault,
 };
 
 /** Where the bundle lands inside a vault. Pure — no fs touched. */

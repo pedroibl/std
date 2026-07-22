@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { type CnDeployDeps, runCnDeploy } from "./cn-deploy";
 import { runCnVerify } from "./cn-verify";
 import { runDashkitDeploy } from "./dashkit-deploy";
+import { runDashkitVerify } from "./dashkit-verify";
 import { RepoNavError, defaultTargets, installAlias, type RepoConfig } from "./repo-nav";
 
 /** std's own global registry path (XDG-aware), the SoT `alias --install` reads. */
@@ -45,6 +46,7 @@ commands:
   cn deploy         bundle src/cn -> <vault>/Scripts/cn.js (one-way; the vault is build output only)
   cn verify         check a vault against cn's declared plugin envelope (AD-6)
   dashkit deploy    bundle src/dashkit -> <vault>/Scripts/dashkit.js (one-way; the vault is build output only)
+  dashkit verify    check a vault against dashkit's declared plugin envelope (AD-6)
 
 cn deploy options:
   --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)
@@ -56,6 +58,10 @@ dashkit deploy options:
   --watch           deploy once, then stay resident and redeploy on every save under src/dashkit, src/core
 
 cn verify options:
+  --vault <dir>     the Obsidian vault to check (required)
+                    drift is reported and never fatal; a missing foundation exits 1
+
+dashkit verify options:
   --vault <dir>     the Obsidian vault to check (required)
                     drift is reported and never fatal; a missing foundation exits 1
 
@@ -96,10 +102,13 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
   }
 
   if (cmd === "dashkit") {
+    // `verify` is synchronous and shares nothing with the deploy path but the `--vault` flag, so it
+    // dispatches here rather than inside runDashkitDeploy (whose own usage line owns `deploy` only) —
+    // exactly as `cn verify` does (8.4).
+    if (rest[0] === "verify") return runDashkitVerify(rest.slice(1), { log });
     // SIGINT is registered HERE, at the callsite, exactly as for cn — never inside `runWatch` (a signal
     // handler or `process.exit` reachable from a test kills the test runner). `deps.onWatchStart` fires only
-    // when `--watch` goes resident, so the one-shot path installs no handler. dashkit has no `verify`
-    // subcommand yet (8.4), so the whole command delegates straight to the deploy runner.
+    // when `--watch` goes resident, so the one-shot path installs no handler.
     return await runDashkitDeploy(rest, {
       log,
       onWatchStart: deps.onWatchStart ?? ((stop) => process.on("SIGINT", stop)),
