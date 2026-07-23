@@ -467,6 +467,28 @@ describe("deployOnce — AC4 on the REAL bytes", () => {
     const again = await deployOnce(vault); // fix the source → recovers
     expect(again).toEqual({ ok: true, bytes: good.length, written: false });
   });
+
+  // REGRESSION (2026-07-24). `target:"browser"` makes the bundler rewrite a statically-visible
+  // `require('node:child_process')` into an EMPTY-MODULE STUB — the artifact shipped
+  // `const cp = (() => ({}))`, so `cp.execSync` was undefined and every shell-out threw
+  // "cp.execSync is not a function". It killed runShell (all 3 live panels of the loom-sessions note)
+  // and fetchOpenIssues (the issue boards) in the DEPLOYED bundle only — source + unit tests stayed
+  // green, which is exactly why nobody caught it. So this asserts the BUILT BYTES, not the source.
+  test("the built artifact never ships a stubbed node builtin (runShell/fetchOpenIssues stay alive)", async () => {
+    expect((await deployOnce(vault)).ok).toBe(true);
+    const art = readFileSync(artifactPath(vault), "utf-8");
+
+    // The exact shape the bundler emitted for a stubbed builtin.
+    expect(art).not.toContain("(() => ({}))");
+    // Neither shell-out may bind its module from a stub: every `const cp = …` must be a real call.
+    for (const m of art.matchAll(/const cp = (.+);/g)) {
+      expect(m[1]).not.toMatch(/^\(\(\)\s*=>/); // not an inline empty-module thunk
+      expect(m[1]).toContain("nodeBuiltin"); // routed through the runtime resolver
+    }
+    // And the resolver itself survived bundling with both escape hatches intact.
+    expect(art).toContain("getBuiltinModule");
+    expect(art).toMatch(/globalThis\s*\.\s*require|globalThis\)\.require|\.require/);
+  });
 });
 
 // ---------------------------------------------------------------------------------------------

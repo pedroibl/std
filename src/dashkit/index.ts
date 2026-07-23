@@ -395,9 +395,12 @@ export function ensureStyles(id = 'dk-base-styles'): void {
 // note); the render returns a self-styled DOM element with per-issue copy buttons.
 
 // node globals — provided by CodeScript Toolkit (Obsidian desktop) and by bun at
-// runtime; declared here so the vault needs no @types/node. Used only inside
-// fetchOpenIssues, which is desktop-only (callers guard for mobile).
-declare const require: (id: string) => any;
+// runtime; declared here so the vault needs no @types/node. Desktop-only (callers guard for mobile).
+//
+// ⚠ `require` is deliberately NOT declared. Node builtins are loaded through `nodeBuiltin()` instead,
+// because a statically-visible `require('node:…')` is rewritten to an empty stub by the browser-target
+// deploy bundler (see `nodeBuiltin`). Leaving the declaration out means re-introducing a bare
+// `require(...)` here is a COMPILE error, not a silent runtime stub in the deployed artifact only.
 declare const process: { env: Record<string, string | undefined> };
 
 export type GlIssue = {
@@ -432,7 +435,9 @@ function copyButton(label: string, text: string, doneLabel: string): HTMLButtonE
  *  CLI is unreachable — callers should try/catch and fall back to a board link. */
 export function fetchOpenIssues(cfg: Project, limit = 20): GlIssue[] {
   if (!cfg.repo) throw new Error("project '" + cfg.id + "' has no `repo` configured");
-  const cp = require('node:child_process');
+  // Runtime-resolved, never a literal require — see `nodeBuiltin`. A static one is stubbed by the
+  // browser-target bundler and `cp.execSync` comes back undefined in the DEPLOYED artifact only.
+  const cp = nodeBuiltin('node:child_process');
   // Obsidian's Electron GUI doesn't inherit the shell PATH — prepend the usual bins.
   const env = Object.assign({}, process.env, {
     PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:' + (process.env.PATH || ''),
@@ -556,13 +561,46 @@ export function issueBoard(
 // parsed rows + pure command builders IN as arguments. `runShell` is a generic desktop shell-out (any
 // `--json` CLI, reused beyond loom); the table/deck are self-styled via ensureSessionStyles().
 
+/**
+ * Load a node builtin at RUNTIME, opaquely to the bundler.
+ *
+ * ⚠ NEVER write a literal `require('node:child_process')` in this file. `dashkit deploy` builds with
+ * `target:"browser"`, and the bundler rewrites any statically-visible `require()` of a node builtin into
+ * an EMPTY-MODULE STUB — the emitted artifact became `const cp = (() => ({}))`, so `cp.execSync` was
+ * `undefined` and every shell-out died with "cp.execSync is not a function". That silently killed
+ * `runShell` (all three live panels of the loom-sessions note) and `fetchOpenIssues` (the issue boards)
+ * in the deployed bundle only — the source and its tests were fine, which is why it went unnoticed.
+ *
+ * Two runtimes, two different escape hatches, neither one sufficient alone:
+ *   - Obsidian's Electron renderer exposes `require` as a GLOBAL (`process.getBuiltinModule` may be
+ *     absent on its bundled Node).
+ *   - bare bun (the deploy pipeline's own smoke test) has NO `globalThis.require`, but does have
+ *     `process.getBuiltinModule`.
+ * `inject` is the caller's escape hatch if a future host has neither.
+ */
+function nodeBuiltin(id: string, inject?: (id: string) => unknown): any {
+  if (typeof inject === 'function') return inject(id);
+  const globalRequire = (globalThis as any).require;
+  if (typeof globalRequire === 'function') return globalRequire(id);
+  const getBuiltin = (globalThis as any).process?.getBuiltinModule;
+  if (typeof getBuiltin === 'function') return getBuiltin.call((globalThis as any).process, id);
+  throw new Error(
+    'desktop only — no node runtime (no globalThis.require, no process.getBuiltinModule): ' + id,
+  );
+}
+
 /** Run a shell command, return raw stdout. Desktop-only (node:child_process + PATH). Throws on failure or
  *  an absent node runtime → callers guard + fall back (mobile). PATH is prepended because Obsidian's
- *  Electron GUI doesn't inherit the login shell PATH (same hazard fetchOpenIssues handles). */
-export function runShell(cmd: string, opts: { timeout?: number } = {}): string {
-  if (typeof require !== 'function' || typeof process === 'undefined')
-    throw new Error('desktop only — no node runtime (mobile)');
-  const cp = require('node:child_process');
+ *  Electron GUI doesn't inherit the login shell PATH (same hazard fetchOpenIssues handles).
+ *  `opts.require` injects a module loader for hosts exposing neither standard hatch (see `nodeBuiltin`). */
+export function runShell(
+  cmd: string,
+  opts: { timeout?: number; require?: (id: string) => unknown } = {},
+): string {
+  if (typeof process === 'undefined') throw new Error('desktop only — no node runtime (mobile)');
+  const cp = nodeBuiltin('node:child_process', opts.require);
+  if (typeof cp?.execSync !== 'function')
+    throw new Error('node:child_process resolved without execSync — bundler stubbed the builtin');
   const home = process.env.HOME || '';
   const env = Object.assign({}, process.env, {
     PATH: '/opt/homebrew/bin:/usr/local/bin:' + home + '/.bun/bin:/usr/bin:/bin:' + (process.env.PATH || ''),
