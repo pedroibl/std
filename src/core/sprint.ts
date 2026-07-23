@@ -53,10 +53,19 @@ export type SprintSummary = {
 
 // ── predicates ──────────────────────────────────────────────────────────────
 
-/** Story rows: `N-M-…` (bare-digit segments only). KNOWN GAP G1 — a first segment that is not a bare
- *  digit run (e.g. `2-0a-…`) matches neither this nor `isOpsKey`, so those rows are silently dropped
- *  from every dashboard. See deferred-work.md §"Deferred from 8-1". */
-export const isStoryKey = (k: string): boolean => /^\d+-\d+-/.test(k);
+/** Story rows: `N-M-…`, where the story segment may carry a lower-case letter suffix (`N-Ma-…`).
+ *
+ *  G1 (numeric half) CLOSED 2026-07-24 — the story segment was widened from `\d+` to `\d+[a-z]*`, so
+ *  gen-image's real, shipped `2-0a-`/`2-0b-` rows now reach the board. Both were `done`, so bar
+ *  percentages are unchanged; the counts they had been short by are restored (gen-image 35→37 rows).
+ *
+ *  G1 (non-numeric half) REMAINS OPEN and is deliberately not fixed here: zsh-planning's
+ *  `issue-7-remove-filetop-emulate` needs a NON-numeric first segment, and the naive widening for it
+ *  (`/^[a-z]+-\d+-/`) also matches `epic-1-retrospective`, `epic-5-retrospective` and `ops-1-…`,
+ *  reclassifying every retro and ops row as a story on every dashboard. That needs its own key-shape
+ *  design (an explicit prefix denylist, or a per-project key pattern), not a regex tweak.
+ *  See deferred-work.md §"Deferred from 8-1". */
+export const isStoryKey = (k: string): boolean => /^\d+-\d+[a-z]*-/.test(k);
 /** Out-of-epic operational rows: `ops-N-…`. */
 export const isOpsKey = (k: string): boolean => /^ops-\d+-/.test(k);
 export const isDone = (s: string): boolean => SPRINT_DONE.has(s);
@@ -111,8 +120,9 @@ function parseRows(raw: string, pred: (k: string) => boolean): SprintRow[] {
     .map((key) => ({ key, status: map[key]! }));
 }
 
-/** Story rows only (`N-M-…`), in file order. Inherits G1 (see `isStoryKey`) and G2/G3 (see
- *  `parseStatusMap`). `epic-*` and `*-retrospective` keys land in the map and are excluded here. */
+/** Story rows only (`N-M-…` / `N-Ma-…`), in file order. Inherits G1's still-open non-numeric half (see
+ *  `isStoryKey`) and G2/G3 (see `parseStatusMap`). `epic-*` and `*-retrospective` keys land in the map
+ *  and are excluded here. */
 export function parseSprint(raw: string): SprintRow[] {
   return parseRows(raw, isStoryKey);
 }

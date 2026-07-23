@@ -226,11 +226,15 @@ describe("summarize", () => {
 });
 
 describe("predicates", () => {
-  test("isStoryKey matches N-M- and only N-M-", () => {
+  test("isStoryKey matches N-M- and N-Ma-, and only those", () => {
     expect(isStoryKey("1-2-user-auth")).toBe(true);
     expect(isStoryKey("12-3-x")).toBe(true);
+    expect(isStoryKey("2-0a-direct-workers-ai-transport")).toBe(true); // letter suffix (G1, closed)
+    expect(isStoryKey("2-0b-cf-model-upgrade-flux-2-phoenix")).toBe(true);
     expect(isStoryKey("epic-1")).toBe(false);
+    expect(isStoryKey("epic-1-retrospective")).toBe(false); // must stay a non-story
     expect(isStoryKey("ops-1-x")).toBe(false);
+    expect(isStoryKey("2-0a")).toBe(false); // no trailing segment → not a story key
   });
 
   test("isOpsKey matches ops-N- and only ops-N-", () => {
@@ -261,25 +265,33 @@ describe("predicates", () => {
 // gap, the matching test goes red in a way that reads "expected — update the pin", not "regression". ──
 
 describe("KNOWN GAP pins (ported verbatim — see deferred-work.md §Deferred from 8-1)", () => {
-  test("KNOWN GAP G1 — isStoryKey drops N-Ma- keys; gen-image's 2-0a-/2-0b- rows are invisible on the dashboard", () => {
+  test("G1 numeric half CLOSED 2026-07-24 — gen-image's 2-0a-/2-0b- rows now reach the board", () => {
     const map = parseStatusMap(GENIMAGE_FIXTURE);
-    // The rows DO reach the map — only the key filters discard them.
     expect(map["2-0a-direct-workers-ai-transport"]).toBe("done");
     expect(map["2-0b-cf-model-upgrade-flux-2-phoenix"]).toBe("done");
-    // …but parseSprint / parseOps both drop them: two real stories vanish from the board.
+    // …and parseSprint now ADMITS them, in file order — the two real stories are visible again.
     const storyKeys = parseSprint(GENIMAGE_FIXTURE).map((r) => r.key);
     expect(storyKeys).toEqual([
       "2-0-per-modelid-capability-record",
+      "2-0a-direct-workers-ai-transport",
+      "2-0b-cf-model-upgrade-flux-2-phoenix",
       "2-1-provider-correctness-fixes",
     ]);
-    expect(storyKeys).not.toContain("2-0a-direct-workers-ai-transport");
-    expect(parseOps(GENIMAGE_FIXTURE)).toEqual([]);
-    // The predicates themselves, on the exact live keys:
-    expect(isStoryKey("2-0a-direct-workers-ai-transport")).toBe(false);
+    expect(isStoryKey("2-0a-direct-workers-ai-transport")).toBe(true);
+    // A letter-suffixed story is still a STORY, never an ops row.
     expect(isOpsKey("2-0a-direct-workers-ai-transport")).toBe(false);
-    // A fourth live shape drops too: zsh-planning's non-numeric-prefix `issue-7-…` key.
+    expect(parseOps(GENIMAGE_FIXTURE)).toEqual([]);
+  });
+
+  test("KNOWN GAP G1 (non-numeric half) — zsh-planning's issue-7- key is still dropped, deliberately", () => {
+    // Widening for this shape (/^[a-z]+-\d+-/) would also match `epic-N-retrospective` and `ops-N-…`,
+    // reclassifying every retro and ops row as a story on every dashboard. Needs its own key-shape
+    // design, not a regex tweak — see deferred-work.md §"Deferred from 8-1".
     expect(isStoryKey("issue-7-remove-filetop-emulate")).toBe(false);
     expect(isOpsKey("issue-7-remove-filetop-emulate")).toBe(false);
+    // The guardrail that makes the naive widening unsafe — these must NEVER become story rows:
+    expect(isStoryKey("epic-1-retrospective")).toBe(false);
+    expect(isStoryKey("ops-1-nightly")).toBe(false);
   });
 
   test("KNOWN GAP G2 — the segment runs to EOF, leaking a post-section `status: open` into the map", () => {

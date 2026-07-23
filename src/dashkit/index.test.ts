@@ -260,17 +260,22 @@ describe("escapeHtml is core's 5-char version — SANCTIONED DELTA #2 (AC4b)", (
 // ───────────── KNOWN GAP pins — ported verbatim from 8.1; do NOT "fix" here (AC5) ─────────────
 
 describe("KNOWN GAP pins (pinned by 8.1, do not fix here — see deferred-work.md §Deferred from 8-1)", () => {
-  test("KNOWN GAP G1 — isStoryKey drops N-Ma- keys; BOTH live shapes stay rejected (2-0a-… AND issue-7-…)", () => {
+  test("G1 numeric half CLOSED 2026-07-24 — 2-0a-… reaches the board AND renders as 2.0a", () => {
     const map = parseStatusMap(GENIMAGE_FIXTURE);
-    expect(map["2-0a-direct-workers-ai-transport"]).toBe("done"); // reaches the map…
+    expect(map["2-0a-direct-workers-ai-transport"]).toBe("done");
     const storyKeys = parseSprint(GENIMAGE_FIXTURE).map((r) => r.key);
-    expect(storyKeys).toEqual(["2-0-per-modelid-capability-record", "2-1-provider-correctness-fixes"]);
-    expect(storyKeys).not.toContain("2-0a-direct-workers-ai-transport"); // …but the board drops it
-    // 8.1 names TWO live shapes, not one — pin BOTH:
-    expect(isStoryKey("2-0a-direct-workers-ai-transport")).toBe(false);
+    expect(storyKeys).toContain("2-0a-direct-workers-ai-transport");
+    expect(isStoryKey("2-0a-direct-workers-ai-transport")).toBe(true);
     expect(isOpsKey("2-0a-direct-workers-ai-transport")).toBe(false);
+    // storyNum must stay in lockstep with the filter, or an admitted row renders as its raw key.
+    expect(storyNum("2-0a-direct-workers-ai-transport")).toBe("2.0a");
+    expect(storyNum("2-0b-cf-model-upgrade-flux-2-phoenix")).toBe("2.0b");
+  });
+
+  test("KNOWN GAP G1 (non-numeric half) — issue-7- stays dropped; retro/ops rows stay non-stories", () => {
     expect(isStoryKey("issue-7-remove-filetop-emulate")).toBe(false); // zsh-planning's non-numeric prefix
     expect(isOpsKey("issue-7-remove-filetop-emulate")).toBe(false);
+    expect(isStoryKey("epic-1-retrospective")).toBe(false); // the reason the naive widening is unsafe
   });
 
   test("KNOWN GAP G2 — the segment runs to EOF, leaking a post-section `status: open` into the map", () => {

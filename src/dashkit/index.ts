@@ -87,8 +87,11 @@ export type Project = {
 
 export const epicRows = (rows: SprintRow[], n: string): SprintRow[] =>
   rows.filter((r) => r.key.startsWith(n + '-'));
+/** `2-0a-direct-workers-ai-transport` → `2.0a`. The story segment keeps any lower-case letter suffix
+ *  so it stays in lockstep with `isStoryKey` (G1 numeric half, closed 2026-07-24) — otherwise a row the
+ *  filter now admits would render as its raw key. */
 export const storyNum = (key: string): string => {
-  const m = key.match(/^(\d+)-(\d+)-/) || key.match(/^(ops)-(\d+)-/);
+  const m = key.match(/^(\d+)-(\d+[a-z]*)-/) || key.match(/^(ops)-(\d+)-/);
   return m ? m[1] + '.' + m[2] : key;
 };
 export const icon = (status: string): string =>
