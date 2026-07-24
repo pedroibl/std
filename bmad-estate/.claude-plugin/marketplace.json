@@ -1,0 +1,17 @@
+{
+  "name": "bmad-estate",
+  "owner": { "name": "Pedro" },
+  "description": "Pedro's private BMAD estate module — loop family.",
+  "plugins": [
+    {
+      "name": "bmad-estate",
+      "source": "./",
+      "description": "Loop-family orchestration skills (epic-the-loop, jhon-the-loop).",
+      "version": "0.1.0",
+      "skills": [
+        "./skills/bmad-agent-epic-the-loop",
+        "./skills/bmad-agent-jhon-the-loop"
+      ]
+    }
+  ]
+}
