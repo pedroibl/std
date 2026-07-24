@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, existsSync } from "node:fs";
+import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 // Identity-free: everything resolves from this file's own location, so no
@@ -34,10 +34,30 @@ const SKILL_TREES: Record<string, string[]> = {
   "bmad-agent-dev-the-loop": ["SKILL.md", "customize.toml"],
 };
 
+// Bound to the LEADING YAML front matter only (the first `---`…`---` block), so a
+// stray `name:` line in the body can never be mistaken for the skill's declared name.
 function readFrontmatterName(skillMd: string): string | undefined {
-  const text = require("node:fs").readFileSync(skillMd, "utf8") as string;
-  const match = text.match(/^name:\s*(.+?)\s*$/m);
+  const text = readFileSync(skillMd, "utf8");
+  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm) return undefined;
+  const match = fm[1].match(/^name:\s*(.+?)\s*$/m);
   return match?.[1];
+}
+
+// Recursive relative listing of REGULAR files under root (sorted). Lets the file-set
+// assertion enforce the EXACT tree — extra files under references/ are caught, not just
+// stray top-level entries.
+function listFilesRecursive(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string, prefix: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(join(dir, entry.name), rel);
+      else if (entry.isFile()) out.push(rel);
+    }
+  };
+  walk(root, "");
+  return out.sort();
 }
 
 describe("bmad-estate seed", () => {
@@ -61,19 +81,13 @@ describe("bmad-estate seed", () => {
     expect(listed).not.toContain("./skills/bmad-agent-dev-the-loop");
   });
 
-  test("AC2/AC3 — all three skill dirs exist with their exact expected file set", () => {
+  test("AC2/AC3 — all three skill dirs exist with EXACTLY their expected file set (recursive)", () => {
     for (const [dir, files] of Object.entries(SKILL_TREES)) {
       const root = join(SKILLS, dir);
       expect(existsSync(root)).toBe(true);
-      for (const f of files) {
-        expect(existsSync(join(root, f))).toBe(true);
-      }
-      // No stray top-level files beyond SKILL.md, customize.toml, references/.
-      const topLevel = readdirSync(root).sort();
-      const expectedTop = files.some((f) => f.startsWith("references/"))
-        ? ["SKILL.md", "customize.toml", "references"].sort()
-        : ["SKILL.md", "customize.toml"].sort();
-      expect(topLevel).toEqual(expectedTop);
+      // Exact-set equality over the full recursive tree: catches both missing files and
+      // any stray extra (including inside references/), enforcing the verbatim seed shape.
+      expect(listFilesRecursive(root)).toEqual([...files].sort());
     }
   });
 
