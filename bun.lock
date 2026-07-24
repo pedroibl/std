@@ -6,7 +6,7 @@
       "name": "std",
       "devDependencies": {
         "@types/bun": "latest",
-        "typescript": "^5.8.0",
+        "typescript": "^5.9.3",
         "yaml": "^2.9.0",
       },
     },
