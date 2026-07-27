@@ -47,6 +47,72 @@ export async function makeScratchRepo(): Promise<ScratchRepo> {
   };
 }
 
+/**
+ * The git subcommands that MUTATE something — a repo's index, its history, or a remote (Story 2.4).
+ *
+ * This list is the instrument behind every "no git write happened here" assertion in the suite, and it
+ * is deliberately a DENY-list of writers rather than an allow-list of readers: a reader this file has
+ * not heard of is harmless, while a writer it has not heard of must never be waved through by default.
+ */
+export const GIT_WRITE_SUBCOMMANDS: readonly string[] = [
+  "add",
+  "commit",
+  "push",
+  "rm",
+  "mv",
+  "reset",
+  "checkout",
+  "switch",
+  "restore",
+  "merge",
+  "rebase",
+  "cherry-pick",
+  "revert",
+  "stash",
+  "clean",
+  "fetch",
+  "pull",
+  "tag",
+  "branch",
+  "apply",
+  "am",
+  "update-ref",
+  "config",
+  "init",
+  "clone",
+  "gc",
+  "worktree",
+  "remote",
+  "submodule",
+  "notes",
+  "replace",
+];
+
+/**
+ * A `deps.git` fake that permits READS and explodes by name on any WRITE.
+ *
+ * THE DISTINCTION IS THE WHOLE POINT (Story 2.4/AC7). Before 2.4 the dry-run and installer suites made
+ * `deps.git` throw outright, which read as "the pipeline touches no git". That is the wrong invariant:
+ * the live posture read (`rev-parse`/`rev-list`) is side-effect-free and MUST run in dry-run, or a
+ * preview reports a stale branch for the repo it is about to change. What must never happen in a dry
+ * run — or in 2.3's installer filter — is a git WRITE, and that is what this fake pins.
+ *
+ * `read` supplies the stdout for permitted reads; the default `""` matches `src/git`'s own fail-soft
+ * return for a path that is not a repo, which is exactly what those suites' temp dirs are.
+ */
+export function readOnlyGit(
+  label: string,
+  read: (repo: string, args: string[]) => string = () => "",
+): (repo: string, args: string[]) => string {
+  return (repo, args) => {
+    const sub = args[0] ?? "";
+    if (GIT_WRITE_SUBCOMMANDS.includes(sub)) {
+      throw new Error(`git WRITE in ${label}: \`git ${args.join(" ")}\` — reads only here`);
+    }
+    return read(repo, args);
+  };
+}
+
 /** How a synthetic estate module should be built. Every field is optional; the defaults are a valid module. */
 export interface EstateSpec {
   /** Skill dirs created WITH a file — the shape the FR-6 guard must accept. */
