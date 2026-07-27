@@ -246,7 +246,11 @@ export function skillTreeDigest(repoRoot: string, deps: BmadDeps): string {
   const entries: { rel: string; content: string }[] = [];
   for (const tree of SURFACE_TREES) {
     for (const file of walkFiles(join(repoRoot, tree), undefined, { prune: isRegenDir })) {
-      entries.push({ rel: relative(repoRoot, file), content: deps.fs.readIfExists(file) ?? "" });
+      // Separators normalized to `/` so the digest is a property of the TREE, not of the OS that
+      // walked it. `relative` emits `\` on Windows, which would make the same tree digest differently
+      // per platform — a false drift signal for 2.6's verify, which is this digest's only consumer.
+      const rel = relative(repoRoot, file).replaceAll("\\", "/");
+      entries.push({ rel, content: deps.fs.readIfExists(file) ?? "" });
     }
   }
   // Sorted by relative path so the digest is walk-order independent — `walkFiles` uses a stack, and its

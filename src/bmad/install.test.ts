@@ -413,6 +413,21 @@ describe("AC3 — exact FR-8 invocation through deps.exec, no self-copy (BM-3/BM
     ]);
   });
 
+  // Found by the cross-vendor review. `stateHomeOf` hand-rolled a `lastIndexOf` slice, which returns
+  // the directory ITSELF when the input carries a trailing separator — so staging would have nested
+  // INSIDE backups instead of beside it. Reachable in production: `defaultBmadDeps` derives
+  // `backupRoot` from `$XDG_STATE_HOME`, and a trailing slash there is perfectly legal. Nothing in the
+  // suite supplied that input, which is exactly the shape of defect this epic keeps shipping.
+  test("stagingPathFor puts staging BESIDE backups, even when backupRoot has a trailing separator", () => {
+    const h = harness();
+    const clean = stagingPathFor({ ...h.deps, backupRoot: join(h.stateHome, "backups") });
+    const trailing = stagingPathFor({ ...h.deps, backupRoot: `${join(h.stateHome, "backups")}/` });
+
+    expect(clean).toBe(join(h.stateHome, "staging", "T0"));
+    expect(trailing).toBe(clean);
+    expect(trailing).not.toContain(join("backups", "staging"));
+  });
+
   test("--custom-source points at the STAGING dir, never at the estate module itself (BM-12)", async () => {
     const h = harness();
     await runBmadInstall(["--repos", "alpha", "--apply"], h.deps);

@@ -23,7 +23,7 @@
 // the injected `deps`; the only literals are the estate's own layout (`skills/`, `.claude-plugin/`) and
 // the product's own skill-name prefix, which are this package's vocabulary, not a consumer's identity.
 
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { walkFiles } from "../fsx/index";
 import { BmadError, type BmadDeps } from "./deps";
@@ -136,10 +136,17 @@ export function stagingPathFor(deps: BmadDeps): string {
   return join(stateHomeOf(deps.backupRoot), "staging", deps.clock());
 }
 
-/** `<state>/std/bmad-manager/backups` → `<state>/std/bmad-manager`. Purely lexical; no fs access. */
+/**
+ * `<state>/std/bmad-manager/backups` → `<state>/std/bmad-manager`. Purely lexical; no fs access.
+ *
+ * Uses `dirname` rather than a hand-rolled `lastIndexOf` slice: a `backupRoot` carrying a TRAILING
+ * SEPARATOR makes that slice return the directory ITSELF instead of its parent, which would nest
+ * `staging/` INSIDE `backups/` rather than beside it. Reachable in production — `defaultBmadDeps`
+ * builds `backupRoot` from `$XDG_STATE_HOME`, and a trailing separator on that variable is legal.
+ * `dirname` normalizes it first.
+ */
 function stateHomeOf(backupRoot: string): string {
-  const cut = Math.max(backupRoot.lastIndexOf("/"), backupRoot.lastIndexOf("\\"));
-  return cut > 0 ? backupRoot.slice(0, cut) : backupRoot;
+  return dirname(backupRoot);
 }
 
 /**
