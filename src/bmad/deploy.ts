@@ -37,7 +37,7 @@ const DEPLOY_LEG: InstallLeg = {
 export async function runBmadDeploy(argv: string[], deps: BmadDeps): Promise<number> {
   const opts = parseBmadOpts(argv);
   const repos = selectRepos(loadManifest({ manifestPath: deps.manifestPath, fs: deps.fs }), opts);
-  const results = runBatch(repos, DEPLOY_LEG, opts, deps);
+  const results = await runBatch(repos, DEPLOY_LEG, opts, deps);
   renderBatch("deploy", results, opts, deps, hasFlag(argv, "json"));
   return batchExit(results);
 }

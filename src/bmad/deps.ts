@@ -21,10 +21,11 @@
 //
 // D1 core purity: a Bun edge, so `node:os`/`node:path` and `process` are legal here and forbidden in core.
 
+import { cpSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { atomicWrite, ensureDir, readIfExists } from "../fsx/index";
+import { atomicWrite, ensureDir, exists, readIfExists } from "../fsx/index";
 import { git } from "../git/index";
 import { spawnCapture, type SpawnOptions, type SpawnResult } from "../proc/index";
 import { emitJson, jsonOutput, lines, log, type Lines } from "../report/index";
@@ -33,6 +34,27 @@ import type { BmadOpts } from "./opts";
 
 /** Per-repo terminal state. `skipped-gitignored` is a NON-failing skip (FR-13/BM-17), decided in 2.4. */
 export type RepoStatus = "ok" | "skipped-gitignored" | "failed";
+
+/**
+ * The family's fail-loud error for a WHOLE-RUN precondition fault (Story 2.3, FR-6/BM-3/BM-13) — an
+ * incomplete estate module, an unusable `marketplace.json`, an illegal skill name. Modeled on 2.1's
+ * `ManifestError` and `src/cli/edge-verify.ts`'s `EdgeVerifyError`: a message-carrying `Error` subclass
+ * that sets `this.name`, which `cli.ts` maps to exit 1 in ONE place.
+ *
+ * Deliberately DISTINCT from `ManifestError`. That one means "the caller's estate.toml is wrong"; this
+ * one means "the module this package ships, or the flags naming into it, are wrong". Collapsing them
+ * would make a shipped-payload defect read to the operator as a config typo.
+ *
+ * It is NOT the type for a per-repo fault: a failing backup or a non-zero installer exit becomes that
+ * repo's `status:'failed'` row and the batch continues (FR-15/BM-16). A `BmadError` aborts everything,
+ * which is only ever correct BEFORE the first repo is touched.
+ */
+export class BmadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BmadError";
+  }
+}
 
 /**
  * What a run INTENDS to do to one repo (BM-14). Computed ONCE per repo by `pipeline.buildPlan`, before
@@ -121,11 +143,29 @@ export interface BmadDeps {
   exec(cmd: string, args: string[], opts?: SpawnOptions): Promise<SpawnResult>;
   /** `git -C <repo> <args>` — `src/git`'s fail-soft wrapper. Not called in 2.2 (git behavior is 2.4). */
   git(repo: string, args: string[]): string;
-  /** The filesystem slice of the seam — `src/fsx`. The write half is not called in 2.2 (backup is 2.3). */
+  /**
+   * The filesystem slice of the seam — `src/fsx`, plus the ONE primitive std does not ship.
+   *
+   * CONCRETIZED IN 2.3 (2.2 declared the read/write trio; the backup and the BM-12 staging materializer
+   * are the first real writers). `exists` and `cpDir` are the two additions.
+   *
+   * `cpDir` IS THE FSX GAP, and it is deliberate: `src/fsx` exports no recursive-copy primitive, and
+   * hand-rolling one out of `walkFiles` + `atomicWrite` would CORRUPT any non-text asset, because
+   * `atomicWrite` takes a `content: string`. FR-7 asks for a byte-faithful, reversible snapshot, so the
+   * platform's own `cpSync(src, dest, {recursive:true})` is the reuse (wired in {@link defaultBmadDeps};
+   * `node:fs` is edge-legal here per D1). It is NOT promoted into `src/fsx`: this slice is its only
+   * caller today (Rule-of-Three unmet). Promote it at the second caller, not before.
+   *
+   * Every member is on the SEAM rather than imported directly so a test can make a write THROW — which
+   * is how both the AC4 zero-IO-in-dry-run guard and the AC3 no-self-copy guard are expressed.
+   */
   fs: {
     readIfExists(path: string): string | null;
+    exists(path: string): boolean;
     atomicWrite(path: string, content: string): void;
     ensureDir(dir: string): void;
+    /** Recursive, byte-faithful directory copy. Creates `dest` and any missing parents. */
+    cpDir(src: string, dest: string): void;
   };
   /**
    * The render seam. `lines`/`jsonOutput`/`emitJson`/`log` are `src/report`'s shipped primitives — the
@@ -163,7 +203,15 @@ export function defaultBmadDeps(env: NodeJS.ProcessEnv = process.env): BmadDeps 
   return {
     exec: spawnCapture,
     git,
-    fs: { readIfExists, atomicWrite, ensureDir },
+    fs: {
+      readIfExists,
+      exists,
+      atomicWrite,
+      ensureDir,
+      // The one non-fsx member (see the `fs` doc): std ships no recursive copy, and `atomicWrite` is
+      // string-only, so a hand-rolled walk would not be byte-faithful. `cpSync` is the platform's.
+      cpDir: (src: string, dest: string) => cpSync(src, dest, { recursive: true }),
+    },
     report: {
       lines,
       jsonOutput,

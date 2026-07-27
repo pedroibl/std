@@ -36,7 +36,7 @@ const UPDATE_LEG: InstallLeg = {
 export async function runBmadUpdate(argv: string[], deps: BmadDeps): Promise<number> {
   const opts = parseBmadOpts(argv);
   const repos = selectRepos(loadManifest({ manifestPath: deps.manifestPath, fs: deps.fs }), opts);
-  const results = runBatch(repos, UPDATE_LEG, opts, deps);
+  const results = await runBatch(repos, UPDATE_LEG, opts, deps);
   renderBatch("update", results, opts, deps, hasFlag(argv, "json"));
   return batchExit(results);
 }

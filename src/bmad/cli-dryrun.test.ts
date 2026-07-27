@@ -18,14 +18,25 @@
 // IDENTITY-FREE fixtures (AC8). `check:no-consumer-ids` skips `*.test.ts`, but a real machine path in a
 // fixture is bad hygiene regardless: repos here are `alpha`/`beta`/`gamma` under `/srv/estate/…`, the
 // manifest is an `os.tmpdir()` file, and no `/Users/…` literal appears anywhere in this file.
+//
+// AMENDED BY STORY 2.3 (the C4 async cascade + the first real `--apply` bodies). Two mechanical changes
+// and one semantic one:
+//   - `runRepoPipeline`/`runBatch` return promises now, so every call site awaits.
+//   - `fakeDeps` grew `fs.exists` (real — a read) and `fs.cpDir` (throws — a write), matching the seam
+//     `deps.ts` concretized, and it now points `estateModulePath` at a REAL synthetic estate, because
+//     the FR-6 module guard runs in dry-run too and a nonexistent module is (correctly) fatal.
+//   - The `--apply` half of the zero-IO assertions MOVED to `install.test.ts`. It is no longer true that
+//     `--apply` does nothing — that was 2.2's scaffold state, not a contract. What IS the permanent
+//     contract, and stays here, is that a DRY RUN (with or without `--push`) touches no mutating dep.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { HELP, runMain } from "../cli/main";
 import { batchExit, runBatch } from "./batch";
+import { makeEstateModule, removeTempTree } from "./bmad.test-helpers";
 import { BMAD_USAGE, runBmad } from "./cli";
 import { defaultBmadDeps, type BmadDeps, type InstallLeg, type RepoResult } from "./deps";
 import type { BmadRepo } from "./manifest";
@@ -33,9 +44,15 @@ import { DEFAULT_SKILLS, parseBmadOpts } from "./opts";
 import { buildPlan, runRepoPipeline } from "./pipeline";
 
 const scratch = mkdtempSync(join(tmpdir(), "bmad-dryrun-"));
+// A valid estate carrying exactly the two default skills — what the FR-6 guard expects to find, so
+// these dry-run cases exercise the paths they were written for rather than aborting at the guard.
+const estateModule = makeEstateModule();
 let seq = 0;
 
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+afterAll(() => {
+  rmSync(scratch, { recursive: true, force: true });
+  removeTempTree(estateModule);
+});
 
 /** Write a TOML manifest fixture to a fresh temp file and return its path (the injected `manifestPath`). */
 function manifest(toml: string): string {
@@ -96,8 +113,12 @@ function fakeDeps(overrides: Partial<BmadDeps> = {}): { deps: BmadDeps; counts: 
           return null;
         }
       },
+      // A real presence check — `exists` is a READ, and the guard and the backup filter both need it
+      // to tell "absent" from "there". Making it throw would prove nothing about mutation.
+      exists: (p: string) => existsSync(p),
       atomicWrite: boom("fs.atomicWrite"),
       ensureDir: boom("fs.ensureDir"),
+      cpDir: boom("fs.cpDir"),
     },
     report: {
       lines: () => {
@@ -118,7 +139,7 @@ function fakeDeps(overrides: Partial<BmadDeps> = {}): { deps: BmadDeps; counts: 
     },
     bmadBin: "bmad",
     manifestPath: manifest(TWO_REPOS),
-    estateModulePath: "/tmp/estate-module",
+    estateModulePath: estateModule,
     backupRoot: "/tmp/estate-backups",
     ...overrides,
   };
@@ -209,19 +230,27 @@ describe("parseBmadOpts — --skills is additive (AC2/BM-12)", () => {
 });
 
 describe("single source of plan (AC3 — BM-14, the --brain defect class)", () => {
-  test("a dry run and its --apply twin report the IDENTICAL plan", () => {
+  // The dry-run/apply plan equality over a REAL apply (which now backs up and shells) is asserted in
+  // `install.test.ts`; here it is proven over the dry-run side alone, where the fake's mutating members
+  // still throw. Both matter: this one says the plan does not depend on `apply`, that one says the plan
+  // survives the mutation path unchanged.
+  test("a dry run's plan does not depend on the --apply flag", () => {
     const { deps, counts } = fakeDeps();
     const leg = countingLeg(counts);
-    const dry = runRepoPipeline(ALPHA, leg, parseBmadOpts([]), deps);
-    const applied = runRepoPipeline(ALPHA, leg, parseBmadOpts(["--apply"]), deps);
+    const dry = buildPlan(ALPHA, leg, parseBmadOpts([]), deps);
+    const applied = buildPlan(ALPHA, leg, parseBmadOpts(["--apply"]), deps);
     // Compared on `planned` ONLY — the outcome fields are deliberately excluded (BM-14).
-    expect(JSON.stringify(applied.planned)).toBe(JSON.stringify(dry.planned));
+    expect(JSON.stringify(applied)).toBe(JSON.stringify(dry));
   });
 
-  test("the plan is built EXACTLY ONCE per repo per run, in both modes", () => {
+  test("the plan is built EXACTLY ONCE per repo per run, in both modes", async () => {
     for (const argv of [[], ["--apply"]]) {
       const { deps, counts } = fakeDeps();
-      runRepoPipeline(ALPHA, countingLeg(counts), parseBmadOpts(argv), deps);
+      // `--apply` reaches the backup filter, whose `cpDir` throws by construction — but only if a
+      // Surface tree EXISTS, and `/srv/estate/alpha` does not, so the filter is a reported no-op and
+      // the run reaches the installer, whose `exec` throws. Catching keeps the counter assertion the
+      // subject of this test rather than the mutation behavior (which `install.test.ts` owns).
+      await runRepoPipeline(ALPHA, countingLeg(counts), parseBmadOpts(argv), deps).catch(() => {});
       // One leg.buildArgv + one clock read = one buildPlan. Two of either = a recompute on some path.
       expect(counts.buildArgv).toBe(1);
       expect(counts.clock).toBe(1);
@@ -257,9 +286,9 @@ describe("single source of plan (AC3 — BM-14, the --brain defect class)", () =
 });
 
 describe("intent vs outcome (AC3/AC5 — BM-14)", () => {
-  test("dry-run outcomes are literal zero values, never derived from the plan", () => {
+  test("dry-run outcomes are literal zero values, never derived from the plan", async () => {
     const { deps, counts } = fakeDeps();
-    const r = runRepoPipeline(ALPHA, countingLeg(counts), parseBmadOpts(["--push"]), deps);
+    const r = await runRepoPipeline(ALPHA, countingLeg(counts), parseBmadOpts(["--push"]), deps);
     expect(r.planned.wouldPush).toBe(true); // intent
     expect(r.pushed).toBe(false); // outcome
     expect(r.committed).toBe(false);
@@ -267,36 +296,32 @@ describe("intent vs outcome (AC3/AC5 — BM-14)", () => {
     expect(r.backupPath).toBeUndefined(); // nothing was backed up; only the INTENT has a path
   });
 
-  test("--apply in 2.2 also leaves every outcome at zero (no filter bodies yet)", () => {
-    const { deps, counts } = fakeDeps();
-    const r = runRepoPipeline(ALPHA, countingLeg(counts), parseBmadOpts(["--apply", "--push"]), deps);
-    expect(r.committed).toBe(false);
-    expect(r.pushed).toBe(false);
-    expect(r.stagedPaths).toEqual([]);
-  });
-
-  test("branch/ahead are read provisionally off the Manifest entry (live read is 2.4)", () => {
+  test("branch/ahead are read provisionally off the Manifest entry (live read is 2.4)", async () => {
     const { deps, counts } = fakeDeps();
     const leg = countingLeg(counts);
-    expect(runRepoPipeline(ALPHA, leg, parseBmadOpts([]), deps).ahead).toBe(0);
+    expect((await runRepoPipeline(ALPHA, leg, parseBmadOpts([]), deps)).ahead).toBe(0);
     const noUpstream: BmadRepo = { ...ALPHA, hasUpstream: false, branch: undefined };
-    const r = runRepoPipeline(noUpstream, leg, parseBmadOpts([]), deps);
+    const r = await runRepoPipeline(noUpstream, leg, parseBmadOpts([]), deps);
     expect(r.ahead).toBe("no-upstream");
     expect(r.branch).toBe("(unknown)");
   });
 });
 
-describe("zero side effects (AC4 — NFR-1)", () => {
-  test("neither dry-run nor --apply touches a mutating dep", () => {
+describe("zero side effects in DRY RUN (AC4 — NFR-1)", () => {
+  // Narrowed by 2.3 from "neither mode" to "dry run". `--apply` genuinely mutates now — that is the
+  // point of 2.3 — and `install.test.ts` owns what it is allowed to touch. The dry-run half is the
+  // permanent FR-5 contract and must never be narrowed further.
+  test("a dry run touches no mutating dep, with or without --push", async () => {
     const { deps, counts } = fakeDeps();
     const leg = countingLeg(counts);
-    // `deps.exec`/`deps.git`/`deps.fs.atomicWrite`/`deps.fs.ensureDir` all throw by construction.
-    expect(() => runRepoPipeline(ALPHA, leg, parseBmadOpts([]), deps)).not.toThrow();
-    expect(() => runRepoPipeline(ALPHA, leg, parseBmadOpts(["--apply", "--push"]), deps)).not.toThrow();
+    // `deps.exec`/`deps.git`/`deps.fs.atomicWrite`/`ensureDir`/`cpDir` all throw by construction.
+    // Reaching the assertion at all is the proof: any mutating member fired would have rejected.
+    expect(await runRepoPipeline(ALPHA, leg, parseBmadOpts([]), deps)).toBeDefined();
+    expect(await runRepoPipeline(ALPHA, leg, parseBmadOpts(["--push"]), deps)).toBeDefined();
   });
 
-  test("a full `install` run shells nothing in either mode", async () => {
-    for (const argv of [["install"], ["install", "--apply", "--push"]]) {
+  test("a full `install` run shells nothing without --apply (even with --push)", async () => {
+    for (const argv of [["install"], ["install", "--push"]]) {
       const { deps } = fakeDeps();
       expect(await runBmad(argv, deps)).toBe(0);
     }
@@ -305,7 +330,7 @@ describe("zero side effects (AC4 — NFR-1)", () => {
   // `buildPlan` calls `buildArgv` BEFORE the --apply gate, so an effect reachable through `ctx.deps`
   // would run during a dry run. `LegDeps` makes that a compile error; this pins it at RUNTIME too, so
   // a single `as BmadDeps` cast inside a future leg (2.3/2.5/2.7) cannot quietly restore the reach.
-  test("the leg's ctx.deps carries the resolved values and NONE of the effect surface", () => {
+  test("the leg's ctx.deps carries the resolved values and NONE of the effect surface", async () => {
     const { deps } = fakeDeps();
     let seen: Record<string, unknown> | undefined;
     const spyLeg: InstallLeg = {
@@ -315,7 +340,7 @@ describe("zero side effects (AC4 — NFR-1)", () => {
         return ["install"];
       },
     };
-    runRepoPipeline(ALPHA, spyLeg, parseBmadOpts(["--apply", "--push"]), deps);
+    await runRepoPipeline(ALPHA, spyLeg, parseBmadOpts(["--push"]), deps);
 
     expect(Object.keys(seen ?? {}).sort()).toEqual([
       "backupRoot",
@@ -330,15 +355,15 @@ describe("zero side effects (AC4 — NFR-1)", () => {
 });
 
 describe("batch (AC7 — BM-5/BM-16)", () => {
-  test("iterates sequentially in Manifest order and returns one row per repo", () => {
+  test("iterates sequentially in Manifest order and returns one row per repo", async () => {
     const { deps, counts } = fakeDeps();
     const beta: BmadRepo = { ...ALPHA, path: "/srv/estate/beta" };
-    const results = runBatch([ALPHA, beta], countingLeg(counts), parseBmadOpts([]), deps);
+    const results = await runBatch([ALPHA, beta], countingLeg(counts), parseBmadOpts([]), deps);
     expect(results.map((r) => r.repo)).toEqual(["alpha", "beta"]);
     expect(counts.buildArgv).toBe(2); // once per repo — still exactly one plan each
   });
 
-  test("a failing repo isolates to its own row and the loop continues (FR-15)", () => {
+  test("a failing repo isolates to its own row and the loop continues (FR-15)", async () => {
     const { deps } = fakeDeps();
     const beta: BmadRepo = { ...ALPHA, path: "/srv/estate/beta" };
     const explodingLeg: InstallLeg = {
@@ -348,7 +373,7 @@ describe("batch (AC7 — BM-5/BM-16)", () => {
         return ["install"];
       },
     };
-    const results = runBatch([ALPHA, beta], explodingLeg, parseBmadOpts([]), deps);
+    const results = await runBatch([ALPHA, beta], explodingLeg, parseBmadOpts([]), deps);
     expect(results.map((r) => r.status)).toEqual(["failed", "ok"]);
     expect(results[0]?.reason).toBe("leg exploded");
     expect(batchExit(results)).toBe(1);
@@ -400,17 +425,10 @@ describe("render composes src/report through the seam (AC5/AC6)", () => {
     expect(payload.repos.map((r) => r.repo)).toEqual(["alpha", "beta"]);
   });
 
-  test("the dry-run render and the --apply render carry the same plan", async () => {
-    const planOf = async (argv: string[]) => {
-      const { deps, counts } = fakeDeps();
-      await runBmad(argv, deps);
-      const payload = counts.json[0] as { repos: RepoResult[] };
-      return payload.repos.map((r) => r.planned);
-    };
-    expect(JSON.stringify(await planOf(["install", "--json", "--apply"]))).toBe(
-      JSON.stringify(await planOf(["install", "--json"])),
-    );
-  });
+  // The dry-run-render vs --apply-render plan equality MOVED to `install.test.ts` in Story 2.3: an
+  // `--apply` run now writes a staging tree and shells the installer, so it cannot be driven by this
+  // file's deliberately-exploding fake. It is asserted there against a real apply, which is a strictly
+  // stronger form of the same SM-3 claim — the plan survives the mutation path, not just the gate.
 });
 
 describe("router + exit contract (AC1/AC7 — BM-1)", () => {

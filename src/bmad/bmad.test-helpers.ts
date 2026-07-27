@@ -13,7 +13,7 @@
 // std reuse (build less): `spawnCapture` from `src/proc` is the one subprocess primitive — never-reject,
 // never-hang, `{stdout,stderr,code}`, missing binary → 127. `git init` shells through it (BM-9).
 
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -45,6 +45,60 @@ export async function makeScratchRepo(): Promise<ScratchRepo> {
       await rm(dir, { recursive: true, force: true });
     },
   };
+}
+
+/** How a synthetic estate module should be built. Every field is optional; the defaults are a valid module. */
+export interface EstateSpec {
+  /** Skill dirs created WITH a file — the shape the FR-6 guard must accept. */
+  skills?: string[];
+  /**
+   * Skill dirs created EMPTY. A present-but-empty skill is a half-family wearing a directory: it sails
+   * past an exists-only guard and installs nothing. Fixtures must be able to produce it, or the case
+   * cannot be tested at all — which is how that hole survives review.
+   */
+  emptySkills?: string[];
+  /** Replaces the `.claude-plugin/marketplace.json` body. A `null` writes NO marketplace file. */
+  marketplace?: unknown;
+}
+
+/**
+ * Build a throwaway `bmad-estate`-shaped module under `os.tmpdir()` and return its path — the value a
+ * test injects as `deps.estateModulePath` (BM-13). Never the real shipped `bmad-estate/`: a unit test
+ * that reads the package's own payload would pass or fail on whatever that payload happens to contain.
+ *
+ * The caller owns cleanup ({@link removeTempTree}).
+ */
+export function makeEstateModule(spec: EstateSpec = {}): string {
+  const dir = mkdtempSync(join(tmpdir(), "bmad-estate-"));
+  const skills = spec.skills ?? ["bmad-agent-jhon-the-loop", "bmad-agent-epic-the-loop"];
+
+  for (const skill of skills) {
+    const skillDir = join(dir, "skills", skill);
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), `# ${skill}\n`, "utf-8");
+  }
+  for (const skill of spec.emptySkills ?? []) {
+    mkdirSync(join(dir, "skills", skill), { recursive: true });
+  }
+
+  const marketplace =
+    spec.marketplace === undefined
+      ? {
+          name: "estate-fixture",
+          plugins: [{ name: "estate-fixture", source: "./", skills: skills.map((s) => `./skills/${s}`) }],
+        }
+      : spec.marketplace;
+  if (marketplace !== null) {
+    mkdirSync(join(dir, ".claude-plugin"), { recursive: true });
+    const body = typeof marketplace === "string" ? marketplace : JSON.stringify(marketplace, null, 2);
+    writeFileSync(join(dir, ".claude-plugin", "marketplace.json"), body, "utf-8");
+  }
+  return dir;
+}
+
+/** `rm -rf` a temp tree. Idempotent and never throws — safe in an `afterAll` that may run twice. */
+export function removeTempTree(dir: string): void {
+  rmSync(dir, { recursive: true, force: true });
 }
 
 /**
