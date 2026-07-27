@@ -82,6 +82,8 @@ function put(path: string, content: string): void {
 /** Everything an assertion needs to see about what a run DID. */
 interface Spy {
   exec: { cmd: string; args: string[] }[];
+  /** Every `deps.git` argv the run issued (2.4) — the instrument for "which git calls did 2.3 cause?". */
+  git: string[][];
   cpDir: { src: string; dest: string }[];
   atomicWrite: { path: string; content: string }[];
   ensureDir: string[];
@@ -126,6 +128,7 @@ interface HarnessOpts {
 function harness(opts: HarnessOpts = {}): Harness {
   const spy: Spy = {
     exec: [],
+    git: [],
     cpDir: [],
     atomicWrite: [],
     ensureDir: [],
@@ -181,8 +184,17 @@ function harness(opts: HarnessOpts = {}): Harness {
       const r = (key ? execTable[key] : execTable["*"]) ?? { code: 0 };
       return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", code: r.code };
     },
-    git: () => {
-      throw new Error("git in 2.3: the git spine is Story 2.4 and must not be reached here");
+    // AMENDED BY 2.4, which lands the real git spine on the apply path — "this harness never reaches
+    // git" stopped being true, and pretending otherwise would have meant fencing 2.4 out of the very
+    // pipeline it fills. RECORD-AND-FAIL-SOFT is the honest replacement: it returns `""` for every
+    // call, which is EXACTLY what `src/git` returns against this suite's repo roots (plain temp dirs,
+    // never `git init`-ed). So 2.3's outcomes stay at their zero values for the real reason rather than
+    // by construction, and `spy.git` still lets a test assert precisely which argv the spine issued.
+    // Deliberately NOT the real `git`: a unit suite must never run a `git` write, and `git-safety.test.ts`
+    // owns the real-git behavior against disposable scratch repos.
+    git: (_repo, args) => {
+      spy.git.push(args);
+      return "";
     },
     fs: {
       readIfExists: (p) => {
@@ -776,17 +788,53 @@ describe("AC7 — installer failures are per-repo, verbatim, and never silent (F
 // ── AC8 — verify and git are DELEGATED ────────────────────────────────────────────────────────────
 
 describe("AC8 — 2.3 delegates verify (2.6) and the git spine (2.4); it implements neither", () => {
-  test("a successful --apply leaves every git outcome at its zero value and touches no git", async () => {
-    // `deps.git` throws by construction in this harness — reaching the assertion proves it was never
-    // called. A `git add`/commit/push inlined here (or a whole-repo checksum verify) turns this red.
+  // REWRITTEN BY 2.4. The git spine is no longer delegated-away — it runs here now, and this suite's
+  // job became proving that 2.3 still IMPLEMENTS none of it: every git call the run makes must come
+  // from `git-safety.ts`'s vocabulary, and 2.3's own filters (backup, installer) must add nothing.
+  test("the git spine runs through git-safety's argv only — 2.3 inlines no git of its own", async () => {
     const h = harness();
     seedSurfaces(h.repos.alpha);
-    expect(await runBmadInstall(["--repos", "alpha", "--apply", "--push", "--json"], h.deps)).toBe(0);
+    // No `--push` here: a push against a non-repo cannot advance an upstream, and `pushGate` correctly
+    // fails the repo for it — which the next test owns. This one is the clean-run shape.
+    expect(await runBmadInstall(["--repos", "alpha", "--apply", "--json"], h.deps)).toBe(0);
+
+    // Every argv, in the order issued — the whole git surface of an install run.
+    const subs = h.spy.git.map((a) => a[0]);
+    expect(subs.length).toBeGreaterThan(0);
+    for (const s of subs) {
+      expect(["rev-parse", "rev-list", "add", "status", "diff"]).toContain(s);
+    }
+    expect(subs).not.toContain("push"); // no `--push` ⇒ no push, ever (BM-6)
+    // THE NEVER-`-A` INVARIANT, asserted here too — this is the only suite that exercises the spine
+    // through the full `runBmadInstall` entry point, so a `git add -A` introduced anywhere above the
+    // pipeline would show up here and nowhere else.
+    for (const a of h.spy.git.filter((a) => a[0] === "add")) {
+      expect(a).not.toContain("-A");
+      expect(a).not.toContain(".");
+      expect(a).toContain("--");
+    }
 
     const row = rowsOf(h.spy)[0]!;
+    // Still the zero values — but now for the REAL reason: the fail-soft git returns `""` for every
+    // call against these non-repo temp dirs, so nothing staged, nothing committed, nothing pushed.
     expect(row.stagedPaths).toEqual([]);
     expect(row.committed).toBe(false);
     expect(row.pushed).toBe(false);
+    expect(row.planned.wouldPush).toBe(false);
+  });
+
+  // THE FAIL-SOFT PUSH IS THE POINT. `deps.git` here returns `""` for `push` exactly as `src/git` does
+  // for a push that git rejected — and the run must NOT report success. That it exits 1 through 2.3's
+  // own command entry point is the FR-15 contract working end-to-end, not just inside 2.4's unit tests.
+  test("a --push that could not advance the upstream FAILS the repo (FR-15, through the command)", async () => {
+    const h = harness();
+    seedSurfaces(h.repos.alpha);
+    expect(await runBmadInstall(["--repos", "alpha", "--apply", "--push", "--json"], h.deps)).toBe(1);
+
+    const row = rowsOf(h.spy)[0]!;
+    expect(row.status).toBe("failed");
+    expect(row.pushed).toBe(false);
+    expect(row.reason).toContain("push failed");
     expect(row.planned.wouldPush).toBe(true); // the INTENT is still reported (BM-14)
   });
 });

@@ -6,8 +6,8 @@
 //   1. `--push` is never implied by `--apply` (the flag-separation matrix).
 //   2. A dry run and its `--apply` twin report the IDENTICAL plan, and the plan is built exactly ONCE
 //      per repo (the Epic-5 `--brain` defect class).
-//   3. Neither mode touches a mutating dep — proven by injecting a `BmadDeps` whose `exec`/`git`/write
-//      members THROW, then running both modes and asserting neither throws.
+//   3. A dry run touches no mutating dep — proven by injecting a `BmadDeps` whose `exec`/write members
+//      THROW and whose `git` throws on every WRITE subcommand, then running and asserting it does not.
 //
 // HOW "buildPlan ran exactly once" IS OBSERVED. `runRepoPipeline` calls the module-local `buildPlan`
 // directly, so an ESM spy on the export would never see that call — it would pass while a recompute
@@ -28,6 +28,12 @@
 //   - The `--apply` half of the zero-IO assertions MOVED to `install.test.ts`. It is no longer true that
 //     `--apply` does nothing — that was 2.2's scaffold state, not a contract. What IS the permanent
 //     contract, and stays here, is that a DRY RUN (with or without `--push`) touches no mutating dep.
+//
+// AMENDED BY STORY 2.4 (the live git posture read). `fakeDeps.git` no longer throws unconditionally: it
+// throws on every WRITE subcommand and returns `""` for reads. That is a NARROWING of the fake, not a
+// weakening of the contract — 2.4/AC7 requires the posture read (`rev-parse`/`rev-list`) to run in BOTH
+// modes precisely because it mutates nothing, and "a dry run issues no `add`/`commit`/`push`" is the
+// invariant that was always meant. The provisional-posture test below became the live-read test.
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -36,7 +42,7 @@ import { join } from "node:path";
 
 import { HELP, runMain } from "../cli/main";
 import { batchExit, runBatch } from "./batch";
-import { makeEstateModule, removeTempTree } from "./bmad.test-helpers";
+import { makeEstateModule, readOnlyGit, removeTempTree } from "./bmad.test-helpers";
 import { BMAD_USAGE, runBmad } from "./cli";
 import { defaultBmadDeps, type BmadDeps, type InstallLeg, type RepoResult } from "./deps";
 import type { BmadRepo } from "./manifest";
@@ -103,7 +109,12 @@ function fakeDeps(overrides: Partial<BmadDeps> = {}): { deps: BmadDeps; counts: 
   };
   const deps: BmadDeps = {
     exec: boom("exec") as unknown as BmadDeps["exec"],
-    git: boom("git") as unknown as BmadDeps["git"],
+    // READS PERMITTED, WRITES FATAL (narrowed by 2.4, and deliberately narrowed rather than dropped).
+    // 2.4's live posture read (`rev-parse`/`rev-list`) runs in BOTH modes because it mutates nothing —
+    // a dry run that reported a stale branch would be previewing the wrong repo state. The FR-5
+    // guarantee is that a dry run performs no git WRITE, and that is now what this pins by name.
+    // The `""` return matches `src/git`'s fail-soft behavior for ALPHA's non-existent path.
+    git: readOnlyGit("dry run"),
     fs: {
       // The real reader — loading a fixture manifest is a READ, and reads are not mutations.
       readIfExists: (p: string) => {
@@ -296,14 +307,19 @@ describe("intent vs outcome (AC3/AC5 — BM-14)", () => {
     expect(r.backupPath).toBeUndefined(); // nothing was backed up; only the INTENT has a path
   });
 
-  test("branch/ahead are read provisionally off the Manifest entry (live read is 2.4)", async () => {
+  // REWRITTEN BY 2.4 (this test's own name previously said "live read is 2.4"). ALPHA's path does not
+  // exist, so the read-only git fake returns `""` for every read exactly as `src/git` would — which is
+  // what makes this the fallback case rather than the happy one. The point being pinned is that neither
+  // value comes from the Manifest any more: ALPHA declares `branch = "main"` and `hasUpstream = true`,
+  // and BOTH are ignored in favor of the (here failing, hence fallback) live read. `git-safety.test.ts`
+  // owns the happy path against real scratch repos.
+  test("branch/ahead come from the LIVE read, not the Manifest entry (2.4/AC7)", async () => {
     const { deps, counts } = fakeDeps();
-    const leg = countingLeg(counts);
-    expect((await runRepoPipeline(ALPHA, leg, parseBmadOpts([]), deps)).ahead).toBe(0);
-    const noUpstream: BmadRepo = { ...ALPHA, hasUpstream: false, branch: undefined };
-    const r = await runRepoPipeline(noUpstream, leg, parseBmadOpts([]), deps);
-    expect(r.ahead).toBe("no-upstream");
-    expect(r.branch).toBe("(unknown)");
+    const r = await runRepoPipeline(ALPHA, countingLeg(counts), parseBmadOpts([]), deps);
+    expect(ALPHA.branch).toBe("main"); // what the Manifest says …
+    expect(r.branch).toBe("(unknown)"); // … and what the live read says wins
+    expect(ALPHA.hasUpstream).toBe(true);
+    expect(r.ahead).toBe("no-upstream"); // an unresolvable `@{u}` is never reported as `0 ahead`
   });
 });
 
@@ -314,10 +330,27 @@ describe("zero side effects in DRY RUN (AC4 — NFR-1)", () => {
   test("a dry run touches no mutating dep, with or without --push", async () => {
     const { deps, counts } = fakeDeps();
     const leg = countingLeg(counts);
-    // `deps.exec`/`deps.git`/`deps.fs.atomicWrite`/`ensureDir`/`cpDir` all throw by construction.
-    // Reaching the assertion at all is the proof: any mutating member fired would have rejected.
+    // `deps.exec`/`deps.fs.atomicWrite`/`ensureDir`/`cpDir` throw by construction, and `deps.git` throws
+    // on every write subcommand (`add`/`commit`/`push`/…). Reaching the assertion at all is the proof:
+    // any mutating member fired would have rejected. `--push` is included because an implied push is
+    // the one mutation that would reach someone else's remote.
     expect(await runRepoPipeline(ALPHA, leg, parseBmadOpts([]), deps)).toBeDefined();
     expect(await runRepoPipeline(ALPHA, leg, parseBmadOpts(["--push"]), deps)).toBeDefined();
+  });
+
+  // The complement of the above, and the sharper form: the fake RECORDS every git call a dry run makes,
+  // so this asserts the positive (only reads were issued) rather than merely "nothing threw".
+  test("a dry run issues git READS only — never add/commit/push (2.4/AC7)", async () => {
+    const calls: string[][] = [];
+    const { deps, counts } = fakeDeps({
+      git: readOnlyGit("dry run", (_repo, args) => {
+        calls.push(args);
+        return "";
+      }),
+    });
+    await runRepoPipeline(ALPHA, countingLeg(counts), parseBmadOpts(["--push"]), deps);
+    expect(calls.length).toBeGreaterThan(0); // the posture read DID happen
+    for (const args of calls) expect(["rev-parse", "rev-list"]).toContain(args[0]);
   });
 
   test("a full `install` run shells nothing without --apply (even with --push)", async () => {
