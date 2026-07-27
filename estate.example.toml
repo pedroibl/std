@@ -1,0 +1,72 @@
+# estate.example.toml — the FORMAT of the BMAD estate Manifest read by `src/bmad/manifest.ts`.
+#
+# This file is documentation only. It is never loaded. The real Manifest is CALLER-LOCAL and lives
+# OUTSIDE this repo, at:
+#
+#     $XDG_CONFIG_HOME/std/estate.toml      (default: ~/.config/std/estate.toml)
+#
+# resolved by `resolveManifestPath()` — the single canonical path both `bmad-manager` and (once it
+# gains batch mode) `bmad-lifeos-sync` must read. That path mirrors how std already resolves
+# `~/.config/std/repos.ts`.
+#
+# WHY caller-local: the repo list is machine-owner identity. Committing it into published
+# `@pedroibl/std` would bake a consumer's filesystem into a shared library — the D4/NFR3 violation the
+# `check:no-consumer-ids` gate exists to catch. `src/bmad/manifest.ts` therefore exports the TYPE and
+# the LOADER and never the data. Every path below is a generic placeholder, not anyone's real tree.
+#
+# The Manifest is DATA, never logic (D3/AD-1): no function values, no computation. The loader is the
+# only code, and it fails loud — a missing file, unparseable TOML, a file with no [[repos]] array, or
+# an entry missing a required field all raise a `ManifestError` that NAMES the offender.
+
+# --- Field contract -------------------------------------------------------------------------------
+#
+# REQUIRED (loader throws if absent):
+#   path           string   Filesystem path to the repo. May be "~/…" — expansion is the consumer's job.
+#   claudeTracked  boolean  Is `.claude` tracked by git in this repo? false ⇒ it is gitignored ⇒ the
+#                           repo is working-copy-only and the commit loop SKIPS it (a non-failing
+#                           "skipped-gitignored" status, not an error).
+#   hasUpstream    boolean  Does the current branch have an upstream? false ⇒ report no-upstream;
+#                           `--push` uses `git push -u`.
+#
+#   `claudeTracked` and `hasUpstream` are deliberately NOT defaulted. Guessing them is unsafe: a wrong
+#   default could stage a gitignored tree or push to the wrong remote. State them explicitly.
+#
+# OPTIONAL:
+#   tools    string[]  Defaults to ["claude-code", "antigravity-cli"] when omitted.
+#   role     string    "target" (default when absent) or "source-only". A source-only repo is EXCLUDED
+#                      from the default repo set and from the commit loop — useful for a pack that is
+#                      the SOURCE of what gets installed, especially one nested inside another repo.
+#                      It can still be named explicitly via `--repos <name>`.
+#   branch   string    Informational only. Git safety reads the LIVE branch, never this field.
+#   name     string    Explicit `--repos` match key. Without it the key is basename(path) — set this
+#                      when the basename is ambiguous (e.g. a nested "packs/<something>" directory).
+#                      Must be non-empty, and every entry's resolved key must be UNIQUE across the
+#                      file: two entries sharing one key would both answer to a single `--repos <key>`.
+#                      Both faults are rejected at load with the offending name.
+#   notes    string    Free text.
+
+[[repos]]
+path = "~/Dev/example-repo"
+claudeTracked = true
+hasUpstream = true
+# tools omitted ⇒ defaults to ["claude-code", "antigravity-cli"]
+
+[[repos]]
+path = "~/Dev/example-workspace/another-repo"
+claudeTracked = true
+hasUpstream = false          # no upstream on this branch → --push would need `git push -u`
+branch = "feature/some-work" # informational only
+tools = ["claude-code"]      # opt out of the second tool for this one repo
+
+[[repos]]
+path = "~/Dev/example-workspace/gitignored-repo"
+claudeTracked = false        # .claude is gitignored here → working-copy-only, commit skipped
+hasUpstream = true
+notes = "working-copy-only; --force-track is a manual per-invocation choice, never routine"
+
+[[repos]]
+path = "~/example-hq/packs/example-pack"
+name = "example-pack"        # basename is fine here, but an explicit name documents the match key
+role = "source-only"         # nested under its parent repo → excluded from the default set AND the commit loop
+claudeTracked = false        # still REQUIRED even though a source-only repo never reaches the commit loop
+hasUpstream = false
