@@ -1,43 +1,87 @@
-// `std bmad install` — the install command (Story 2.2 lands the SCAFFOLD; Story 2.3 fills the body).
+// `std bmad install` — the install command (Story 2.2 landed the SCAFFOLD; Story 2.3 fills the body).
 //
-// WHAT 2.2 LANDS: the command's shape — parse flags, resolve the repo set, author the install LEG,
-// run the batch, render, exit. Everything the family shares is already wired, so 2.3's whole job is
-// inside `INSTALL_LEG.buildArgv` and the pipeline's filter bodies. Nothing else in this file moves.
-//
-// WHY THE FILE EXISTS A STORY EARLY (the shared-file hazard): if 2.3 had to CREATE and REGISTER this
-// command, it would re-touch `src/cli/main.ts` and the `runBmad` router — files 2.5/2.6/2.7 also touch.
-// Landing the scaffold now means each later story EXTENDS ITS OWN FILE and re-registers nothing.
+// WHAT 2.3 ADDS: the whole-run module guard (FR-6), the ONE staging-path computation the run threads
+// everywhere (BM-12), the `--apply`-only materialization of the filtered custom-source, and the final
+// FR-8 install rule. The command's SHAPE — parse, select, batch, render, exit — is 2.2's and is
+// unchanged; nothing here re-registers a command (`cli.ts` already routes `install`).
 //
 // BM-15: the leg is built HERE and passed DOWN. The pipeline never authors a `bmad` argv, so the install
 // rule and the update rule cannot leak into each other.
+//
+// THE ORDER IN `runBmadInstall` IS THE SAFETY CONTRACT, not a style choice — see its doc comment.
+//
+// D4 identity-free: no binary path, no repo path, no state-home literal. `bmadBin`, `estateModulePath`
+// and `backupRoot` all arrive resolved on `deps`; the only literals are `bmad install`'s own flag names.
 
 import { hasFlag } from "../core/index";
 import { batchExit, renderBatch, runBatch } from "./batch";
 import type { BmadDeps, InstallLeg } from "./deps";
-import { loadManifest, selectRepos } from "./manifest";
+import { materializeStaging, moduleGuard, stagingPathFor } from "./estate-source";
+import { DEFAULT_TOOLS, loadManifest, selectRepos } from "./manifest";
 import { parseBmadOpts } from "./opts";
 
 /**
- * The install rule (BM-15). **PROVISIONAL in 2.2 — finalized in Story 2.3**, which replaces the body
- * with the materialized filtered custom-source (BM-12) and the real `--set` plumbing. It is authored as
- * a real leg rather than a stub so the argv genuinely flows repo → plan → render today.
+ * The FR-8 install rule (BM-15), closing over the run's single staging directory.
+ *
+ * THE ARGV IS FROZEN, and its first six-and-a-half tokens are byte-identical to the Epic-0 proof that
+ * demonstrated a real dual-surface install (`dual-surface-proof.test.ts`):
+ *
+ *     bmad install --directory <repo> --modules core --custom-source <staging> --tools <a,b> --yes
+ *
+ * `--custom-source` is the CLOSED-OVER `stagingDir`, never a `ctx` field. `stagingPathFor` embeds
+ * `deps.clock()`, so re-deriving it in here would, under the production clock, point the installer at a
+ * directory `materializeStaging` never wrote — while every fixed-clock test still passed. Taking it as a
+ * parameter makes the single computation structural.
+ *
+ * `ctx.deps` is deliberately NOT read: this rule needs no resolved path beyond the one it closed over,
+ * and `buildArgv` runs before the `--apply` gate.
+ *
+ * `--set` is appended AFTER the frozen tokens, and only when the operator passed one. 2.2 parses
+ * `--set m.k=v` and documents it as "passed through to bmad"; dropping it here would leave a parsed,
+ * documented flag silently ignored, which is worse than not offering it. With no `--set` the argv is
+ * exactly the frozen string.
  */
-const INSTALL_LEG: InstallLeg = {
-  kind: "install",
-  buildArgv: (ctx) => [
-    "install",
-    "--directory",
-    ctx.repo.path,
-    ...ctx.opts.set.flatMap((s) => ["--set", `${s.module}.${s.key}=${s.value}`]),
-  ],
-};
+export function installLeg(stagingDir: string): InstallLeg {
+  return {
+    kind: "install",
+    buildArgv: (ctx) => [
+      "install",
+      "--directory",
+      ctx.repo.path,
+      "--modules",
+      "core",
+      "--custom-source",
+      stagingDir,
+      // `--tools` is the RUN-level override; absent, it falls back to 2.1's `DEFAULT_TOOLS` (FR-4).
+      // Imported, never re-declared: a second copy of the pair is exactly the AD-2 divergence where the
+      // installer ships one toolset while the Manifest loader defaults to another.
+      "--tools",
+      (ctx.opts.tools ?? DEFAULT_TOOLS).join(","),
+      "--yes",
+      ...ctx.opts.set.flatMap((s) => ["--set", `${s.module}.${s.key}=${s.value}`]),
+    ],
+  };
+}
 
 /**
- * Run `std bmad install [flags]`. Dry-run by default; `--apply` gates every effect (none exists yet in
- * 2.2), and `--push` is separate. Returns the family exit code: 0 ok/skip, 1 any repo failed.
+ * Run `std bmad install [flags]`. Dry-run by default; `--apply` gates every effect, and `--push` is
+ * separate. Returns the family exit code: 0 ok/skip, 1 any repo failed.
  *
- * A Manifest fault (missing file, bad entry, unknown `--repos` name, malformed `--set`) throws
- * `ManifestError` out of here; the `runBmad` router catches it and maps it to exit 1 in one place.
+ * THE STEP ORDER IS THE CONTRACT (FR-6/BM-4/BM-12):
+ *
+ *   1. parse + select        — a bad flag or unknown repo fails loud before anything else happens.
+ *   2. moduleGuard           — BOTH modes. Read-only, repo-invariant, and ABOVE the batch: a half-family
+ *                              estate must abort before repo #1 is backed up, and a dry run must surface
+ *                              that half-family just as loudly while writing nothing.
+ *   3. stagingPathFor        — EXACTLY ONCE. See {@link installLeg}.
+ *   4. materializeStaging    — `--apply` only. The first write of the run.
+ *   5. runBatch              — sequential, fault-isolated (BM-16/FR-15).
+ *   6. render + exit         — composes 2.2's shared `renderBatch`/`batchExit`.
+ *
+ * A `ManifestError` (missing file, bad entry, unknown `--repos`, malformed `--set`) or a `BmadError`
+ * (incomplete estate module, illegal `--skills` value) propagates out of here; `runBmad` catches both
+ * and maps them to exit 1 in one place. Neither is flattened into a `RepoResult` — they are whole-run
+ * faults, and reporting them per-repo would imply the other repos were fine.
  *
  * `--json` is read straight off the argv rather than becoming a `BmadOpts` field: it is a RENDER choice,
  * not a run option, and nothing below the render layer should be able to branch on it.
@@ -47,7 +91,15 @@ export async function runBmadInstall(argv: string[], deps: BmadDeps): Promise<nu
   // The read goes through the seam (`deps.fs`), so a test injects a fake manifest without touching
   // the machine owner's real `~/.config/std/estate.toml` (BM-7).
   const repos = selectRepos(loadManifest({ manifestPath: deps.manifestPath, fs: deps.fs }), opts);
-  const results = runBatch(repos, INSTALL_LEG, opts, deps);
+
+  // FR-6, whole-run precondition. Returns the RESOLVED estate directory names — resolving the operator's
+  // `--skills` tokens once, here, is what keeps the guard and the staging descriptor naming one set.
+  const skills = moduleGuard(deps, opts.skills);
+
+  const stagingDir = stagingPathFor(deps);
+  if (opts.apply) materializeStaging(deps, skills, stagingDir);
+
+  const results = await runBatch(repos, installLeg(stagingDir), opts, deps);
   renderBatch("install", results, opts, deps, hasFlag(argv, "json"));
   return batchExit(results);
 }

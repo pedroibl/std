@@ -25,19 +25,24 @@ import { runRepoPipeline } from "./pipeline";
  *
  * A throw from one repo is caught and recorded as that repo's `failed` row (with the message as
  * `reason`) rather than propagating — that is the FR-15 isolation contract. A fault the batch cannot
- * attribute to a repo (a malformed Manifest, a bad `--set` token) is NOT caught here: it is raised
- * before the batch starts and the router maps it to exit 1.
+ * attribute to a repo (a malformed Manifest, a bad `--set` token, an incomplete estate module) is NOT
+ * caught here: it is raised before the batch starts and the router maps it to exit 1.
+ *
+ * ASYNC SINCE 2.3 (the C4 cascade): `runRepoPipeline` shells the installer, so it returns a promise and
+ * this loop awaits it. The `for…of` + `await` shape is deliberate and load-bearing — `Promise.all` would
+ * interleave N repos' git and installer output at exactly the moment a human needs to read it, and would
+ * make two runs of the same Manifest report in different orders. BM-16 is sequential, always.
  */
-export function runBatch(
+export async function runBatch(
   repos: BmadRepo[],
   leg: InstallLeg,
   opts: BmadOpts,
   deps: BmadDeps,
-): RepoResult[] {
+): Promise<RepoResult[]> {
   const results: RepoResult[] = [];
   for (const repo of repos) {
     try {
-      results.push(runRepoPipeline(repo, leg, opts, deps));
+      results.push(await runRepoPipeline(repo, leg, opts, deps));
     } catch (err) {
       results.push(failedResult(repo, opts, err));
     }
@@ -125,6 +130,10 @@ export function renderBatch(
     p(`- would stage: ${r.planned.wouldStage.length > 0 ? r.planned.wouldStage.join(", ") : "(none)"}`);
     p(`- would commit: ${r.planned.wouldCommit ? "yes" : "no"}`);
     p(`- would push: ${r.planned.wouldPush ? "yes" : "no"}`);
+    // The one OUTCOME line, printed only when a backup was actually written (2.3/FR-7). Kept visually
+    // distinct from the `would back up to:` intent above it: an operator reversing an install needs to
+    // know which of the two is a real path on disk, and conflating them is how a restore targets nothing.
+    if (r.backupPath !== undefined) p(`- backed up to: ${r.backupPath}`);
     if (r.reason !== undefined) p(`- reason: ${r.reason}`);
     p();
   }

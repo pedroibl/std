@@ -19,7 +19,7 @@
 // as its own module (BM-10); it belongs in the map below and nowhere else.
 
 import { dispatchAsync } from "../core/index";
-import { defaultBmadDeps, type BmadDeps } from "./deps";
+import { BmadError, defaultBmadDeps, type BmadDeps } from "./deps";
 import { runBmadDeploy } from "./deploy";
 import { runBmadInstall } from "./install";
 import { ManifestError } from "./manifest";
@@ -66,10 +66,15 @@ The estate Manifest is caller-local: $XDG_CONFIG_HOME/std/estate.toml (see estat
  * Unknown or missing subcommand ⇒ usage on stderr, exit **2** — never 0 (which would report success for
  * a command that did nothing) and never 1 (which would read as a real fault).
  *
- * `ManifestError` is caught HERE, once, rather than in each command: it is the family's one fail-loud
- * class (a missing/malformed estate file, an unknown `--repos` name, a bad `--set` token), and every
- * subcommand raises it from the same load-and-select step. Anything else re-throws — an unexpected fault
- * must surface, never be flattened into an exit code.
+ * `ManifestError` and `BmadError` are caught HERE, once, rather than in each command. They are the
+ * family's two fail-loud classes and they are deliberately separate: `ManifestError` means the CALLER's
+ * estate.toml or selectors are wrong (missing/malformed file, unknown `--repos`, bad `--set`), while
+ * `BmadError` (2.3) means a WHOLE-RUN precondition failed — the shipped estate module is incomplete, or
+ * `--skills` named something illegal. Both exit 1; both are raised before any repo is touched, which is
+ * the only altitude at which aborting the entire run is the right answer. A per-repo fault never travels
+ * this way — it becomes that repo's `status:'failed'` row and the batch continues (FR-15).
+ *
+ * Anything else re-throws — an unexpected fault must surface, never be flattened into an exit code.
  */
 export async function runBmad(argv: string[], deps: BmadDeps = defaultBmadDeps()): Promise<number> {
   const [sub, ...rest] = argv;
@@ -92,7 +97,7 @@ export async function runBmad(argv: string[], deps: BmadDeps = defaultBmadDeps()
       onUnknown,
     );
   } catch (err) {
-    if (err instanceof ManifestError) {
+    if (err instanceof ManifestError || err instanceof BmadError) {
       deps.report.log(`✗ ${err.message}`);
       return 1;
     }

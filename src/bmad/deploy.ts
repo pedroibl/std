@@ -36,8 +36,22 @@ const DEPLOY_LEG: InstallLeg = {
  */
 export async function runBmadDeploy(argv: string[], deps: BmadDeps): Promise<number> {
   const opts = parseBmadOpts(argv);
+
+  // PROVISIONAL-LEG FENCE — remove in Story 2.7, which authors the real deploy leg.
+  // Same cause as the `update` fence: 2.3 gave the shared pipeline a real mutation path, so
+  // `deploy --apply` would run 2.2's placeholder rule (`bmad install --directory <repo>`, with NO
+  // `--custom-source`) across the whole estate. Deploy is the highest-blast-radius command in this
+  // family, so it is the last one that should acquire a real apply path by side effect.
+  if (opts.apply) {
+    deps.report.log(
+      "std bmad deploy: --apply is not available yet — the deploy leg is provisional (Story 2.7).\n" +
+        "Run without --apply to see the plan.",
+    );
+    return 2;
+  }
+
   const repos = selectRepos(loadManifest({ manifestPath: deps.manifestPath, fs: deps.fs }), opts);
-  const results = runBatch(repos, DEPLOY_LEG, opts, deps);
+  const results = await runBatch(repos, DEPLOY_LEG, opts, deps);
   renderBatch("deploy", results, opts, deps, hasFlag(argv, "json"));
   return batchExit(results);
 }
