@@ -9,6 +9,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { runBmad } from "../bmad/cli";
 import { type CnDeployDeps, runCnDeploy } from "./cn-deploy";
 import { runCnVerify } from "./cn-verify";
 import { runDashkitDeploy } from "./dashkit-deploy";
@@ -47,6 +48,7 @@ commands:
   cn verify         check a vault against cn's declared plugin envelope (AD-6)
   dashkit deploy    bundle src/dashkit -> <vault>/Scripts/dashkit.js (one-way; the vault is build output only)
   dashkit verify    check a vault against dashkit's declared plugin envelope (AD-6)
+  bmad install|update|deploy   dry-run by default; --apply to mutate, --push to push
 
 cn deploy options:
   --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)
@@ -116,6 +118,14 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     });
   }
 
+  if (cmd === "bmad") {
+    // The `bmad-manager` family (BM-1). Registered HERE, beside cn/dashkit — deliberately NOT in
+    // `dispatch.ts`, which is the generic engine for shelling a CONSUMER's Step[] and is off-limits to
+    // std's own command logic. `runBmad` owns its own subcommand routing and defaults `deps` to
+    // `defaultBmadDeps()`, so `MainDeps` needs no new field (a `MainDeps` is not a `BmadDeps`).
+    return await runBmad(rest);
+  }
+
   if (cmd === "alias") {
     if (!rest.includes("--install")) {
       log("usage: std alias --install   # regenerate repo-nav + _std from ~/.config/std/repos.ts");
@@ -155,7 +165,7 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     }
   }
 
-  console.error(`std: unknown command '${cmd ?? ""}'. Known: alias, cn, dashkit`);
+  console.error(`std: unknown command '${cmd ?? ""}'. Known: alias, cn, dashkit, bmad`);
   return 2;
 }
 
