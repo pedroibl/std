@@ -133,7 +133,10 @@ export function scopedStage(repo: BmadRepo, opts: BmadOpts, deps: BmadDeps): str
   const argv = ["add", ...(opts.forceTrack ? ["-f"] : []), "--", ...present];
   deps.git(repo.path, argv);
 
-  const out = deps.git(repo.path, ["diff", "--cached", "--name-only"]);
+  // The read-back is SCOPED too. An unscoped `diff --cached` reports the whole index, which includes
+  // anything the principal had already staged before this run — so the ledger would claim bmad staged
+  // files it never touched. Scoping the read keeps `stagedPaths` an honest record of THIS run's work.
+  const out = deps.git(repo.path, ["diff", "--cached", "--name-only", "--", ...present]);
   return out === "" ? [] : out.split("\n").filter(Boolean);
 }
 
@@ -194,11 +197,23 @@ export function stagingFailed(repo: BmadRepo, deps: BmadDeps): boolean {
  * worktree sweep in {@link stagingFailed} — not the empty-diff read.
  */
 export function commitIfStaged(repo: BmadRepo, deps: BmadDeps): { committed: boolean; reason?: string } {
-  const staged = deps.git(repo.path, ["diff", "--cached", "--name-only"]);
+  // BOTH the guard and the commit are SCOPED to the same pathspecs staging used. A bare
+  // `git commit -m` commits the ENTIRE INDEX — so anything the principal had already staged before
+  // this run (interrupted work, a half-made commit) would be swept into the estate sync commit and,
+  // under `--push`, sent to their remote under a message they did not write. Scoping the staging while
+  // leaving the commit global is the same defect as `git add -A`, arriving one step later.
+  //
+  // Verified empirically, not assumed: with unrelated work pre-staged, `git commit -m MSG -- <paths>`
+  // commits ONLY the pathspec'd files and leaves that work still staged and uncommitted, exactly as
+  // the principal left it.
+  const present = presentScopedPaths(repo.path, deps);
+  if (present.length === 0) return { committed: false, reason: "nothing to commit" };
+
+  const staged = deps.git(repo.path, ["diff", "--cached", "--name-only", "--", ...present]);
   if (staged === "") return { committed: false, reason: "nothing to commit" };
 
   const before = deps.git(repo.path, ["rev-parse", "HEAD"]);
-  deps.git(repo.path, ["commit", "-m", COMMIT_MSG]);
+  deps.git(repo.path, ["commit", "-m", COMMIT_MSG, "--", ...present]);
   const after = deps.git(repo.path, ["rev-parse", "HEAD"]);
 
   if (after !== "" && after !== before) return { committed: true };

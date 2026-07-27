@@ -346,6 +346,61 @@ describe("AC1 — staging is scoped, and `git add -A`/`git add .` exist nowhere 
 
 // ── AC2 — commit only on a non-empty index, exactly one, on the live branch ───────────────────────
 
+describe("AC2 — the commit is SCOPED, not the whole index", () => {
+  // Found by the PR bot after the cross-vendor review passed this file clean. `scopedStage` was
+  // scoped but `commitIfStaged` was not: it read `diff --cached` and ran a bare `commit -m`, both of
+  // which take the ENTIRE INDEX. So work the principal had already staged before the run — interrupted
+  // edits, a half-made commit — would be swept into the estate sync commit and, under `--push`, sent to
+  // their remote under a message they did not write. Scoping the add while leaving the commit global is
+  // the same defect as `git add -A`, arriving one step later. No fixture had ever pre-staged anything.
+  test("work already staged before the run is NEITHER committed NOR claimed in stagedPaths", async () => {
+    const f = await makePosture("alpha");
+    try {
+      const { deps } = spyDeps();
+
+      // the principal's own in-flight work, staged and left there
+      put(join(f.dir, "unrelated.txt"), "USER WORK IN PROGRESS\n");
+      g(f.dir, "add", "--", "unrelated.txt");
+      const headBefore = g(f.dir, "rev-parse", "HEAD");
+
+      const staged = scopedStage(f.repo, parseBmadOpts([]), deps);
+      expect(staged).not.toContain("unrelated.txt"); // the ledger must not claim it
+      expect(staged.length).toBeGreaterThan(0); // …while still reporting the real scoped work
+
+      expect(commitIfStaged(f.repo, deps)).toEqual({ committed: true });
+
+      // the commit contains only scoped paths
+      const inCommit = g(f.dir, "show", "--name-only", "--format=", "HEAD").split("\n").filter(Boolean);
+      expect(inCommit).not.toContain("unrelated.txt");
+      expect(inCommit.length).toBeGreaterThan(0);
+
+      // and the principal's work is exactly where they left it: still staged, still uncommitted,
+      // and absent from the repo's history both before the run and after it
+      expect(stagedIn(f.dir)).toEqual(["unrelated.txt"]);
+      expect(headBefore).not.toBe(g(f.dir, "rev-parse", "HEAD")); // the scoped commit did land
+      expect(g(f.dir, "ls-tree", "-r", "--name-only", "HEAD")).not.toContain("unrelated.txt");
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  test("a repo whose ONLY staged work is the principal's reports `nothing to commit`, not a commit", async () => {
+    const f = await makePosture("alpha", { scoped: [] });
+    try {
+      const { deps } = spyDeps();
+      put(join(f.dir, "unrelated.txt"), "USER WORK\n");
+      g(f.dir, "add", "--", "unrelated.txt");
+      const before = commitCount(f.dir);
+
+      expect(commitIfStaged(f.repo, deps)).toEqual({ committed: false, reason: "nothing to commit" });
+      expect(commitCount(f.dir)).toBe(before);
+      expect(stagedIn(f.dir)).toEqual(["unrelated.txt"]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+});
+
 describe("AC2 — commit-if-staged: one commit, live branch, HEAD-verified (FR-12)", () => {
   test("a non-empty index ⇒ exactly ONE commit on the current branch", async () => {
     const f = await makePosture("alpha", { branch: FEATURE_BRANCH });
@@ -972,16 +1027,23 @@ describe("AC9 — inputs that violate the stated invariants (the class that bit 
     }
   });
 
-  test("a repo path beginning with a DASH is not re-read as a git flag", async () => {
+  // NAMED for what it can actually turn red on. The repo path is ABSOLUTE (`join(scratch, "-dashed…")`),
+  // so the dash never reaches git as a leading-dash argv element — it arrives inside a `-C <dir>` value.
+  // The original name claimed a leading-dash guard this input cannot exercise; the argv assertion below
+  // is what makes the block load-bearing rather than decorative.
+  test("a repo path SEGMENT beginning with a dash survives, and no argv element is flag-shaped", async () => {
     const f = await makePosture("alpha");
     try {
       const dashed = join(scratch, `-dashed-repo-${seq++}`);
       cpSync(f.dir, dashed, { recursive: true });
-      const { deps } = spyDeps();
+      const { deps, calls } = spyDeps();
       const repo: BmadRepo = { ...f.repo, path: dashed, name: "dashed" };
       const r = await runRepoPipeline(repo, LEG, parseBmadOpts(["--apply"]), deps);
       expect(r.status).toBe("ok");
       expect(r.committed).toBe(true);
+      // No git invocation may LEAD with a dashed token — that is the shape that would be re-read as a
+      // flag. Every argv here starts with its subcommand.
+      for (const argv of calls) expect(argv[0]?.startsWith("-")).toBe(false);
     } finally {
       await f.cleanup();
     }
