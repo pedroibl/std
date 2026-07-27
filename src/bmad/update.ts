@@ -35,6 +35,20 @@ const UPDATE_LEG: InstallLeg = {
  */
 export async function runBmadUpdate(argv: string[], deps: BmadDeps): Promise<number> {
   const opts = parseBmadOpts(argv);
+
+  // PROVISIONAL-LEG FENCE — remove in Story 2.5, which authors the real update leg.
+  // Story 2.3 made the shared pipeline actually shell the installer (BM-4: ONE per-repo filter chain),
+  // which silently promoted `update --apply` from a no-op into a REAL estate-wide mutation running
+  // 2.2's placeholder rule — no module guard, no materialized staging. `--apply` is fenced rather than
+  // the pipeline branched on `leg.kind`; dry-run stays fully useful and still prints the exact argv.
+  if (opts.apply) {
+    deps.report.log(
+      "std bmad update: --apply is not available yet — the update leg is provisional (Story 2.5).\n" +
+        "Run without --apply to see the plan.",
+    );
+    return 2;
+  }
+
   const repos = selectRepos(loadManifest({ manifestPath: deps.manifestPath, fs: deps.fs }), opts);
   const results = await runBatch(repos, UPDATE_LEG, opts, deps);
   renderBatch("update", results, opts, deps, hasFlag(argv, "json"));

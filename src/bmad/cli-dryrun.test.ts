@@ -450,6 +450,28 @@ describe("router + exit contract (AC1/AC7 — BM-1)", () => {
     expect((await argvOf("update"))[0]).toBe("update");
   });
 
+  // Story 2.3 gave the shared pipeline a real mutation path (BM-4: one per-repo filter chain), which
+  // silently promoted `update --apply`/`deploy --apply` from 2.2 no-ops into REAL estate-wide runs of
+  // their PROVISIONAL legs. Fenced at the command entry until 2.5/2.7 author the real ones. These tests
+  // are the fence's tripwire: delete them in the same commit that removes the fence, never before.
+  test("update/deploy refuse --apply while their legs are provisional (exit 2, nothing shelled)", async () => {
+    for (const sub of ["update", "deploy"]) {
+      const { deps, counts } = fakeDeps();
+      expect(await runBmad([sub, "--apply"], deps)).toBe(2);
+      expect(await runBmad([sub, "--apply", "--push"], deps)).toBe(2);
+      // the deliberately-exploding fake would have thrown had the pipeline been reached at all
+      expect(counts.json).toHaveLength(0);
+    }
+  });
+
+  test("the fence is on --apply only — update/deploy dry runs still plan normally", async () => {
+    for (const sub of ["update", "deploy"]) {
+      const { deps } = fakeDeps();
+      expect(await runBmad([sub], deps)).toBe(0);
+      expect(await runBmad([sub, "--push"], deps)).toBe(0);
+    }
+  });
+
   test("no subcommand ⇒ usage, exit 2", async () => {
     const { deps, counts } = fakeDeps();
     expect(await runBmad([], deps)).toBe(2);
