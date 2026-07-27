@@ -39,7 +39,19 @@ export function buildPlan(
   deps: BmadDeps,
 ): PlanProjection {
   return {
-    installArgv: leg.buildArgv({ repo, opts, deps }),
+    // The leg receives a NARROWED deps object, built here rather than passed through: handing it the
+    // whole seam and relying on `LegDeps` to hide the effect members would leave them reachable at
+    // runtime through one `as` cast. Constructing the slice makes the dry-run guarantee structural.
+    installArgv: leg.buildArgv({
+      repo,
+      opts,
+      deps: {
+        bmadBin: deps.bmadBin,
+        manifestPath: deps.manifestPath,
+        estateModulePath: deps.estateModulePath,
+        backupRoot: deps.backupRoot,
+      },
+    }),
     // BM-8. `deps.clock()` is injected precisely so this is deterministic under test — a live clock
     // would make two runs' backupPath differ and defeat the SM-3 equality the whole gate is judged by.
     backupPath: join(deps.backupRoot, repoName(repo), deps.clock()),

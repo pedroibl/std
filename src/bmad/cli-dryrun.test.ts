@@ -301,6 +301,32 @@ describe("zero side effects (AC4 — NFR-1)", () => {
       expect(await runBmad(argv, deps)).toBe(0);
     }
   });
+
+  // `buildPlan` calls `buildArgv` BEFORE the --apply gate, so an effect reachable through `ctx.deps`
+  // would run during a dry run. `LegDeps` makes that a compile error; this pins it at RUNTIME too, so
+  // a single `as BmadDeps` cast inside a future leg (2.3/2.5/2.7) cannot quietly restore the reach.
+  test("the leg's ctx.deps carries the resolved values and NONE of the effect surface", () => {
+    const { deps } = fakeDeps();
+    let seen: Record<string, unknown> | undefined;
+    const spyLeg: InstallLeg = {
+      kind: "install",
+      buildArgv: (ctx) => {
+        seen = ctx.deps as unknown as Record<string, unknown>;
+        return ["install"];
+      },
+    };
+    runRepoPipeline(ALPHA, spyLeg, parseBmadOpts(["--apply", "--push"]), deps);
+
+    expect(Object.keys(seen ?? {}).sort()).toEqual([
+      "backupRoot",
+      "bmadBin",
+      "estateModulePath",
+      "manifestPath",
+    ]);
+    for (const effect of ["exec", "git", "fs", "report", "clock"]) {
+      expect(seen).not.toHaveProperty(effect);
+    }
+  });
 });
 
 describe("batch (AC7 — BM-5/BM-16)", () => {

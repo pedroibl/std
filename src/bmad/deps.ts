@@ -88,8 +88,19 @@ export interface RepoResult {
 export interface LegCtx {
   repo: BmadRepo;
   opts: BmadOpts;
-  deps: BmadDeps;
+  /**
+   * The RESOLVED-VALUE members only — never the effect surface. `buildPlan` calls `buildArgv`
+   * unconditionally, BEFORE the `--apply` gate, so a leg that reached `exec`/`git`/`fs.atomicWrite`
+   * through this field would run IO during a dry run — the exact leak AC4 exists to prevent, and one
+   * no test would catch because the leg would look like it was only authoring argv. Narrowing the type
+   * makes that a compile error instead of a review question. If a later leg genuinely needs another
+   * member, widen {@link LegDeps} deliberately and say why — do not reach for the full seam.
+   */
+  deps: LegDeps;
 }
+
+/** The effect-free slice of {@link BmadDeps} a leg may read while authoring argv. */
+export type LegDeps = Pick<BmadDeps, "bmadBin" | "manifestPath" | "estateModulePath" | "backupRoot">;
 
 /**
  * The per-command "what does this run DO to a repo" strategy (BM-15). `install.ts`/`update.ts`/
