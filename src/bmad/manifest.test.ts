@@ -299,6 +299,51 @@ describe("AC6 — --repos restricts, preserves Manifest order, and errors on an 
   });
 });
 
+// Both cases below break AC6's "returns ONLY those entries, matched by repo name" contract SILENTLY —
+// no throw, no wrong type, just a match key that means something other than what it says. Found by the
+// PR's bot reviewer after the story's own gates and the cross-vendor review had both passed clean.
+describe("AC6 — the --repos match key cannot be ambiguous or blank", () => {
+  test("two entries resolving to the same name fail loud at load, naming the collision", () => {
+    const path = fixture(
+      `[[repos]]\npath = "/srv/estate/one/alpha"\nclaudeTracked = true\nhasUpstream = true\n` +
+        `[[repos]]\npath = "/srv/estate/two/alpha"\nclaudeTracked = true\nhasUpstream = true\n`,
+    );
+    expect(() => loadManifest({ manifestPath: path })).toThrow(ManifestError);
+    expect(() => loadManifest({ manifestPath: path })).toThrow('duplicate repo name "alpha"');
+  });
+
+  test("a collision between an explicit `name` and another entry's basename also fails loud", () => {
+    const path = fixture(
+      `[[repos]]\npath = "/srv/estate/one/alpha"\nclaudeTracked = true\nhasUpstream = true\n` +
+        `[[repos]]\npath = "/srv/estate/two/beta"\nname = "alpha"\nclaudeTracked = true\nhasUpstream = true\n`,
+    );
+    expect(() => loadManifest({ manifestPath: path })).toThrow('duplicate repo name "alpha"');
+  });
+
+  test("distinct names under different parents still load — the guard is on the KEY, not the path", () => {
+    const path = fixture(
+      `[[repos]]\npath = "/srv/estate/one/alpha"\nclaudeTracked = true\nhasUpstream = true\n` +
+        `[[repos]]\npath = "/srv/estate/two/alpha"\nname = "alpha-two"\nclaudeTracked = true\nhasUpstream = true\n`,
+    );
+    expect(loadManifest({ manifestPath: path }).map(repoName)).toEqual(["alpha", "alpha-two"]);
+  });
+
+  test('an empty `name` fails loud rather than blanking the match key (`"" ?? basename` never falls back)', () => {
+    const path = fixture(
+      `[[repos]]\npath = "/srv/estate/one/alpha"\nname = ""\nclaudeTracked = true\nhasUpstream = true\n`,
+    );
+    expect(() => loadManifest({ manifestPath: path })).toThrow(ManifestError);
+    expect(() => loadManifest({ manifestPath: path })).toThrow('field "name" must be a non-empty string');
+  });
+
+  test("a whitespace-only `name` is rejected on the same rule as `path`", () => {
+    const path = fixture(
+      `[[repos]]\npath = "/srv/estate/one/alpha"\nname = "   "\nclaudeTracked = true\nhasUpstream = true\n`,
+    );
+    expect(() => loadManifest({ manifestPath: path })).toThrow('field "name" must be a non-empty string');
+  });
+});
+
 describe("AC7 — parseSelectors yields structured data (and consumes none of it)", () => {
   test("--repos and --tools comma-split", () => {
     const s = parseSelectors(["--repos", "alpha,beta", "--tools", "claude-code,antigravity-cli"]);

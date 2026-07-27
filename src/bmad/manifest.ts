@@ -146,7 +146,22 @@ export function loadManifest(deps: LoadManifestDeps = {}): BmadRepo[] {
     throw new ManifestError(`estate.toml at ${path} has no [[repos]] entries`);
   }
 
-  return repos.map((raw, i) => normalizeEntry(raw, i));
+  const entries = repos.map((raw, i) => normalizeEntry(raw, i));
+
+  // Duplicate match keys fail loud. `selectRepos({repos:[n]})` filters by `repoName`, so two entries
+  // resolving to the same name would BOTH be returned for one requested repo — a batch run touching a
+  // repo the caller never named. Ambiguity here is the same class of quiet wrong as an unknown name.
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const name = repoName(entry);
+    if (seen.has(name)) {
+      throw new ManifestError(
+        `estate.toml at ${path}: duplicate repo name "${name}" — two entries resolve to the same --repos key`,
+      );
+    }
+    seen.add(name);
+  }
+  return entries;
 }
 
 /** Validate one raw row and apply defaults. Throws `ManifestError` naming the entry on any fault. */
@@ -196,8 +211,16 @@ function normalizeEntry(raw: unknown, index: number): BmadRepo {
   if (branch !== undefined) entry.branch = branch;
   const notes = optionalString(row, "notes", path);
   if (notes !== undefined) entry.notes = notes;
+  // An empty `name` is rejected, not just wrong-typed-checked: `repoName` is `name ?? basename(path)`,
+  // and `""` is not nullish, so it would win the `??` and silently blank the `--repos` match key rather
+  // than falling back. `path` is already held to the same non-empty rule.
   const name = optionalString(row, "name", path);
-  if (name !== undefined) entry.name = name;
+  if (name !== undefined) {
+    if (name.trim() === "") {
+      throw new ManifestError(`estate.toml entry "${path}": field "name" must be a non-empty string`);
+    }
+    entry.name = name;
+  }
   return entry;
 }
 

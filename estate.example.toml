@@ -40,6 +40,9 @@
 #   branch   string    Informational only. Git safety reads the LIVE branch, never this field.
 #   name     string    Explicit `--repos` match key. Without it the key is basename(path) — set this
 #                      when the basename is ambiguous (e.g. a nested "packs/<something>" directory).
+#                      Must be non-empty, and every entry's resolved key must be UNIQUE across the
+#                      file: two entries sharing one key would both answer to a single `--repos <key>`.
+#                      Both faults are rejected at load with the offending name.
 #   notes    string    Free text.
 
 [[repos]]
