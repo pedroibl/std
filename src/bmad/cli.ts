@@ -18,6 +18,11 @@
 // LATER STORIES EXTEND THE HANDLER MAP HERE — they do NOT re-add the `main.ts` block. 2.6 adds `verify`
 // as its own module (BM-10); it belongs in the map below and nowhere else.
 
+// The ONE permitted `src/cli/*` edge from this slice (spine BM-20 [ADOPTED]): `src/bmad/cli.ts` may
+// import `../cli/surface` — the pure surface model — and nothing else under `src/cli/`. BM-1's real
+// fence (never route through `src/cli/dispatch.ts`) is untouched, and the file-level graph stays acyclic:
+// main.ts → bmad/cli.ts → cli/surface.ts → cli/cn-deploy.ts, with no path back.
+import { SURFACE, type BmadSub, renderBmadUsage } from "../cli/surface";
 import { dispatchAsync } from "../core/index";
 import { BmadError, defaultBmadDeps, type BmadDeps } from "./deps";
 import { runBmadDeploy } from "./deploy";
@@ -34,32 +39,38 @@ import { runBmadVerify } from "./verify";
 // new code should import from `./opts` directly.
 export { DEFAULT_SKILLS, parseBmadOpts, type BmadOpts } from "./opts";
 
-/** `std bmad` usage. Hand-maintained, like the top-level `HELP` — keep it in sync when a command lands. */
-export const BMAD_USAGE = `std bmad — manage the BMAD estate
+/**
+ * `std bmad` usage — RENDERED from the one surface model (3.1), like the top-level `HELP`. The export
+ * name and its bytes are unchanged; `cli-dryrun.test.ts` holds a frozen copy and asserts byte-identity.
+ */
+export const BMAD_USAGE = renderBmadUsage(SURFACE);
 
-usage: std bmad <subcommand> [options]
-
-subcommands:
-  install           install the loop-family skills across the estate
-  update            update the installed modules across the estate
-  deploy            compose and deploy the estate's leg across the Manifest
-  verify            prove both Surfaces are byte-faithful to source (read-only, never mutates)
-
-safety flags:
-  --apply           actually execute the plan. WITHOUT IT NOTHING MUTATES (dry-run is the default)
-  --push            push after committing. Separate from --apply and never implied by it
-  --force-track     stage a repo whose .claude is gitignored (manual, never routine)
-
-selectors:
-  --repos a,b       only these repos (by name; default is the Manifest minus source-only entries)
-  --tools a,b       only these tools
-  --set m.k=v       repeatable module setting, passed through to bmad
-  --skills a,b      additional skills, ADDED to the loop-family default
-
-output:
-  --json            emit the machine-readable ledger; it is then the only thing on stdout
-
-The estate Manifest is caller-local: $XDG_CONFIG_HOME/std/estate.toml (see estate.example.toml).`;
+/**
+ * The family's subcommand handlers (3.1 AC5). Extracted from inside {@link runBmad} — where it was an
+ * object literal no test could reach — so the model's `bmad` subcommand list can be asserted EQUAL to the
+ * map that actually routes. Routing is unchanged: same four entries, same closures over `rest`/`deps`.
+ *
+ * 🔴 `Record<BmadSub, …>`, never `Record<string, …>`. The wide form is the vacuous type this exists to
+ * forbid — and it is the one that comes to hand, because it is `dispatchAsync`'s own parameter type. It
+ * does not need to match: a `Record<BmadSub, …>` is assignable to `Record<string, …>` (mapped types carry
+ * an implicit index signature), so this flows into `dispatchAsync` with no cast and no widening. With the
+ * narrow type, deleting an entry fails `tsc`; the set-equality test catches an EXTRA one.
+ *
+ * ⚠ Called once per dispatch, exactly where the literal was. Building it at module scope would capture no
+ * `rest`/`deps` and would not be the same program.
+ */
+export function bmadHandlers(rest: string[], deps: BmadDeps): Record<BmadSub, () => Promise<number>> {
+  return {
+    install: () => runBmadInstall(rest, deps),
+    update: () => runBmadUpdate(rest, deps),
+    deploy: () => runBmadDeploy(rest, deps),
+    // `verify` is the one handler that takes parsed opts rather than raw argv (2.6). It reads no
+    // `--apply`, so its option type is a deliberate SUBSET of `BmadOpts` that has no such field —
+    // and a `BmadOpts` satisfies it structurally, so nothing is cast. The raw `rest` still goes
+    // through for the render-only `--json` read.
+    verify: () => runBmadVerify(parseBmadOpts(rest), rest, deps),
+  };
+}
 
 /**
  * Route `std bmad <subcommand>` (AC1/AC7).
@@ -90,20 +101,7 @@ export async function runBmad(argv: string[], deps: BmadDeps = defaultBmadDeps()
   };
 
   try {
-    return await dispatchAsync(
-      sub ?? "",
-      {
-        install: () => runBmadInstall(rest, deps),
-        update: () => runBmadUpdate(rest, deps),
-        deploy: () => runBmadDeploy(rest, deps),
-        // `verify` is the one handler that takes parsed opts rather than raw argv (2.6). It reads no
-        // `--apply`, so its option type is a deliberate SUBSET of `BmadOpts` that has no such field —
-        // and a `BmadOpts` satisfies it structurally, so nothing is cast. The raw `rest` still goes
-        // through for the render-only `--json` read.
-        verify: () => runBmadVerify(parseBmadOpts(rest), rest, deps),
-      },
-      onUnknown,
-    );
+    return await dispatchAsync(sub ?? "", bmadHandlers(rest, deps), onUnknown);
   } catch (err) {
     if (err instanceof ManifestError || err instanceof BmadError) {
       deps.report.log(`✗ ${err.message}`);

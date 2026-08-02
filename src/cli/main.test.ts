@@ -186,3 +186,53 @@ describe("globalReposPath", () => {
     }
   });
 });
+
+// The byte-identity oracle (3.1 AC2). `FROZEN_HELP` is the `HELP` template literal copied VERBATIM from
+// `main.ts` at baseline 706777f, BEFORE `HELP` became `renderHelp(SURFACE)`. The right-hand side must stay
+// a literal: `expect(HELP).toBe(renderHelp(SURFACE))` would be `HELP` compared to itself — the vacuous gate.
+const FROZEN_HELP = `std — Pedro's standard CLI
+
+usage: std <command> [options]
+
+commands:
+  alias --install   (re)generate repo-nav + the _std completion from ~/.config/std/repos.ts
+  cn deploy         bundle src/cn -> <vault>/Scripts/cn.js (one-way; the vault is build output only)
+  cn verify         check a vault against cn's declared plugin envelope (AD-6)
+  dashkit deploy    bundle src/dashkit -> <vault>/Scripts/dashkit.js (one-way; the vault is build output only)
+  dashkit verify    check a vault against dashkit's declared plugin envelope (AD-6)
+  bmad install|update|deploy   dry-run by default; --apply to mutate, --push to push
+  bmad verify       prove both Surfaces are byte-faithful to source (read-only)
+
+cn deploy options:
+  --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)
+  --format <fmt>    bundle format: esm (default) or cjs
+  --watch           deploy once, then stay resident and redeploy on every save under src/cn, src/core
+
+dashkit deploy options:
+  --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)
+  --watch           deploy once, then stay resident and redeploy on every save under src/dashkit, src/core
+
+cn verify options:
+  --vault <dir>     the Obsidian vault to check (required)
+                    drift is reported and never fatal; a missing foundation exits 1
+
+dashkit verify options:
+  --vault <dir>     the Obsidian vault to check (required)
+                    drift is reported and never fatal; a missing foundation exits 1
+
+flags:
+  -h, --help        show this help`;
+
+describe("HELP — byte-identity oracle (3.1 AC2)", () => {
+  // Self-check on the TRANSCRIPTION first: a copy-paste slip would freeze the wrong bytes and then pass
+  // the toBe below forever. `.length` is UTF-16 units, NOT bytes — HELP carries three em dashes, so
+  // Buffer.byteLength is 1579 while .length is 1573. Both measured on the baseline constant.
+  test("the frozen literal is the one that was measured", () => {
+    expect(FROZEN_HELP.length).toBe(1573);
+    expect(FROZEN_HELP.split("\n").length).toBe(32);
+  });
+
+  test("this story changes zero user-visible bytes", () => {
+    expect(HELP).toBe(FROZEN_HELP);
+  });
+});
