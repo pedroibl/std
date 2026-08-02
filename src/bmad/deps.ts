@@ -64,8 +64,21 @@ export class BmadError extends Error {
  * "the set staging touched". The outcome half lives on {@link RepoResult}.
  */
 export interface PlanProjection {
-  /** The `bmad …` argv the leg authored (BM-15). The pipeline never inlines this; the leg owns it. */
-  installArgv: string[];
+  /**
+   * The `bmad …` invocations the leg authored, IN EXECUTION ORDER (BM-15). The pipeline never inlines
+   * these; the leg owns them.
+   *
+   * WIDENED IN 2.5 (was a single `string[]`). A leg may need more than one invocation to express its
+   * rule: `update` emits the built-in `quick-update` argv AND the module `--custom-source` argv, and
+   * FR-9's whole point is that those two are NOT interchangeable. `install`/`deploy` emit a
+   * one-element list. The pipeline executes them in order and fails fast on the first non-zero.
+   *
+   * A LIST, not a second field (`builtinArgv?`), because a second field would leave `PlanProjection`
+   * with nowhere honest to project invocation #2 — breaking the SM-3 dry-run/apply equality that is the
+   * only thing standing between this family and the "the plan you preview is not the plan that runs"
+   * defect class. Every invocation a run WILL make must be visible in the plan a dry run prints.
+   */
+  installArgv: string[][];
   /** `<backupRoot>/<repo-name>/<clock()>` (BM-8). The backup itself is written in 2.3. */
   backupPath: string;
   /** The scoped staging set. STORY 2.4 computes it for real; seeded `[]` here so the shape is provable. */
@@ -131,7 +144,16 @@ export type LegDeps = Pick<BmadDeps, "bmadBin" | "manifestPath" | "estateModuleP
  */
 export interface InstallLeg {
   kind: "install" | "update";
-  buildArgv(ctx: LegCtx): string[];
+  /**
+   * Author this command's `bmad` invocations for one repo — an ORDERED, NON-EMPTY list of complete argv.
+   *
+   * WIDENED IN 2.5 (was one `string[]`). See {@link PlanProjection.installArgv} for why a list beats a
+   * second member. `install`/`deploy` return one element; `update` returns two (built-in, then module).
+   *
+   * STAYS SYNCHRONOUS. `buildPlan` calls it without `await`, before the `--apply` gate — an `async`
+   * `buildArgv` would make the plan a promise and drag the gate's purity into the type system.
+   */
+  buildArgv(ctx: LegCtx): string[][];
 }
 
 /**

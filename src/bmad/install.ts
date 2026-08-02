@@ -44,21 +44,25 @@ import { parseBmadOpts } from "./opts";
 export function installLeg(stagingDir: string): InstallLeg {
   return {
     kind: "install",
+    // ONE invocation, wrapped in the outer list `InstallLeg.buildArgv` returns since 2.5. The argv
+    // CONTENTS are unchanged and still byte-identical to the frozen Epic-0 proof; only the nesting moved.
     buildArgv: (ctx) => [
-      "install",
-      "--directory",
-      ctx.repo.path,
-      "--modules",
-      "core",
-      "--custom-source",
-      stagingDir,
-      // `--tools` is the RUN-level override; absent, it falls back to 2.1's `DEFAULT_TOOLS` (FR-4).
-      // Imported, never re-declared: a second copy of the pair is exactly the AD-2 divergence where the
-      // installer ships one toolset while the Manifest loader defaults to another.
-      "--tools",
-      (ctx.opts.tools ?? DEFAULT_TOOLS).join(","),
-      "--yes",
-      ...ctx.opts.set.flatMap((s) => ["--set", `${s.module}.${s.key}=${s.value}`]),
+      [
+        "install",
+        "--directory",
+        ctx.repo.path,
+        "--modules",
+        "core",
+        "--custom-source",
+        stagingDir,
+        // `--tools` is the RUN-level override; absent, it falls back to 2.1's `DEFAULT_TOOLS` (FR-4).
+        // Imported, never re-declared: a second copy of the pair is exactly the AD-2 divergence where the
+        // installer ships one toolset while the Manifest loader defaults to another.
+        "--tools",
+        (ctx.opts.tools ?? DEFAULT_TOOLS).join(","),
+        "--yes",
+        ...ctx.opts.set.flatMap((s) => ["--set", `${s.module}.${s.key}=${s.value}`]),
+      ],
     ],
   };
 }

@@ -198,11 +198,32 @@ export async function runRepoPipeline(
   // `planned.installArgv` — NOT a second `leg.buildArgv(ctx)` call. The argv that was previewed is the
   // argv that runs; recomputing it here is the exact dry-run/apply divergence BM-14 forbids, and under
   // a live clock it would also re-derive a different `--custom-source` timestamp.
-  const install = await deps.exec(deps.bmadBin, planned.installArgv);
-  if (install.code !== 0) {
-    result.status = "failed";
-    result.reason = installerFailure(deps.bmadBin, install);
-    return result;
+  //
+  // A LIST SINCE 2.5, run ORDERED and FAIL-FAST within the repo (BM-4). `update` emits two invocations
+  // (built-in `quick-update`, then module `--custom-source`) and they are not interchangeable — FR-9
+  // exists because the first one CANNOT propagate a local module edit.
+  //
+  // `spawnCapture` NEVER REJECTS (`src/proc/index.ts`): a timeout is `124`, a launch failure `127`, a
+  // signal `128+signo`. The exit CODE is therefore the entire signal, and there is nothing here for a
+  // `try/catch` to catch. Treating "it did not throw" as success IS the silent-failure mode, and on a
+  // multi-invocation leg it is worse than on a single one: leg 1 can succeed, leg 2 fail, and the repo
+  // is left HALF-UPDATED. That repo must never report `ok` (FR-15/AC6), and the `reason` must say which
+  // leg died, so the operator knows whether the built-ins or the estate module is the half that landed.
+  for (const [i, invocation] of planned.installArgv.entries()) {
+    const install = await deps.exec(deps.bmadBin, invocation);
+    if (install.code !== 0) {
+      result.status = "failed";
+      result.reason = installerFailure(
+        deps.bmadBin,
+        install,
+        legLabel(leg, planned.installArgv.length, i),
+        result.backupPath,
+        invocation,
+      );
+      // Later invocations do NOT run, and neither does verify/stage/commit/push (BM-4). A repo whose
+      // built-in refresh failed must not then have the estate module written over the top of it.
+      return result;
+    }
   }
 
   // ── verify (2.6 / FR-16 / BM-10) ────────────────────────────────────────────────────────────────
@@ -329,28 +350,72 @@ function errText(err: unknown): string {
 }
 
 /**
+ * Name the invocation that failed, POSITIONALLY (2.5/AC6).
+ *
+ * A two-invocation leg whose failure report cannot say WHICH invocation died is unactionable: "built-in"
+ * means the repo's `core`/`bmm` refresh failed and the estate module was never written, while "module"
+ * means the built-ins ARE refreshed and the repo is half-updated. Those are different repair jobs.
+ *
+ * The pair is ordered by construction — `update`'s leg emits built-in first — so position IS the label.
+ * The single-invocation case is NOT hardcoded to either name: it reads `leg.kind`, because `install`'s
+ * one argv is an install and `update`'s degenerate one argv (a repo with no built-in on disk) is the
+ * module leg. Hardcoding the pair would mislabel both single-argv shapes.
+ *
+ * Indexed DEFENSIVELY. If a future leg emits a third invocation, `LEG_PAIR[2]` is `undefined` and the
+ * reason would read "undefined leg failed" — nonsense in the one artifact an operator reads. It degrades
+ * to a positional name instead.
+ */
+function legLabel(leg: InstallLeg, total: number, i: number): string {
+  if (total === 1) return leg.kind === "install" ? "install" : "module";
+  return LEG_PAIR[i] ?? `leg ${i + 1}`;
+}
+
+/** `update`'s ordered invocation names (BM-15) — built-in `quick-update` first, module last. */
+const LEG_PAIR = ["built-in", "module"] as const;
+
+/**
  * The fail-loud `reason` for a non-zero installer exit (AC7/BM-11).
  *
  * The installer's stderr is carried VERBATIM — never paraphrased, never summarized. Its ancestor-conflict
  * message is the single most actionable line a failed run produces, and a rewritten version of it costs
  * the operator the fix.
  *
+ * FOUR THINGS ARE NON-NEGOTIABLE IN THIS STRING (FR-15/AC6), because together they are the entire
+ * difference between a half-updated repo that reports honestly and one that reports `ok`:
+ *   - WHICH invocation failed (`label`) — see {@link legLabel}.
+ *   - The exact argv, so the operator can re-run the one command that died.
+ *   - The installer's stderr VERBATIM.
+ *   - The `backupPath`, when a backup was written — the rollback handle for the half that DID land.
+ *     A backup taken but never named in the failure report is a rollback the operator cannot perform.
+ *
  * Two shapes get extra help:
  *   - `127` is `spawnCapture`'s launch-failure sentinel, i.e. no `bmad` on PATH. That is the REQUIRED-TOOL
  *     exception to std's "absent binary ⇒ SKIP 0" adapter rule (BM-3): `bmad` is this operation, not an
  *     optional capability, so it fails with remediation rather than reporting a clean skip.
+ *   - `124` is the timeout sentinel, named so a hung installer does not read as a generic failure.
  *   - EMPTY stderr falls back to stdout and then to an explicit marker. A bare "failed (exit 1):" with
  *     nothing after the colon is a silent failure wearing a failure's clothes.
  */
-function installerFailure(bin: string, r: { stdout: string; stderr: string; code: number }): string {
+function installerFailure(
+  bin: string,
+  r: { stdout: string; stderr: string; code: number },
+  label: string,
+  backupPath: string | undefined,
+  argv: string[],
+): string {
   const output = r.stderr.trim() !== "" ? r.stderr : r.stdout.trim() !== "" ? r.stdout : "(no output)";
+  const rollback = backupPath === undefined ? "" : `\nrollback: ${backupPath}`;
   if (r.code === 127) {
     return (
-      `bmad binary "${bin}" could not be launched (exit 127) — install bmad, put it on $PATH, or set ` +
-      `$BMAD_BIN to its absolute path, then re-run. Launch error: ${output}`
+      `${label} leg failed: bmad binary "${bin}" could not be launched (exit 127) — install bmad, put ` +
+      `it on $PATH, or set $BMAD_BIN to its absolute path, then re-run. ` +
+      `Failing invocation: ${bin} ${argv.join(" ")}. Launch error: ${output}${rollback}`
     );
   }
-  return `bmad install failed (exit ${r.code}): ${output}`;
+  const timeout = r.code === 124 ? " — timed out" : "";
+  return (
+    `${label} leg failed (exit ${r.code})${timeout}: ${bin} ${argv.join(" ")}\n${output}${rollback}`
+  );
 }
 
 /**

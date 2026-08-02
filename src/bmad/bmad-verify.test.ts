@@ -21,7 +21,6 @@
 // literal. `check:no-consumer-ids` skips `.test.ts`, so this is discipline rather than gate-driven.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   cpSync,
@@ -40,6 +39,7 @@ import { exists, readIfExists } from "../fsx/index";
 import { spawnCapture } from "../proc/index";
 import { BmadVerifyError, renderVerifyFindings, SURFACES, verifyRepo } from "./bmad-verify";
 import {
+  fixtureGit,
   listSkillDirs,
   makeEstateModule,
   makeScratchRepo,
@@ -629,11 +629,11 @@ describe("AC7/NFR-5 — read-only, proven on the working tree", () => {
     const s = await makeScratchRepo();
     const moduleRoot = makeEstateModule({ skills: SELECTED });
     try {
-      const g = (...args: string[]): string =>
-        execFileSync("git", ["-C", s.dir, ...args], { encoding: "utf-8" }).trim();
-      g("config", "user.email", "fixture@example.invalid");
-      g("config", "user.name", "bmad fixture");
-      g("config", "commit.gpgsign", "false");
+      // The commit identity rides every call as `-c` flags from the shared `FIXTURE_IDENTITY` (2.7/AC11)
+      // rather than being declared here. A second declaration is the shared-fixture fork hazard, and the
+      // failure it would hide — a bare `git init` inherits no identity — is invisible on any machine that
+      // happens to have a global one, i.e. every developer machine and no CI container.
+      const g = (...args: string[]): string => fixtureGit(s.dir, ...args);
       renderInstalledSurfaces(s.dir, moduleRoot, SELECTED);
       // A SEED COMMIT: `makeScratchRepo` only `git init`s, so without this there is no TRACKED file to
       // modify and the "dirty" fixture would be untracked-only — a weaker instrument.
@@ -868,7 +868,7 @@ describe("Task 3 / AC6+AC11+AC12 — the pipeline verify filter (BM-4 ordering)"
     return { deps, spy };
   }
 
-  const LEG: InstallLeg = { kind: "install", buildArgv: (ctx) => ["install", "--directory", ctx.repo.path] };
+  const LEG: InstallLeg = { kind: "install", buildArgv: (ctx) => [["install", "--directory", ctx.repo.path]] };
 
   test("26. a divergent repo FAILS in the pipeline and the git spine never runs (BM-4 fail-fast)", async () => {
     const moduleRoot = makeEstateModule({ skills: SELECTED });
