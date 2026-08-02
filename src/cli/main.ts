@@ -15,7 +15,7 @@ import { runCnVerify } from "./cn-verify";
 import { runDashkitDeploy } from "./dashkit-deploy";
 import { runDashkitVerify } from "./dashkit-verify";
 import { RepoNavError, defaultTargets, installAlias, type RepoConfig } from "./repo-nav";
-import { SURFACE, renderHelp } from "./surface";
+import { SURFACE, renderAliasUsage, renderHelp } from "./surface";
 
 /** std's own global registry path (XDG-aware), the SoT `alias --install` reads. */
 export function globalReposPath(): string {
@@ -103,7 +103,7 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
 
   if (cmd === "alias") {
     if (!rest.includes("--install")) {
-      log("usage: std alias --install   # regenerate repo-nav + _std from ~/.config/std/repos.ts");
+      log(renderAliasUsage(SURFACE)); // R-3: one statement of this line, in the model (AC9)
       return 2;
     }
     const reposPath = deps.reposPath ?? globalReposPath();
@@ -124,7 +124,7 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     try {
       const res = installAlias({
         config,
-        commands: ["alias"],
+        surface: SURFACE, // D-a closed: the completer now sees every command, not a hardcoded literal
         targets: defaultTargets(deps.zdotdir ?? defaultZdotdir()),
         frozenNames: new Set(config.frozen ?? []),
       });

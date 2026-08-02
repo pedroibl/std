@@ -64,6 +64,17 @@ export interface HelpGroup {
 
 export interface CommandSpec {
   readonly name: string;
+  /**
+   * Command-level description. `HELP` renders none — its `commands:` block is keyed by help GROUP, not
+   * by command — so 3.1 shipped no such field and the completer (3.2) is its first consumer: the
+   * top-level `_describe` needs one line per command. REQUIRED, so a fifth command cannot land without
+   * one and complete as a bare name.
+   *
+   * ⚠ These four strings are scanned by `check:no-consumer-ids`, which globs `src/**` and skips only
+   * `*.test.ts`. Naming a vault here (two of the six denylisted names are vaults) is a RED BUILD, not a
+   * style question. Describe what the command does to a vault, never which vault.
+   */
+  readonly desc: string;
   readonly subcommands: readonly SubcommandSpec[];
   /** Command-level flags for a command with no subcommands (`alias --install`). */
   readonly flags?: readonly FlagSpec[];
@@ -165,6 +176,7 @@ export const SURFACE = {
   commands: [
     {
       name: "alias",
+      desc: "(re)generate repo-nav + the _std completion from ~/.config/std/repos.ts",
       subcommands: [],
       flags: [
         {
@@ -182,6 +194,7 @@ export const SURFACE = {
     },
     {
       name: "cn",
+      desc: "bundle and verify the cn Obsidian edge",
       subcommands: [
         {
           name: "deploy",
@@ -229,6 +242,7 @@ export const SURFACE = {
     },
     {
       name: "dashkit",
+      desc: "bundle and verify the dashkit Obsidian edge",
       subcommands: [
         {
           name: "deploy",
@@ -267,6 +281,7 @@ export const SURFACE = {
     },
     {
       name: "bmad",
+      desc: "manage the BMAD estate",
       subcommands: [
         {
           name: "install",
@@ -424,6 +439,20 @@ export function renderHelp(s: CommandSurface): string {
   out.push("", "flags:");
   for (const f of s.flags) out.push(row(flagLabel(f), f.desc));
   return out.join("\n");
+}
+
+/**
+ * Render the `std alias` usage line — the ONE statement of it (R-3, handed down from 3.1).
+ *
+ * It was hand-written twice and had already drifted: `main.ts` said "regenerate repo-nav + _std", while
+ * `repo-nav.ts` said "(re)generate repo-nav + _std completion". Both existing assertions are loose
+ * regexes (`/usage: std alias --install/`), so neither noticed — which is why `surface.test.ts` pins the
+ * FULL line here rather than trusting them. The text is the `--install` flag's own `desc`, so the usage
+ * line and the completer's explanation for the same flag cannot diverge again.
+ */
+export function renderAliasUsage(s: CommandSurface): string {
+  const install = flagSpecs(s, "alias").find((f) => f.name === "--install");
+  return `usage: std alias --install   # ${install?.desc ?? ""}`;
 }
 
 /**

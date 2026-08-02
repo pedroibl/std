@@ -75,3 +75,9 @@ export {
   type RepoConfig,
   type RepoRegistry,
 } from "./repo-nav";
+
+// `installAlias`/`runAlias`/`InstallOptions`/`AliasDeps` are already public above, and 3.2 makes a
+// `CommandSurface` their REQUIRED argument. Without these two an external caller cannot construct one,
+// and the barrel would export functions nobody outside the repo can call. (3.1 deliberately left
+// `index.ts` untouched; that fence expires here, by design.) Breaking change to `./cli` — 0.x permits it.
+export { SURFACE, type CommandSurface } from "./surface";
