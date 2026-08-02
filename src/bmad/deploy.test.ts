@@ -57,7 +57,7 @@ import {
 import { runBmadDeploy } from "./deploy";
 import type { BmadDeps, InstallLeg, RepoResult } from "./deps";
 import { pushGate } from "./git-safety";
-import type { BmadRepo } from "./manifest";
+import { type BmadRepo, DEFAULT_TOOLS } from "./manifest";
 import { DEFAULT_SKILLS, parseBmadOpts } from "./opts";
 import { skillTreeDigest } from "./pipeline";
 import { runBmadUpdate } from "./update";
@@ -445,11 +445,16 @@ describe("AC3 — deploy issues argv BYTE-IDENTICAL to update (the delegation re
       const manifestPath = writeManifest(estate.manifest);
       const { deps, spy } = rig(manifestPath);
 
-      await runBmadDeploy(["--apply"], deps);
+      // Assert the EXIT CODE on both, not just the argv. Without this the comparison is satisfiable by
+      // two runs that failed IDENTICALLY — equal argv streams prove the delegation matches, but say
+      // nothing about whether either run worked. A vacuous byte-identity check here would be especially
+      // costly: this case is one of the three guards standing between a delegation regression and the
+      // `--modules` estate-wide deletion hazard.
+      expect(await runBmadDeploy(["--apply"], deps)).toBe(0);
       const deployCalls = spy.exec.map((e) => ({ cmd: e.cmd, args: e.args }));
       spy.exec.length = 0;
 
-      await runBmadUpdate(["--apply"], deps);
+      expect(await runBmadUpdate(["--apply"], deps)).toBe(0);
       const updateCalls = spy.exec.map((e) => ({ cmd: e.cmd, args: e.args }));
 
       expect(deployCalls.length).toBeGreaterThan(0);
@@ -787,8 +792,10 @@ describe("AC5/AC6 — the six-posture harness, and the traps that make it honest
       expect(byPosture.get("tracked")!.entry.hasUpstream).toBe(true);
       expect(byPosture.get("no-upstream")!.entry.hasUpstream).toBe(false);
       // `tools` comes from the loader's exported default, never a literal pair — hardcoding it would
-      // mask a regression in the defaulting itself.
-      expect(byPosture.get("tracked")!.entry.tools).toEqual(["claude-code", "antigravity-cli"]);
+      // mask a regression in the defaulting itself. (This line USED to compare against the literal
+      // `["claude-code","antigravity-cli"]`, which contradicted the sentence above it: a literal cannot
+      // tell "the default flowed through" from "the default changed and both sides moved with it".)
+      expect(byPosture.get("tracked")!.entry.tools).toEqual([...DEFAULT_TOOLS]);
     } finally {
       await estate.cleanup();
     }

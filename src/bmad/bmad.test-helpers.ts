@@ -486,7 +486,12 @@ export async function makeFixtureRepo(
     // regression in the Manifest loader's own defaulting. `tools` is REQUIRED on `BmadRepo`, so it
     // cannot simply be omitted.
     tools: [...DEFAULT_TOOLS],
-    claudeTracked: posture !== "gitignored" && posture !== "source-only",
+    // Keyed on `gitignored` ALONE, because this field must describe the repo's DISK POSTURE and only
+    // the gitignored fixture writes a `.gitignore`. `source-only` seeds `.claude/`+`.agents/` and stages
+    // them with the rest, so they genuinely ARE tracked there; claiming `false` made the metadata
+    // contradict the filesystem, and would read as "working-copy-only" to any consumer reached outside
+    // the `role === "source-only"` guard. source-only is excluded by its ROLE (BM-11), never by tracking.
+    claudeTracked: posture !== "gitignored",
     hasUpstream: remoteKind === "tracking",
     name,
     ...(posture === "source-only" ? { role: "source-only" as const } : {}),
