@@ -674,6 +674,34 @@ describe("std emits the READER, never the names (3.3 AC7 — D4/NFR3)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // Raised by CodeRabbit on PR #72: `estateDefaults` is generic over `FlagValueSource`, but only
+  // `_std_estate_tools` unions its result — `_std_estate_repos` unions none. Today that is invisible
+  // because `REPOS` declares no `defaults`, so an unwired generic sits there waiting to drop a future
+  // one SILENTLY. The guard fails loud instead, and this is the input that makes it fire.
+  //
+  // Why fail loud rather than wire repos defaults up: a repo name is caller-local BY DEFINITION, so a
+  // std-shipped default repo name would bake consumer identity into the artifact (D4/NFR3) — the one
+  // thing the reader block exists to prevent. The right answer to "I want a default repo" is "no",
+  // stated by the code rather than left to a reviewer to notice.
+  test("a repos-sourced `defaults` fails LOUD — the unwired half of estateDefaults (D4/NFR3)", () => {
+    const mutated = JSON.parse(JSON.stringify(SURFACE)) as {
+      commands: { flags?: { name: string; source?: string; defaults?: string[] }[]; subcommands: { flags: { name: string; source?: string; defaults?: string[] }[] }[] }[];
+    };
+    const repoFlags = mutated.commands
+      .flatMap((c) => [...(c.flags ?? []), ...c.subcommands.flatMap((s) => s.flags)])
+      .filter((f) => f.source === "estate.repos");
+    // Positive control: the mutation has something to attach to. Without this, a SURFACE that stopped
+    // declaring `source: "estate.repos"` would make the toThrow below pass for the wrong reason.
+    expect(repoFlags.length).toBeGreaterThan(0);
+    for (const f of repoFlags) f.defaults = ["std-owned-repo"];
+
+    expect(() => generateStdCompletion(mutated as unknown as typeof SURFACE)).toThrow(RepoNavError);
+    expect(() => generateStdCompletion(mutated as unknown as typeof SURFACE)).toThrow(/estate\.repos/);
+    // And the unmutated surface does NOT throw — the guard is the mutation's doing, not a broken clone.
+    const clean = JSON.parse(JSON.stringify(SURFACE)) as unknown as typeof SURFACE;
+    expect(() => generateStdCompletion(clean)).not.toThrow();
+  });
 });
 
 describe("escaping is a function with a hostile fixture, not a hopeful replace chain (AC4)", () => {

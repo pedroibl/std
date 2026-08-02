@@ -293,6 +293,17 @@ function estateDefaults(surface: CommandSurface, source: FlagValueSource): strin
 function estateReaderBlock(surface: CommandSurface): string {
   const toolDefaults = estateDefaults(surface, "estate.tools");
   const toolWords = toolDefaults.length > 0 ? ` ${toolDefaults.join(" ")}` : "";
+  // `estateDefaults` is generic over the source, but only `_std_estate_tools` unions its result —
+  // `_std_estate_repos` has no defaults to union and must not grow any: a repo name is caller-local
+  // by definition, so a std-shipped default repo name would bake consumer identity into the artifact
+  // (D4/NFR3), which is the one thing this whole block exists to avoid. Fail loud rather than drop it
+  // silently, which is what an unwired generic does.
+  if (estateDefaults(surface, "estate.repos").length > 0) {
+    throw new RepoNavError(
+      "_std: a flag sourced from 'estate.repos' declares `defaults` — repo names are caller-local, " +
+        "so std must not ship any (D4/NFR3), and `_std_estate_repos` unions none. Drop the defaults.",
+    );
+  }
   return `# --- caller-local estate readers -------------------------------------------------------------------
 # std emits the READER, never the names (D4/NFR3). Values resolve from the caller's estate file at
 # completion time. A missing/unreadable/malformed file yields no completions and never errors the shell.
