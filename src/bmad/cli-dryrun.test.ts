@@ -714,3 +714,43 @@ describe("defaultBmadDeps resolves identity, never bakes it (AC6/D4)", () => {
     expect(defaultBmadDeps({}).clock()).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });
+
+// The byte-identity oracle (3.1 AC3), twin of `main.test.ts`'s for HELP. Copied VERBATIM from
+// `bmad/cli.ts` at baseline 706777f, before `BMAD_USAGE` became `renderBmadUsage(SURFACE)`.
+const FROZEN_BMAD_USAGE = `std bmad — manage the BMAD estate
+
+usage: std bmad <subcommand> [options]
+
+subcommands:
+  install           install the loop-family skills across the estate
+  update            update the installed modules across the estate
+  deploy            compose and deploy the estate's leg across the Manifest
+  verify            prove both Surfaces are byte-faithful to source (read-only, never mutates)
+
+safety flags:
+  --apply           actually execute the plan. WITHOUT IT NOTHING MUTATES (dry-run is the default)
+  --push            push after committing. Separate from --apply and never implied by it
+  --force-track     stage a repo whose .claude is gitignored (manual, never routine)
+
+selectors:
+  --repos a,b       only these repos (by name; default is the Manifest minus source-only entries)
+  --tools a,b       only these tools
+  --set m.k=v       repeatable module setting, passed through to bmad
+  --skills a,b      additional skills, ADDED to the loop-family default
+
+output:
+  --json            emit the machine-readable ledger; it is then the only thing on stdout
+
+The estate Manifest is caller-local: $XDG_CONFIG_HOME/std/estate.toml (see estate.example.toml).`;
+
+describe("BMAD_USAGE — byte-identity oracle (3.1 AC3)", () => {
+  // One em dash, so 1168 chars / 1170 bytes. Assert `.length`, never `Buffer.byteLength`.
+  test("the frozen literal is the one that was measured", () => {
+    expect(FROZEN_BMAD_USAGE.length).toBe(1168);
+    expect(FROZEN_BMAD_USAGE.split("\n").length).toBe(25);
+  });
+
+  test("this story changes zero user-visible bytes", () => {
+    expect(BMAD_USAGE).toBe(FROZEN_BMAD_USAGE);
+  });
+});

@@ -15,6 +15,7 @@ import { runCnVerify } from "./cn-verify";
 import { runDashkitDeploy } from "./dashkit-deploy";
 import { runDashkitVerify } from "./dashkit-verify";
 import { RepoNavError, defaultTargets, installAlias, type RepoConfig } from "./repo-nav";
+import { SURFACE, renderHelp } from "./surface";
 
 /** std's own global registry path (XDG-aware), the SoT `alias --install` reads. */
 export function globalReposPath(): string {
@@ -37,39 +38,12 @@ export interface MainDeps {
   watch?: CnDeployDeps["watch"];
 }
 
-/** Top-level usage. A single hand-maintained constant — keep it in sync when commands change. */
-export const HELP = `std — Pedro's standard CLI
-
-usage: std <command> [options]
-
-commands:
-  alias --install   (re)generate repo-nav + the _std completion from ~/.config/std/repos.ts
-  cn deploy         bundle src/cn -> <vault>/Scripts/cn.js (one-way; the vault is build output only)
-  cn verify         check a vault against cn's declared plugin envelope (AD-6)
-  dashkit deploy    bundle src/dashkit -> <vault>/Scripts/dashkit.js (one-way; the vault is build output only)
-  dashkit verify    check a vault against dashkit's declared plugin envelope (AD-6)
-  bmad install|update|deploy   dry-run by default; --apply to mutate, --push to push
-  bmad verify       prove both Surfaces are byte-faithful to source (read-only)
-
-cn deploy options:
-  --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)
-  --format <fmt>    bundle format: esm (default) or cjs
-  --watch           deploy once, then stay resident and redeploy on every save under src/cn, src/core
-
-dashkit deploy options:
-  --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)
-  --watch           deploy once, then stay resident and redeploy on every save under src/dashkit, src/core
-
-cn verify options:
-  --vault <dir>     the Obsidian vault to check (required)
-                    drift is reported and never fatal; a missing foundation exits 1
-
-dashkit verify options:
-  --vault <dir>     the Obsidian vault to check (required)
-                    drift is reported and never fatal; a missing foundation exits 1
-
-flags:
-  -h, --help        show this help`;
+/**
+ * Top-level usage — RENDERED from the one surface model (3.1), no longer a hand-maintained literal whose
+ * only drift protection was a comment. The export name and its bytes are unchanged: `main.test.ts` holds
+ * a frozen copy of the shipped text and asserts byte-identity.
+ */
+export const HELP = renderHelp(SURFACE);
 
 /**
  * Dispatch `std <command>`. Returns a process exit code (0 ok, 1 fail-loud, 2 usage/unknown). The bin
