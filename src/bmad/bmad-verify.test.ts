@@ -46,7 +46,7 @@ import {
   removeTempTree,
   renderInstalledSurfaces,
 } from "./bmad.test-helpers";
-import type { BmadDeps, InstallLeg, RepoResult } from "./deps";
+import { defaultBmadDeps, type BmadDeps, type InstallLeg, type RepoResult } from "./deps";
 import type { BmadRepo } from "./manifest";
 import { DEFAULT_SKILLS, parseBmadOpts } from "./opts";
 import { runRepoPipeline } from "./pipeline";
@@ -729,6 +729,31 @@ describe("AC9 — inputs that violate the stated invariants (the class that bit 
     const { deps } = verifyDeps();
     expect(await verifyRepo(repoRoot, SELECTED, moduleRoot, deps)).toEqual([]);
     removeTempTree(moduleRoot);
+  });
+
+  test("20b. the REAL `listDirs` counts a symlinked CHILD skill dir as a directory", () => {
+    // Case 20 covers a symlinked Surface ROOT, which works because the later `diff` operands follow
+    // the root link. A symlinked CHILD is the distinct shape, and it is a FALSE GREEN if unhandled:
+    // `Dirent.isDirectory()` describes the link, not its target, so a symlinked skill dir present on
+    // BOTH Surfaces would drop out of both listings and vanish from the set-Parity comparison
+    // entirely — never named, never counted, reported clean. Exercises the REAL `defaultBmadDeps`
+    // seam, not the fake, because that is where the bug would live.
+    const listDirs = defaultBmadDeps({}).fs.listDirs;
+    const root = fresh("symlinked-child");
+    const target = fresh("link-target");
+    mkdirSync(join(root, "plain-skill"), { recursive: true });
+    mkdirSync(join(target, "real-skill"), { recursive: true });
+    symlinkSync(join(target, "real-skill"), join(root, "linked-skill"), "dir");
+    writeFileSync(join(root, "not-a-dir.md"), "x");
+    symlinkSync(join(root, "not-a-dir.md"), join(root, "linked-file"), "file");
+    symlinkSync(join(root, "nowhere"), join(root, "broken-link"), "dir");
+
+    // Sorted, and exactly the two real directories: the symlinked FILE and the BROKEN link are
+    // both correctly excluded — a following stat says "not a directory" / throws, and neither
+    // failure may take the whole listing down to the fail-soft `[]`.
+    expect(listDirs(root)).toEqual(["linked-skill", "plain-skill"]);
+    // Fail-soft on a missing root is preserved (the Surface pre-check owns that NAMED finding).
+    expect(listDirs(join(root, "absent"))).toEqual([]);
   });
 
   test("21. skill names with a space, a leading dash, or a path escape", async () => {

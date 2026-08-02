@@ -21,7 +21,7 @@
 //
 // D1 core purity: a Bun edge, so `node:os`/`node:path` and `process` are legal here and forbidden in core.
 
-import { cpSync, readdirSync } from "node:fs";
+import { cpSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -224,10 +224,27 @@ export function defaultBmadDeps(env: NodeJS.ProcessEnv = process.env): BmadDeps 
       // concern (it produces a NAMED finding), not this primitive's, and throwing here would turn that
       // report into a crash. Sorted so the set-Parity difference is deterministic and so the `comm -3`
       // oracle in the test suite compares like with like.
+      // A symlinked CHILD must count as a directory. `Dirent.isDirectory()` describes the link
+      // itself, so a symlinked skill dir reads as a non-directory and silently leaves the
+      // set-Parity comparison — present on one Surface it is misreported as "only in …", present
+      // on BOTH it is omitted entirely. That second shape is a false green, which is the exact
+      // class this command exists to prevent, so links are resolved with a `statSync` (a
+      // FOLLOWING stat) before filtering. A symlinked Surface ROOT already worked, because the
+      // later `diff` operands follow the root link; child links did not.
+      // A broken link throws from `statSync` and is skipped — an unresolvable child is not a
+      // directory — without failing the whole listing.
       listDirs: (root: string) => {
         try {
           return readdirSync(root, { withFileTypes: true })
-            .filter((d) => d.isDirectory())
+            .filter((d) => {
+              if (d.isDirectory()) return true;
+              if (!d.isSymbolicLink()) return false;
+              try {
+                return statSync(join(root, d.name)).isDirectory();
+              } catch {
+                return false;
+              }
+            })
             .map((d) => d.name)
             .sort();
         } catch {

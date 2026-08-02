@@ -236,8 +236,14 @@ function spyDeps(stub?: (repo: string, args: string[]) => string | undefined): {
     // and the verify filter now correctly fails it.
     exec: async (cmd, args, o) => {
       if (cmd === "diff") return spawnCapture(cmd, args, o);
-      const dir = args[args.indexOf("--directory") + 1];
-      if (dir !== undefined) renderInstalledSurfaces(dir, FIXTURE_MODULE, DEFAULT_SKILLS);
+      // Guard `indexOf` returning -1: an unguarded `args[idx + 1]` reads `args[0]` — a subcommand
+      // token like "install" — and `renderInstalledSurfaces` would then write a relative
+      // `install/.claude/skills/...` tree into the CHECKOUT instead of the temp scratch repo.
+      // `LEG` always emits `--directory` so the branch is unreachable today; this keeps a future
+      // leg change from writing outside the scratch tree. Mirrors `install.test.ts`'s guard.
+      const dirFlag = args.indexOf("--directory");
+      const dir = dirFlag >= 0 ? args[dirFlag + 1] : undefined;
+      if (dir !== undefined && dir !== "") renderInstalledSurfaces(dir, FIXTURE_MODULE, DEFAULT_SKILLS);
       return { stdout: "", stderr: "", code: 0 };
     },
     git: (repo, args) => {
