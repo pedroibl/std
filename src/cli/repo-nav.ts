@@ -15,7 +15,13 @@ import { join } from "node:path";
 import { atomicWrite } from "../fsx";
 // Intra-slice, so no spine rule is engaged: the fenced edge is `src/bmad/cli.ts → src/cli/surface.ts`
 // (BM-20), which this story does not widen.
-import { flagEnum, renderAliasUsage, type CommandSurface, type FlagSpec } from "./surface";
+import {
+  flagEnum,
+  renderAliasUsage,
+  type CommandSurface,
+  type FlagSpec,
+  type FlagValueSource,
+} from "./surface";
 
 /** The registry: a map of nav alias → target path (the path string is emitted verbatim into zsh, so a
  *  consumer may use `$HOME`/`~` and zsh expands it at source time). */
@@ -202,15 +208,27 @@ function messageOf(metavar: string): string {
 }
 
 /**
- * The `:message:action` tail. Derived from the model's two orthogonal fields — `metavar` (display) and
- * `value` (semantic) — never from one another. A `bool` flag takes no value and gets no tail at all.
- * `list` emits an empty action deliberately: completing `--repos` from the caller's estate is 3.3.
+ * The zsh reader each `FlagValueSource` maps to. EMITTER vocabulary, not model data — the model says
+ * `estate.repos`, the emitter picks the function name. A `Record` over the union rather than a lookup
+ * with a fallback, so adding a third source is a compile error here instead of a silently empty action.
+ */
+const READER_FN: Record<FlagValueSource, string> = {
+  "estate.repos": "_std_estate_repos",
+  "estate.tools": "_std_estate_tools",
+};
+
+/**
+ * The `:message:action` tail. Derived from the model's orthogonal fields — `metavar` (display), `value`
+ * (semantic) and `source` (where the values live) — never from one another. A `bool` flag takes no value
+ * and gets no tail at all. A `list` flag with no `source` still emits an EMPTY action: `--skills` and
+ * `--set` have no enumerable vocabulary, so there is nothing to read.
  */
 function argTail(flag: FlagSpec, enumValues: readonly string[] | undefined): string {
   if (flag.arity !== "value") return "";
   const message = messageOf(flag.metavar ?? "arg");
   if (flag.value === "path") return `:${message}:_files -/`;
   if (flag.value === "enum") return `:${message}:(${(enumValues ?? flag.enum ?? []).join(" ")})`;
+  if (flag.source !== undefined) return `:${message}:_std_list ${READER_FN[flag.source]}`;
   return `:${message}:`;
 }
 
@@ -229,6 +247,124 @@ export function argSpec(flag: FlagSpec, enumValues?: readonly string[]): string 
     .replace(/[[\]]/g, "\\$&");
   const star = flag.repeatable ? "*" : "";
   return `'${sq(`${star}${flag.name}[${explanation}]${argTail(flag, enumValues)}`)}'`;
+}
+
+/**
+ * A `defaults` entry lands in the artifact as a BARE ZSH WORD, not inside a quoted spec — the reader body
+ * is plain zsh, so `describeEntry`/`argSpec`'s escaping never reaches it. One containing a space or a
+ * quote would word-split silently into two completions, which `zsh -n` accepts and no probe assertion
+ * sees. Hence a charset the emitter FAILS LOUD on rather than a hope.
+ */
+const DEFAULT_WORD = /^[A-Za-z0-9._-]+$/;
+
+/** Every `defaults` value declared for `source`, deduped in first-seen order. Fail-loud on a bad word. */
+function estateDefaults(surface: CommandSurface, source: FlagValueSource): string[] {
+  const out: string[] = [];
+  for (const cmd of surface.commands) {
+    const flags = [...(cmd.flags ?? []), ...cmd.subcommands.flatMap((s) => s.flags)];
+    for (const flag of flags) {
+      if (flag.source !== source) continue;
+      for (const value of flag.defaults ?? []) {
+        if (!DEFAULT_WORD.test(value)) {
+          throw new RepoNavError(
+            `_std: default '${value}' for ${flag.name} is not a bare zsh word ${DEFAULT_WORD} — it ` +
+              `would word-split into several completions`,
+          );
+        }
+        if (!out.includes(value)) out.push(value);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * The caller-local estate readers, emitted between the banner and `_std()`.
+ *
+ * std emits the READER, never the names (D4/NFR3) — the values resolve from the caller's own estate file
+ * at completion time, and this generator never opens it. The only data interpolated here is the `--tools`
+ * flag's `defaults`, which is std's own vocabulary rather than any consumer's.
+ *
+ * A line scanner, not a TOML parser: it reads `path`/`name`/`tools` out of `[[repos]]` blocks and nothing
+ * else. A multi-line `tools = [ … ]` array drops its declared tools; a value spanning lines is not read.
+ * Every ceiling degrades to FEWER completions and none errors the shell — which is the property that
+ * matters at a `<TAB>`, and it is pinned by tests rather than left to chance.
+ */
+function estateReaderBlock(surface: CommandSurface): string {
+  const toolDefaults = estateDefaults(surface, "estate.tools");
+  const toolWords = toolDefaults.length > 0 ? ` ${toolDefaults.join(" ")}` : "";
+  // `estateDefaults` is generic over the source, but only `_std_estate_tools` unions its result —
+  // `_std_estate_repos` has no defaults to union and must not grow any: a repo name is caller-local
+  // by definition, so a std-shipped default repo name would bake consumer identity into the artifact
+  // (D4/NFR3), which is the one thing this whole block exists to avoid. Fail loud rather than drop it
+  // silently, which is what an unwired generic does.
+  if (estateDefaults(surface, "estate.repos").length > 0) {
+    throw new RepoNavError(
+      "_std: a flag sourced from 'estate.repos' declares `defaults` — repo names are caller-local, " +
+        "so std must not ship any (D4/NFR3), and `_std_estate_repos` unions none. Drop the defaults.",
+    );
+  }
+  return `# --- caller-local estate readers -------------------------------------------------------------------
+# std emits the READER, never the names (D4/NFR3). Values resolve from the caller's estate file at
+# completion time. A missing/unreadable/malformed file yields no completions and never errors the shell.
+# \`source-only\` entries ARE offered: selectRepos excludes them from the DEFAULT set only — naming one
+# explicitly is the one way to reach it (src/bmad/manifest.ts). Do not filter them.
+_std_estate_values() {
+  emulate -L zsh
+  setopt extendedglob
+  local what=$1
+  local f="\${XDG_CONFIG_HOME:-$HOME/.config}/std/estate.toml"
+  [[ -f $f && -r $f ]] || return 0            # -f matters: -r alone is TRUE for a directory
+  local -a out
+  local line k v p n t key
+  p=''; n=''
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line == (#s)[[:space:]]#\\[* ]]; then     # any [table] / [[array]] header ends the entry
+      if [[ $what == repos ]]; then
+        key=\${n:-\${p:t}}
+        [[ -n $key ]] && out+=($key)
+      fi
+      p=''; n=''
+      continue
+    fi
+    [[ $line == *=* ]] || continue
+    k=\${line%%=*}; k=\${k//[[:space:]]##/}
+    v=\${line#*=}
+    v=\${v##[[:space:]]##}
+    v=\${v%%[[:space:]]##}
+    case $k in
+      path) p=\${\${v#[\\"\\']}%%[\\"\\']*} ;;
+      name) n=\${\${v#[\\"\\']}%%[\\"\\']*} ;;
+      tools)
+        [[ $what == tools ]] || continue
+        v=\${v#*\\[}; v=\${v%%\\]*}
+        for t in \${(s:,:)v}; do
+          t=\${t//[[:space:]]##/}
+          t=\${\${t#[\\"\\']}%%[\\"\\']*}
+          [[ -n $t ]] && out+=($t)
+        done
+        ;;
+    esac
+  done < $f
+  if [[ $what == repos ]]; then                      # flush the final entry (no trailing header)
+    key=\${n:-\${p:t}}
+    [[ -n $key ]] && out+=($key)
+  fi
+  print -l -- \${(ou)out}
+  return 0
+}
+_std_estate_repos() { local -a n; n=(\${(f)"$(_std_estate_values repos)"}); (( $#n )) && compadd "$@" -a n; return 0 }
+_std_estate_tools() { local -a n; n=(\${(f)"$(_std_estate_values tools)"}${toolWords}); n=(\${(u)n}); compadd "$@" -a n; return 0 }
+_std_list() {
+  # _arguments invokes a non-space action as: <action[1]> "$subopts[@]" "$expl[@]" <action[2,-1]>
+  # (zsh 5.9 /usr/share/zsh/5.9/functions/_arguments:465). So the per-item completer is the LAST
+  # argument and EVERYTHING BEFORE IT is compadd options that must be forwarded, not dropped.
+  local fn=\${@[-1]}
+  local -a opts=("\${@[1,-2]}")
+  # _sequence handles the comma list (it zparseopts-strips those options itself and re-passes them
+  # to the per-item function); fall back to one value without it.
+  if (( $+functions[_sequence] )); then _sequence "\${opts[@]}" -s , $fn; else $fn "\${opts[@]}"; fi
+}`;
 }
 
 /** Sorted by NAME — never by the rendered spec, under which the repeatable `*--set` sorts first. */
@@ -253,6 +389,9 @@ export function generateStdCompletion(surface: CommandSurface): string {
   const out: string[] = [
     "#compdef std",
     "# _std — GENERATED by `std alias --install` from the std-cli command surface (AD-7). Do NOT hand-edit.",
+    // AFTER the banner and BEFORE `_std()` — the banner is an oracle 3.2 pins byte-for-byte, and the
+    // readers must be defined before the completer that names them in an action.
+    estateReaderBlock(surface),
     "_std() {",
     '  local curcontext="$curcontext" state line',
     "  typeset -A opt_args",

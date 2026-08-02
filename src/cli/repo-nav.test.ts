@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -204,6 +204,116 @@ async function probeNames(artifact: string, path: string): Promise<string[]> {
   return rows.map((l) => l.split(":")[0]!);
 }
 
+/**
+ * The FULL optspecs at `path`, tails included (3.3).
+ *
+ * The SAME zsh harness as `probeFlags` — the difference is TS-side only, and it is the whole point:
+ * `probeFlags` cuts every row at its first `[`, so no 3.2 assertion can see a `:message:action` tail at
+ * all. A whole-artifact `expect(out).toContain(…)` is not a substitute: it matches the reader's own body,
+ * a comment, anything.
+ */
+async function probeSpecs(artifact: string, path: string): Promise<string[]> {
+  const rows = await runProbe(PROBE_FLAGS, artifact, path);
+  return rows.filter((l) => l.includes("--"));
+}
+
+/** The spec for one flag out of a `probeSpecs` result. `undefined` when the flag is not offered there. */
+function specOf(specs: string[], flag: string): string | undefined {
+  return specs.find((s) => s.startsWith(flag));
+}
+
+// ── the estate-reader probe: the AC4/AC5/AC7 mechanism (3.3) ───────────────────────────────────────
+//
+// The emitted readers are drivable without a PTY: source the artifact under `zsh -f` with the completion
+// system stubbed, point `XDG_CONFIG_HOME` at a fixture dir, and call the action the way `_arguments`
+// does. Four traps, all of them live:
+//   1. `source`ing a `#compdef` file EXECUTES its trailing `_std "$@"` — reset `CAPTURED` after it.
+//   2. `compadd -a n` passes the array NAME, not its elements. `${(@P)…}` dereferences; plain `${(P)…}`
+//      joins every element into one word and yields a one-element result that still looks plausible.
+//   3. `${=3}` (word-split), not `$3` — else `_std_list _std_estate_repos` is looked up as one command.
+//   4. 🔴 The `-J`/`-X` injection is LOAD-BEARING. `_arguments` dispatches a non-space action as
+//      `"$action[1]" "$subopts[@]" "$expl[@]" "${(@)action[2,-1]}"` (zsh 5.9 `_arguments:465`) and
+//      `expl` is never empty — every branch of `_description`'s `set -A` ends in at least `-J <group>`.
+//      A harness that word-splits and calls, and stops there, hands `_std_list` exactly the argv a naive
+//      `$1`-reading wrapper expects, and passes over the broken form. With the injection, `$1` is `-J`
+//      and the wrapper returns nothing. Drive `_std_list <fn>` (the action AS EMITTED), never the leaf
+//      bare — driving the leaf directly bypasses the wrapper and re-blinds the harness.
+const PROBE_READER = `#!/bin/zsh -f
+emulate -L zsh
+local -a CAPTURED
+_arguments() { return 0 }; _describe() { return 0 }; _files() { return 0 }
+compadd() { if [[ \${@[-2]} == -a ]]; then CAPTURED+=("\${(@P)@[-1]}"); else CAPTURED+=("$@"); fi; return 0 }
+source $1 >/dev/null 2>&1
+CAPTURED=()
+export XDG_CONFIG_HOME=$2
+local -a words=(\${=3})
+if (( $#words > 1 )); then $words[1] -J probe-group -X probe-descr "\${(@)words[2,-1]}"; else \${=3}; fi
+print -l -- $CAPTURED
+`;
+
+interface ReaderResult {
+  /** The words `compadd` was handed. */
+  values: string[];
+  code: number;
+  /** Asserted EMPTY by every degradation row — a completer that writes to stderr prints over the prompt. */
+  stderr: string;
+}
+
+/** Drive `action` (e.g. `"_std_list _std_estate_repos"`) against the estate under `xdg`. */
+async function probeReader(artifact: string, xdg: string, action: string): Promise<ReaderResult> {
+  const root = mkdtempSync(join(tmpdir(), "std-reader-"));
+  try {
+    const scriptPath = join(root, "probe.zsh");
+    const artifactPath = join(root, "_std");
+    writeFileSync(scriptPath, PROBE_READER);
+    writeFileSync(artifactPath, artifact);
+    const r = await spawnCapture("zsh", [scriptPath, artifactPath, xdg, action]);
+    return { values: r.stdout.split("\n").filter(Boolean), code: r.code, stderr: r.stderr };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** Write `toml` to `<dir>/std/estate.toml` and return `dir` (the `XDG_CONFIG_HOME` the reader reads). */
+function estateDir(toml: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "std-estate-"));
+  mkdirSync(join(dir, "std"), { recursive: true });
+  writeFileSync(join(dir, "std", "estate.toml"), toml);
+  return dir;
+}
+
+/**
+ * The AC4 fixture. Four entries, each earning its place: an implicit key from `basename`, a declared
+ * `tools` array, a `#` inside a string value (which is NOT a comment), and an explicit `name` on a
+ * `source-only` entry — the one shape reachable only by naming it.
+ */
+const FIXTURE = `[[repos]]
+path = "~/Dev/example-repo"
+claudeTracked = true
+hasUpstream = true
+
+[[repos]]
+path = "~/Dev/example-workspace/another-repo"
+claudeTracked = true
+hasUpstream = false
+branch = "feature/some-work"
+tools = ["claude-code"]
+
+[[repos]]
+path = "~/Dev/example-workspace/gitignored-repo"
+claudeTracked = false
+hasUpstream = true
+notes = "working-copy-only; # not a comment"
+
+[[repos]]
+path = "~/example-hq/packs/example-pack"
+name = "example-pack"
+role = "source-only"
+claudeTracked = false
+hasUpstream = false
+tools = ["claude-code", "some-other-tool"]
+`;
+
 describe("generateStdCompletion — the two-level emitter, derived from the surface (AC1/AC5)", () => {
   const out = generateStdCompletion(SURFACE);
 
@@ -302,6 +412,295 @@ describe("the emitted `_std` under a real zsh (AC2/AC3/AC6/AC7)", () => {
     expect(await probeNames(out, "bmad")).toEqual(["deploy", "install", "update", "verify"]);
     expect(await probeNames(out, "cn")).toEqual(["deploy", "verify"]);
     expect(await probeNames(out, "dashkit")).toEqual(["deploy", "verify"]);
+  });
+});
+
+// ── 3.3: value completion for --repos / --tools from the caller-local estate ───────────────────────
+
+describe("the `source` → reader action mapping, read through the TAIL (3.3 AC3/AC9)", () => {
+  const out = generateStdCompletion(SURFACE);
+
+  test.skipIf(!HAS_ZSH)("--repos and --tools carry the reader action; the message half is 3.2's", async () => {
+    expect(specOf(await probeSpecs(out, "bmad install"), "--repos")).toMatch(
+      /:a,b:_std_list _std_estate_repos$/,
+    );
+    expect(specOf(await probeSpecs(out, "bmad verify"), "--repos")).toMatch(
+      /:a,b:_std_list _std_estate_repos$/,
+    );
+    // 🔴 The control on `deploy`'s OWN path, and it is not redundant with `install`: `deploy` is the one
+    // subcommand with no `--repos` (BM-19), so an emitter that dropped `deploy` entirely would leave
+    // every `--repos` line above green.
+    expect(specOf(await probeSpecs(out, "bmad deploy"), "--tools")).toMatch(
+      /:a,b:_std_list _std_estate_tools$/,
+    );
+  });
+
+  // OUT OF SCOPE, ASSERTED AS AN ABSENCE. `--skills`' vocabulary is the estate MODULE's `skills/` dir
+  // (resolved from the installed package, not the caller's estate) and is doubled by the `bmad-agent-`
+  // shorthand; `--set`'s `m.k=v` has no enumerable source anywhere. Both go red the day someone wires a
+  // reader for them without a story.
+  test.skipIf(!HAS_ZSH)("--skills and --set keep the EMPTY action", async () => {
+    expect(specOf(await probeSpecs(out, "bmad verify"), "--skills")).toMatch(/:a,b:$/);
+    expect(specOf(await probeSpecs(out, "bmad install"), "*--set")).toMatch(/:m\.k=v:$/);
+  });
+
+  // The probe's own control: a `probeSpecs` that silently returned rows with no tails would make every
+  // `/:a,b:$/` above pass. `--vault` is a tail nothing in this story touches.
+  test.skipIf(!HAS_ZSH)("probeSpecs really carries tails — the harness control", async () => {
+    expect(specOf(await probeSpecs(out, "cn deploy"), "--vault")).toMatch(/:dir:_files -\/$/);
+    expect(specOf(await probeSpecs(out, "cn deploy"), "--format")).toMatch(/:fmt:\(esm cjs\)$/);
+  });
+
+  test("the emitted reader forwards compadd options at BOTH links of the chain (AC8)", () => {
+    // `_sequence` re-passes `-S ,` and `-F dedup` THROUGH the per-item function. Dropping `"$@"` still
+    // returns the right names — so every assertion in this file stays green — and silently loses comma
+    // continuation and already-typed suppression at the live `<TAB>`. Only AC13 sees that half.
+    expect(out).toContain('compadd "$@" -a n');
+    expect(out).not.toMatch(/compadd -a n/);
+    // The other link, one level up. This one IS behaviourally covered — see the AC4 rows below.
+    expect(out).toMatch(/local fn=\$\{@\[-1\]\}/);
+  });
+
+  test("the reader block sits AFTER the banner and BEFORE `_std()` (AC10)", () => {
+    expect(out.split("\n")[0]).toBe("#compdef std");
+    expect(out.indexOf("_std_estate_values() {")).toBeLessThan(out.indexOf("\n_std() {"));
+    expect(out.indexOf("# _std — GENERATED by")).toBeLessThan(out.indexOf("_std_estate_values() {"));
+    expect(generateStdCompletion(SURFACE)).toBe(out); // static text ⇒ still deterministic
+  });
+});
+
+describe("the emitted reader DRIVEN against fixture estates (3.3 AC4/AC6/AC8)", () => {
+  const out = generateStdCompletion(SURFACE);
+
+  // 🔴 THE POSITIVE CONTROL for every `toEqual([])` in the degradation block below. A silently broken
+  // `probeReader` returns `[]` for every input and makes all nine of those rows pass. These two must be
+  // non-empty, in this file, through the same harness.
+  test.skipIf(!HAS_ZSH)("--repos returns the estate's names — INCLUDING the source-only entry (AC6)", async () => {
+    const dir = estateDir(FIXTURE);
+    try {
+      const r = await probeReader(out, dir, "_std_list _std_estate_repos");
+      // `example-pack` is the `role = "source-only"` entry. `selectRepos` excludes those from the
+      // DEFAULT set only — naming one explicitly is the one way to reach it, so a completer that
+      // filtered them would make the one shape you can ONLY reach by typing un-typeable.
+      expect(r.values).toEqual(["another-repo", "example-pack", "example-repo", "gitignored-repo"]);
+      expect(r.code).toBe(0);
+      expect(r.stderr).toBe("");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(!HAS_ZSH)("--tools unions the declared tools with the model's defaults", async () => {
+    const dir = estateDir(FIXTURE);
+    try {
+      const r = await probeReader(out, dir, "_std_list _std_estate_tools");
+      // ⚠ NOT sorted, and the assertion describes what the code does rather than what looks tidy:
+      // `${(ou)out}` sorts the FILE-derived names, the defaults are then appended and `${(u)}` dedupes
+      // in place — so `claude-code` keeps its earlier position and the two defaults land last.
+      expect(r.values).toEqual(["claude-code", "some-other-tool", "antigravity-cli"]);
+      expect(r.stderr).toBe("");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A DOCUMENTED CEILING, pinned so it is a stated limitation rather than a later discovery. The reader
+  // is a line scanner: widening this means buffering across lines, which is where it turns into a TOML
+  // parser. It degrades to FEWER completions and never to an error.
+  test.skipIf(!HAS_ZSH)("a multi-line `tools = [ … ]` array drops its tools; the defaults survive", async () => {
+    const dir = estateDir(
+      '[[repos]]\npath = "~/Dev/multiline-repo"\ntools = [\n  "only-in-multiline",\n]\n',
+    );
+    try {
+      const r = await probeReader(out, dir, "_std_list _std_estate_tools");
+      expect(r.values).toEqual(["claude-code", "antigravity-cli"]);
+      expect(r.values).not.toContain("only-in-multiline");
+      // The control on the SAME fixture: the repo name IS read, so this proves the ceiling rather than
+      // a fixture the reader never opened.
+      expect((await probeReader(out, dir, "_std_list _std_estate_repos")).values).toEqual([
+        "multiline-repo",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("degradation: a bad estate yields NO completions, rc 0, and never errors the shell (3.3 AC5)", () => {
+  const out = generateStdCompletion(SURFACE);
+  // `chmod 000` is not a fence root can honour — root reads an unreadable file, so the row would report
+  // the fixture's names. Skipping under root is the same capability-fence shape as `HAS_ZSH`.
+  const IS_ROOT = typeof process.getuid === "function" && process.getuid() === 0;
+
+  /** Build a fixture dir, run the repos reader over it, and clean up. */
+  async function repos(build: (dir: string) => void): Promise<ReaderResult> {
+    const dir = mkdtempSync(join(tmpdir(), "std-degrade-"));
+    try {
+      mkdirSync(join(dir, "std"), { recursive: true });
+      build(dir);
+      return await probeReader(out, dir, "_std_list _std_estate_repos");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const file = (dir: string) => join(dir, "std", "estate.toml");
+
+  test.skipIf(!HAS_ZSH)("the estate file is absent", async () => {
+    const r = await repos(() => {});
+    expect(r.values).toEqual([]);
+    expect(r.code).toBe(0);
+    // The red-turning input for the `[[ -f $f && -r $f ]]` guard: without it this row emits a
+    // `no such file or directory` line, which in a live shell prints over the prompt.
+    expect(r.stderr).toBe("");
+  });
+
+  // ⚠ THIS ROW IS DEFENSIVE, AND SAYING SO IS THE HONEST LABEL. `[[ -r $f ]]` is TRUE for a readable
+  // directory, so the `-f` conjunct is what makes the guard mean what it says — but MEASURED on
+  // darwin/zsh 5.9, weakening the guard to a lone `-r` leaves this row GREEN: the `< $dir` redirect
+  // fails, and it fails QUIETLY, so there is no observable difference to assert on. The `-f` stays
+  // because the guard should not depend on that; this test does not claim to cover it. What DOES have
+  // teeth is deleting the guard outright — the `stderr` assertions below turn red on it.
+  test.skipIf(!HAS_ZSH)("estate.toml is a DIRECTORY", async () => {
+    const r = await repos((dir) => mkdirSync(file(dir)));
+    expect(r.values).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toBe("");
+  });
+
+  test.skipIf(!HAS_ZSH)("estate.toml is 4 KB of binary noise", async () => {
+    const noise = new Uint8Array(4096);
+    for (let i = 0; i < noise.length; i++) noise[i] = (i * 7919) % 256;
+    const r = await repos((dir) => writeFileSync(file(dir), noise));
+    expect(r.values).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toBe("");
+  });
+
+  test.skipIf(!HAS_ZSH)("it parses but declares no [[repos]]", async () => {
+    const r = await repos((dir) => writeFileSync(file(dir), "foo = 1\n"));
+    expect(r.values).toEqual([]);
+    expect(r.stderr).toBe("");
+  });
+
+  test.skipIf(!HAS_ZSH)("the file is empty", async () => {
+    const r = await repos((dir) => writeFileSync(file(dir), ""));
+    expect(r.values).toEqual([]);
+    expect(r.stderr).toBe("");
+  });
+
+  test.skipIf(!HAS_ZSH || IS_ROOT)("the file is chmod 000", async () => {
+    const r = await repos((dir) => writeFileSync(file(dir), FIXTURE, { mode: 0o000 }));
+    expect(r.values).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toBe("");
+  });
+
+  // The last three rows are NOT `[]`: they are the malformed-looking inputs the reader must still read.
+  test.skipIf(!HAS_ZSH)("CRLF line endings — the \\r is stripped", async () => {
+    const r = await repos((dir) =>
+      writeFileSync(file(dir), '[[repos]]\r\npath = "~/Dev/crlf-repo"\r\n'),
+    );
+    expect(r.values).toEqual(["crlf-repo"]);
+    expect(r.stderr).toBe("");
+  });
+
+  // The `|| [[ -n $line ]]` half of the `while read` condition: without it `read` returns non-zero on
+  // the unterminated last line and the entry is silently dropped.
+  test.skipIf(!HAS_ZSH)("no trailing newline — the last entry survives", async () => {
+    const r = await repos((dir) =>
+      writeFileSync(file(dir), '[[repos]]\npath = "~/Dev/no-final-newline"'),
+    );
+    expect(r.values).toEqual(["no-final-newline"]);
+    expect(r.stderr).toBe("");
+  });
+
+  test.skipIf(!HAS_ZSH)("an entry with neither path nor name is skipped; the others are kept", async () => {
+    const r = await repos((dir) =>
+      writeFileSync(
+        file(dir),
+        '[[repos]]\nclaudeTracked = true\n\n[[repos]]\npath = "~/Dev/kept-repo"\n',
+      ),
+    );
+    expect(r.values).toEqual(["kept-repo"]);
+    expect(r.stderr).toBe("");
+  });
+
+  // 🔴 The one row that distinguishes "the defaults are wired" from "the reader ran": `--tools` does NOT
+  // degrade to `[]`. With no estate at all it still offers std's own vocabulary.
+  test.skipIf(!HAS_ZSH)("--tools with NO estate file still offers the model's defaults", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "std-degrade-"));
+    try {
+      const r = await probeReader(out, dir, "_std_list _std_estate_tools");
+      expect(r.values).toEqual(["claude-code", "antigravity-cli"]);
+      expect(r.code).toBe(0);
+      expect(r.stderr).toBe("");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("std emits the READER, never the names (3.3 AC7 — D4/NFR3)", () => {
+  // 🔴 `check:no-consumer-ids` is NOT the assertion that proves this, and presenting it as one is the
+  // vacuous-gate shape this epic exists to remove: it is a SIX-NAME denylist, so a real repo name baked
+  // into the emitter sails straight through it. Keep that gate green; this is the evidence.
+  const PLANTED = ["zzz-planted-repo-a", "zzz-planted-repo-b"];
+  const PLANTED_FIXTURE = PLANTED.map((n) => `[[repos]]\npath = "~/Dev/${n}"\n`).join("\n");
+
+  test.skipIf(!HAS_ZSH)("generating with a populated estate IN SCOPE produces an estate-free artifact", async () => {
+    const dir = estateDir(PLANTED_FIXTURE);
+    const prev = process.env.XDG_CONFIG_HOME;
+    let out: string;
+    try {
+      // The exact path `resolveManifestPath()` reads — so a generator that opened the estate would find
+      // this file, not an empty one.
+      process.env.XDG_CONFIG_HOME = dir;
+      out = generateStdCompletion(SURFACE);
+    } finally {
+      // `bun test` runs files in ONE process; a leaked env var would follow every later test.
+      if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prev;
+    }
+    try {
+      // Half one: the artifact is independent of the estate that was in scope when it was generated.
+      // Planted names that cannot occur incidentally — never `example-repo`.
+      for (const n of PLANTED) expect(out).not.toContain(n);
+      // 🔴 Half two, and BOTH OR NEITHER: the line above is green on an emitter that emits no reader at
+      // all. This proves the fixture is real, the path is the one the reader reads, and the values
+      // arrive AT COMPLETION TIME rather than at generate time.
+      expect((await probeReader(out, dir, "_std_list _std_estate_repos")).values).toEqual(PLANTED);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Raised by CodeRabbit on PR #72: `estateDefaults` is generic over `FlagValueSource`, but only
+  // `_std_estate_tools` unions its result — `_std_estate_repos` unions none. Today that is invisible
+  // because `REPOS` declares no `defaults`, so an unwired generic sits there waiting to drop a future
+  // one SILENTLY. The guard fails loud instead, and this is the input that makes it fire.
+  //
+  // Why fail loud rather than wire repos defaults up: a repo name is caller-local BY DEFINITION, so a
+  // std-shipped default repo name would bake consumer identity into the artifact (D4/NFR3) — the one
+  // thing the reader block exists to prevent. The right answer to "I want a default repo" is "no",
+  // stated by the code rather than left to a reviewer to notice.
+  test("a repos-sourced `defaults` fails LOUD — the unwired half of estateDefaults (D4/NFR3)", () => {
+    const mutated = JSON.parse(JSON.stringify(SURFACE)) as {
+      commands: { flags?: { name: string; source?: string; defaults?: string[] }[]; subcommands: { flags: { name: string; source?: string; defaults?: string[] }[] }[] }[];
+    };
+    const repoFlags = mutated.commands
+      .flatMap((c) => [...(c.flags ?? []), ...c.subcommands.flatMap((s) => s.flags)])
+      .filter((f) => f.source === "estate.repos");
+    // Positive control: the mutation has something to attach to. Without this, a SURFACE that stopped
+    // declaring `source: "estate.repos"` would make the toThrow below pass for the wrong reason.
+    expect(repoFlags.length).toBeGreaterThan(0);
+    for (const f of repoFlags) f.defaults = ["std-owned-repo"];
+
+    expect(() => generateStdCompletion(mutated as unknown as typeof SURFACE)).toThrow(RepoNavError);
+    expect(() => generateStdCompletion(mutated as unknown as typeof SURFACE)).toThrow(/estate\.repos/);
+    // And the unmutated surface does NOT throw — the guard is the mutation's doing, not a broken clone.
+    const clean = JSON.parse(JSON.stringify(SURFACE)) as unknown as typeof SURFACE;
+    expect(() => generateStdCompletion(clean)).not.toThrow();
   });
 });
 
