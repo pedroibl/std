@@ -505,24 +505,64 @@ describe("router + exit contract (AC1/AC7 — BM-1)", () => {
 
   // Story 2.3 gave the shared pipeline a real mutation path (BM-4: one per-repo filter chain), which
   // silently promoted `update --apply`/`deploy --apply` from 2.2 no-ops into REAL estate-wide runs of
-  // their PROVISIONAL legs. Fenced at the command entry until 2.5/2.7 author the real ones.
+  // their PROVISIONAL legs. Fenced at the command entry until 2.5/2.7 authored the real ones. 2.5
+  // narrowed the tripwire to `deploy` alone; 2.7 is the story that authors deploy, so the LAST fence in
+  // the family is gone and this pair INVERTS — exactly the move 2.5 made for `update` and 2.6 for
+  // `verify`. Both halves stay: an inverted tripwire is a live regression guard, a deleted one is not.
   //
-  // NARROWED TO `deploy` BY 2.5, in the same commit that authored the real update leg and deleted
-  // update's fence. Narrowed rather than deleted: `deploy` is still provisional until 2.7, and dropping
-  // the whole tripwire here would remove the guard protecting the OTHER command while it is still
-  // unbuilt — the precise sequencing hazard the fence's own comment warned about.
-  test("deploy refuses --apply while its leg is provisional (exit 2, nothing shelled)", async () => {
-    const { deps, counts } = fakeDeps();
-    expect(await runBmad(["deploy", "--apply"], deps)).toBe(2);
-    expect(await runBmad(["deploy", "--apply", "--push"], deps)).toBe(2);
-    // the deliberately-exploding fake would have thrown had the pipeline been reached at all
-    expect(counts.json).toHaveLength(0);
+  // `--apply` must now REACH the mutation path. Proven by the exploding fake's OWN write guard: this
+  // deps makes every `fs` write throw by name, so an `--apply` that gets as far as materializing the
+  // BM-12 staging dir surfaces `fs.ensureDir`. Under the old fence the run returned 2 having written
+  // nothing, so this message was unreachable — it can only appear once the fence is gone.
+  test("deploy --apply is no longer fenced — it reaches the staging write (2.7)", async () => {
+    const { deps } = fakeDeps();
+    let threw = "";
+    try {
+      await runBmad(["deploy", "--apply"], deps);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
+    }
+    expect(threw).toContain("fs.ensureDir");
   });
 
-  test("the fence is on --apply only — deploy dry runs still plan normally", async () => {
+  test("deploy dry runs still plan normally and write nothing (the fence's other half)", async () => {
     const { deps } = fakeDeps();
     expect(await runBmad(["deploy"], deps)).toBe(0);
     expect(await runBmad(["deploy", "--push"], deps)).toBe(0);
+  });
+
+  // WHERE THE OLD FENCE'S PROTECTIVE ROLE WENT (2.7). The fence's job was "this high-blast-radius
+  // command must not mutate the estate by accident". Authoring deploy does not retire that concern, it
+  // relocates it: deploy is estate-wide by construction and now REFUSES `--repos` rather than silently
+  // widening an operator's scoping intent into a whole-estate mutation (AC1). This is the router-level
+  // tripwire for that refusal — `deploy.test.ts` owns the exhaustive spelling matrix.
+  //
+  // The exploding fake is the instrument again: it throws by name on `exec` and on every `fs` write, so
+  // an exit code of 2 with no thrown message and no rendered payload proves the refusal happened BEFORE
+  // any repo was read or touched, not after a batch that merely declined to act.
+  test("deploy refuses --repos — exit 2, before anything is read or shelled (2.7 AC1)", async () => {
+    for (const argv of [
+      ["deploy", "--repos", "alpha"],
+      ["deploy", "--repos", "alpha", "--apply", "--push"],
+      ["deploy", "--repos"],
+      ["deploy", "--repos="],
+      ["deploy", "--repos=alpha", "--apply"],
+    ]) {
+      const { deps, counts } = fakeDeps();
+      expect(await runBmad(argv, deps)).toBe(2);
+      expect(counts.json).toHaveLength(0);
+      expect(counts.print).toHaveLength(0);
+      expect(counts.logged.join("\n")).toContain("--repos is not accepted");
+    }
+  });
+
+  // The other half of AC1, and the one a "just ignore the flag" regression would pass while the test
+  // above still went green: refusing is only correct if deploy WITHOUT `--repos` is still estate-wide.
+  test("deploy without --repos still runs the default repo set (AC1's other half)", async () => {
+    const { deps, counts } = fakeDeps();
+    expect(await runBmad(["deploy", "--json"], deps)).toBe(0);
+    const payload = counts.json[0] as { repos: RepoResult[] };
+    expect(payload.repos.map((r) => r.repo)).toEqual(["alpha", "beta"]);
   });
 
   // The 2.3 tripwire INVERTED for `update` — the same move 2.6 made for `verify`. It asserted a

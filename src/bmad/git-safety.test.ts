@@ -33,6 +33,7 @@ import { git as realGit } from "../git/index";
 import { spawnCapture } from "../proc/index";
 import { batchExit } from "./batch";
 import {
+  fixtureGit,
   makeEstateModule,
   makeScratchRepo,
   removeTempTree,
@@ -121,10 +122,15 @@ function scratchPath(prefix: string): string {
  * Run git and THROW on failure — the inverse of `src/git`'s fail-soft wrapper, and deliberately so.
  * Fixture setup that silently half-worked produces a test that passes for the wrong reason, which is the
  * one failure mode a suite about silent failure cannot afford.
+ *
+ * DELEGATES TO THE SHARED RUNNER SINCE 2.7 (AC11). It used to shell git directly and set the commit
+ * identity with three `git config` writes per fixture; `fixtureGit` carries that identity as `-c` flags
+ * on every invocation instead, so `user.email` now appears in exactly ONE file in `src/bmad/`. Two places
+ * declaring a fixture identity is how the two drift, and a fixture whose identity went missing fails only
+ * on a machine with no global git identity — i.e. in CI, never here.
  */
 function g(dir: string, ...args: string[]): string {
-  const stdio: ("ignore" | "pipe")[] = ["ignore", "pipe", "pipe"];
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf-8", stdio }).trim();
+  return fixtureGit(dir, ...args);
 }
 
 /** Write a file and its parents. */
@@ -160,16 +166,16 @@ interface Fixture extends ScratchRepo {
 /**
  * Build one posture on a disposable scratch repo (BM-9).
  *
- * `git config user.email`/`user.name` are set on EVERY fixture: a fresh `git init` inherits no commit
- * identity in a clean environment, and without them `git commit` exits non-zero — which the fail-soft
- * wrapper would swallow, turning every commit assertion in this file red for a reason that has nothing
- * to do with the code under test.
+ * A commit identity is forced on EVERY git call this fixture makes, via the shared runner: a fresh
+ * `git init` inherits no commit identity in a clean environment, and without one `git commit` exits
+ * non-zero — which the fail-soft wrapper would swallow, turning every commit assertion in this file red
+ * for a reason that has nothing to do with the code under test.
  */
 async function makePosture(name: string, opts: PostureOpts = {}): Promise<Fixture> {
   const s = await makeScratchRepo();
-  g(s.dir, "config", "user.email", "fixture@example.invalid");
-  g(s.dir, "config", "user.name", "bmad fixture");
-  g(s.dir, "config", "commit.gpgsign", "false");
+  // The identity + `commit.gpgsign=false` used to be three `git config` writes here. They now ride every
+  // `g()` call as `-c` flags from the shared `FIXTURE_IDENTITY` (2.7/AC11), which also covers repos this
+  // function did not create — the diverged clone below used to need its own copy of them.
 
   put(join(s.dir, "README.md"), `# ${name}\n`);
   g(s.dir, "add", "README.md");
@@ -862,8 +868,6 @@ describe("AC6 — every git write is state-verified; a silent no-op is never `ok
       // diverge at all, which makes this test silently vacuous.
       const cloneArgv = ["clone", "-q", "-b", DEFAULT_BRANCH, f.remote as string, other];
       execFileSync("git", cloneArgv, { stdio: "ignore" });
-      g(other, "config", "user.email", "other@example.invalid");
-      g(other, "config", "user.name", "other");
       put(join(other, "theirs.txt"), "theirs\n");
       g(other, "add", "theirs.txt");
       g(other, "commit", "-m", "theirs");
