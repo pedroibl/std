@@ -83,3 +83,10 @@ jobs:
       # runnable, no SKIP path. Gates Epic 4, where cli core lands.
       - name: No consumer identifiers
         run: bun run check:no-consumer-ids
+
+      # Gate 8 — the command surface knows every flag the code reads: no `hasFlag`/`flagValue`/
+      # `collectFlagValues` literal in src/bmad or src/cli that SURFACE never declares (Story 3.2 AC8).
+      # NAME-LEVEL and GLOBAL by necessity — `bmad deploy` reads `--repos` in order to REFUSE it
+      # (BM-19), so a per-subcommand form would fail the build on correct code.
+      - name: Surface drift
+        run: bun run check:surface-drift

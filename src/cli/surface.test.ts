@@ -10,6 +10,7 @@ import {
   SURFACE,
   flagEnum,
   flagNames,
+  renderAliasUsage,
   subNames,
   type BmadSub,
   type CommandSurface,
@@ -51,6 +52,19 @@ describe("SURFACE is validated, serializable DATA (AC1)", () => {
     expect(subNames(S, "cn")).toEqual(["deploy", "verify"]);
     expect(subNames(S, "dashkit")).toEqual(["deploy", "verify"]);
     expect(subNames(S, "bmad")).toEqual(["install", "update", "deploy", "verify"]);
+  });
+
+  // 3.2's addition: the completer's top-level `_describe` needs one line per COMMAND, and `HELP` renders
+  // none (its `commands:` block is keyed by help group). Required rather than optional, so a fifth
+  // command cannot land without one and complete as a bare name.
+  test("every command carries its own non-empty desc, and none names a vault", () => {
+    for (const c of S.commands) {
+      expect(c.desc.length, c.name).toBeGreaterThan(0);
+      // `check:no-consumer-ids` globs `src/**` skipping only `*.test.ts`, so `surface.ts` IS scanned and
+      // two of its six denylisted names are vaults. A vault-named description here is a RED BUILD, not
+      // a style question — this pins the intent next to the data, ahead of the gate.
+      expect(c.desc, c.name).not.toMatch(/zDrafts|note-report/);
+    }
   });
 
   test("every subcommand carries its own non-empty desc", () => {
@@ -222,6 +236,27 @@ describe("the HELP layout is a partition, not a list (AC1 / §Layout)", () => {
       "bmad update",
       "bmad verify",
     ]);
+  });
+});
+
+describe("renderAliasUsage — R-3 closed, the line is stated ONCE (3.2 AC9)", () => {
+  // The two hand-written copies had ALREADY drifted — `main.ts` said "regenerate repo-nav + _std", and
+  // `repo-nav.ts` said "(re)generate repo-nav + _std completion". Neither of the two existing assertions
+  // noticed, because both are the loose regex `/usage: std alias --install/`. That is precisely why the
+  // FULL line is pinned here: without it the unification lands unenforced and is free to drift again.
+  test("renders the full canonical line, byte for byte", () => {
+    expect(renderAliasUsage(S)).toBe(
+      "usage: std alias --install   # (re)generate repo-nav + the _std completion from ~/.config/std/repos.ts",
+    );
+  });
+
+  // The text IS the flag's own `desc`, so the usage line and the completer's explanation for the same
+  // flag cannot diverge: changing one changes both.
+  test("the text is derived from the --install flag's desc, not restated", () => {
+    const install = S.commands
+      .find((c) => c.name === "alias")!
+      .flags!.find((f) => f.name === "--install")!;
+    expect(renderAliasUsage(S)).toContain(install.desc);
   });
 });
 

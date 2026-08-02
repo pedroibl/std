@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { spawnCapture } from "../proc";
 import {
   NAV_NAME_GRAMMAR,
   RepoNavError,
+  SURFACE,
   defaultTargets,
   generateRepoNav,
   generateStdCompletion,
@@ -14,6 +16,9 @@ import {
   validateRegistry,
   type RepoConfig,
 } from "./index";
+// `describeEntry`/`argSpec` are repo-nav exports, NOT barrel exports: AC7 fences `index.ts` to exactly
+// two new re-exports (`SURFACE` + `CommandSurface`), so the escaping helpers are imported directly.
+import { argSpec, describeEntry } from "./repo-nav";
 
 const cfg: RepoConfig = {
   entries: { zp: "$HOME/Dev/zsh-planning", mph: "$HOME/Sites/melb-print-hub", std: "$HOME/Dev/std" },
@@ -99,18 +104,265 @@ describe("generateRepoNav — deterministic, declaration-ordered, complete (AC1)
   });
 });
 
-describe("generateStdCompletion — derived from the command surface (AC1)", () => {
-  test("deterministic, sorted, _describe shape", () => {
-    const c1 = generateStdCompletion(["gates", "brief", "alias"]);
-    const c2 = generateStdCompletion(["alias", "brief", "gates"]); // different order in
-    expect(c1).toBe(c2); // → identical out (sorted)
-    expect(c1).toContain("#compdef std");
-    expect(c1).toContain("_describe 'std command' cmds");
-    expect(c1.indexOf("'alias'")).toBeLessThan(c1.indexOf("'brief'")); // sorted
+// ── the `_std` completion: emitter + the two zsh probes that make its absences real (3.2) ──────────
+//
+// `zsh` is probed at MODULE SCOPE because `test.skipIf` is evaluated at registration time and cannot
+// read an exit code produced inside a test body. `spawnCapture` resolves `127` on a launch failure and
+// never rejects, so a box without zsh SKIPS (exit 0) rather than failing the run. Precedent: `HAS_COMM`
+// in `src/bmad/bmad-verify.test.ts`.
+const HAS_ZSH = (await spawnCapture("zsh", ["-c", "exit 0"])).code !== 127;
+
+// Both probes are held as string constants and written into the same temp dir as the artifact — NEVER
+// committed as a `src/cli/*.zsh` fixture. Every gate globs `.ts` (`src/**/*.ts`, and narrower still
+// `src/core/**/*.ts`), so a `.zsh` file under `src/` would be an executable script inside the library
+// tree that no gate owns. Avoidable for free.
+//
+// The stubs return 1 while descending and 0 (flags) / 1 (names) on arrival — that is what makes the
+// emitter's real `&& return 0` behave under the stub as it does under real zsh. `${@:#-C}` drops the
+// `-C` flag so it is not mistaken for a spec. A `zpty`-driven real-completion harness was tried and
+// rejected upstream: PTY echo and `compinit` noise make it flaky, for the same assertion.
+const PROBE_FLAGS = `#!/bin/zsh -f
+emulate -L zsh
+local -a TARGET; TARGET=(\${=2})
+local -a CAPTURED
+integer depth=0
+_arguments() {
+  local -a specs; specs=("\${@:#-C}")
+  (( depth++ ))
+  if (( depth <= $#TARGET )); then
+    state=\${specs[-1]##*->}
+    words=(\${TARGET[depth,-1]})
+    return 1
+  fi
+  CAPTURED+=("\${specs[@]}"); return 0
+}
+_describe() { CAPTURED+=("\${@[3,-1]}"); return 0 }
+compadd() { return 0 }; _files() { return 0 }
+source $1 >/dev/null 2>&1
+CAPTURED=(); depth=0
+words=(\${TARGET}); CURRENT=$(( $#TARGET + 1 )); local state= line=
+_std
+print -l -- $CAPTURED
+`;
+
+// Three deltas from PROBE_FLAGS, all load-bearing: descend to `$#TARGET + 1` rather than `$#TARGET`;
+// take the state from `specs[1]` (the `1:` NAME state) rather than `specs[-1]` (the `*::` descend
+// state); and dereference the array `_describe` is handed with `${(@P)…}` — plain `${(P)…}` joins every
+// row into one word and yields a plausible-looking one-element result. `probeFlags` CANNOT read names:
+// at its leaf the `_arguments` stub returns 0, so the emitter's `&& return 0` short-circuits before the
+// `case $state in cmd|sub)` branch runs, leaving its own `_describe` stub unreachable.
+const PROBE_NAMES = `#!/bin/zsh -f
+emulate -L zsh
+local -a TARGET; TARGET=(\${=2})
+local -a CAPTURED
+integer depth=0
+integer LIMIT=$(( $#TARGET + 1 ))
+_arguments() {
+  local -a specs; specs=("\${@:#-C}")
+  (( depth++ ))
+  if (( depth < LIMIT )); then
+    state=\${specs[-1]##*->}
+    words=(\${TARGET[depth,-1]})
+    return 1
+  fi
+  state=\${specs[1]##*->}
+  return 1
+}
+_describe() { CAPTURED+=("\${(@P)\${@[-1]}}"); return 0 }
+compadd() { return 0 }; _files() { return 0 }
+source $1 >/dev/null 2>&1
+CAPTURED=(); depth=0
+words=(\${TARGET}); CURRENT=$(( $#TARGET + 1 )); local state= line=
+_std
+print -l -- $CAPTURED
+`;
+
+/** Run one probe over `artifact`, walking `path` (e.g. `"bmad deploy"`; `""` = top level). */
+async function runProbe(script: string, artifact: string, path: string): Promise<string[]> {
+  const root = mkdtempSync(join(tmpdir(), "std-probe-"));
+  try {
+    const scriptPath = join(root, "probe.zsh");
+    const artifactPath = join(root, "_std");
+    writeFileSync(scriptPath, script);
+    writeFileSync(artifactPath, artifact);
+    const r = await spawnCapture("zsh", [scriptPath, artifactPath, path]);
+    return r.stdout.split("\n").filter(Boolean);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** The flag names `_arguments` is actually handed at the end of `path`, in emitted order. */
+async function probeFlags(artifact: string, path: string): Promise<string[]> {
+  const rows = await runProbe(PROBE_FLAGS, artifact, path);
+  return rows.map((l) => l.replace(/\[.*$/, "")).filter((l) => l.includes("--"));
+}
+
+/** The child names `_describe` is actually handed at `path` (`""` = the top-level commands). */
+async function probeNames(artifact: string, path: string): Promise<string[]> {
+  const rows = await runProbe(PROBE_NAMES, artifact, path);
+  return rows.map((l) => l.split(":")[0]!);
+}
+
+describe("generateStdCompletion — the two-level emitter, derived from the surface (AC1/AC5)", () => {
+  const out = generateStdCompletion(SURFACE);
+
+  test("byte-identical on regeneration (GIT-SoT), and the banner is preserved exactly", () => {
+    expect(generateStdCompletion(SURFACE)).toBe(out);
+    expect(out.split("\n")[0]).toBe("#compdef std");
+    expect(out).toContain(
+      "# _std — GENERATED by `std alias --install` from the std-cli command surface (AD-7). Do NOT hand-edit.",
+    );
   });
 
-  test("dedupes repeated command names", () => {
-    expect(generateStdCompletion(["gates", "gates"]).match(/'gates'/g)?.length).toBe(1);
+  test("emits the two-level `_arguments -C` state machine, both structural shapes", () => {
+    expect(out).toContain("_arguments -C '1: :->cmd' '*:: :->args' && return 0");
+    expect(out).toContain("_arguments -C '1: :->sub' '*:: :->subargs' && return 0");
+    // `alias` has flags and NO subcommands: its `--install` completes directly under `args`, with no
+    // nested state machine. An emitter that assumed every command has subs would emit an empty `sub)`
+    // branch here — not a syntax error, so `zsh -n` would pass it. AC2's `alias` probe is the gate.
+    expect(out).toContain("_arguments '--install[");
+  });
+
+  test("names and flag specs are sorted BY NAME at every level; enum values keep declaration order", () => {
+    expect(out.indexOf("'alias:")).toBeLessThan(out.indexOf("'bmad:"));
+    expect(out.indexOf("'bmad:")).toBeLessThan(out.indexOf("'cn:"));
+    expect(out.indexOf("'cn:")).toBeLessThan(out.indexOf("'dashkit:"));
+    // Sorted on the flag NAME, never on the rendered spec: `*--set` renders with a leading `*`, which
+    // sorts BEFORE `-`, so `[...specs].sort()` would hoist it to the front. Nothing else catches this —
+    // neither exact-set assertion below carries a repeatable flag.
+    const deploy = out.slice(out.indexOf("                deploy)\n                  _arguments '--apply"));
+    const line = deploy.split("\n")[1]!;
+    expect(line.indexOf("'--push[")).toBeLessThan(line.indexOf("'*--set["));
+    expect(line.indexOf("'*--set[")).toBeLessThan(line.indexOf("'--skills["));
+  });
+
+  // No probe assertion reaches the `:message:action` tail — `probeFlags` cuts every row at its first
+  // `[`. A naive emitter ships `:<dir>:_files -/` (the metavar is a DISPLAY string carrying angle
+  // brackets, since HELP renders `--vault <dir>`), which `zsh -n` accepts and which shows up only as a
+  // wrong prompt at a live `<TAB>`. So it is asserted directly, on the text.
+  test("the value tails are derived and angle-stripped", () => {
+    expect(out).toContain(":dir:_files -/");
+    expect(out).not.toContain(":<dir>:");
+    expect(out).toContain(":fmt:(esm cjs)"); // from CN_SPEC.formats, never restated in the emitter
+    expect(out).toContain(":a,b:'"); // a `list` flag: empty action — completing it from the estate is 3.3
+  });
+});
+
+describe("the emitted `_std` under a real zsh (AC2/AC3/AC6/AC7)", () => {
+  const out = generateStdCompletion(SURFACE);
+
+  test.skipIf(!HAS_ZSH)("parses — `zsh -n` exits 0", async () => {
+    const root = mkdtempSync(join(tmpdir(), "std-zshn-"));
+    try {
+      const file = join(root, "_std");
+      writeFileSync(file, out);
+      const r = await spawnCapture("zsh", ["-n", file]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // ABSENCE IS THE BAR — and it is asserted through a real zsh parse, never by string-matching the
+  // generated text. `expect(out).not.toContain("--repos")` is worthless here: `--repos` legitimately
+  // appears under `install`, `update` and `verify`, so it could only ever be red.
+  test.skipIf(!HAS_ZSH)("bmad deploy does NOT offer --repos (BM-19); install DOES", async () => {
+    expect(await probeFlags(out, "bmad deploy")).not.toContain("--repos");
+    // The anti-tautology control. A harness that silently breaks — wrong stub arity, unsourced file, a
+    // `state` never set — returns `[]` for EVERY path, and `[].not.toContain(…)` is green. Without a
+    // path asserted to CONTAIN `--repos`, the absence assertion above proves nothing.
+    expect(await probeFlags(out, "bmad install")).toContain("--repos");
+  });
+
+  test.skipIf(!HAS_ZSH)("bmad verify offers exactly its three; alias offers exactly --install", async () => {
+    // `verify --apply` raises no error at all — `cli.ts` parses it for verify too and then never reads
+    // it — so offering it is silent nonsense rather than a visible failure. Hence an exact set, here.
+    expect(await probeFlags(out, "bmad verify")).toEqual(["--json", "--repos", "--skills"]);
+    // Walks the flags-only branch, which is what makes the `alias` shape's assertion non-vacuous.
+    expect(await probeFlags(out, "alias")).toEqual(["--install"]);
+  });
+
+  test.skipIf(!HAS_ZSH)("dashkit deploy offers NO --format, and IS reachable (AC6)", async () => {
+    // DASHKIT_SPEC declares no `formats`, so `edge-deploy` never parses one for dashkit.
+    expect(await probeFlags(out, "dashkit deploy")).not.toContain("--format");
+    // 🔴 Load-bearing, and the `cn` control below does NOT substitute for it: probing a path the
+    // artifact never emits returns `[]`, and `[].not.toContain("--format")` is green — so an emitter
+    // that dropped `dashkit` entirely would pass the line above. `dashkit` has no other assertion in
+    // this suite, so without a control on ITS OWN path this test is green-on-missing.
+    expect(await probeFlags(out, "dashkit deploy")).toContain("--vault");
+    expect(await probeFlags(out, "cn deploy")).toContain("--format"); // proves the harness, not dashkit
+  });
+
+  // D-a itself: every assertion above is about FLAGS, so an emitter that emitted `alias` and silently
+  // dropped `bmad`/`cn`/`dashkit` would pass all of them. The name lists have to be read too.
+  test.skipIf(!HAS_ZSH)("every command and subcommand ARRIVED in the _describe arrays (D-a)", async () => {
+    expect(await probeNames(out, "")).toEqual(["alias", "bmad", "cn", "dashkit"]);
+    expect(await probeNames(out, "bmad")).toEqual(["deploy", "install", "update", "verify"]);
+    expect(await probeNames(out, "cn")).toEqual(["deploy", "verify"]);
+    expect(await probeNames(out, "dashkit")).toEqual(["deploy", "verify"]);
+  });
+});
+
+describe("escaping is a function with a hostile fixture, not a hopeful replace chain (AC4)", () => {
+  // `' [ ] : \` and a backtick. The apostrophe is the one that bites on SHIPPED data today — `bmad
+  // deploy`'s desc says "the estate's leg" and `cn verify`'s says "cn's declared plugin envelope" —
+  // and an unescaped one does not merely look wrong, it makes the whole artifact fail to parse.
+  const HOSTILE = "it's [bracketed] a:colon \\ and `tick`";
+
+  test("a _describe entry escapes the apostrophe and leaves the description's colon alone", () => {
+    const entry = describeEntry("deploy", HOSTILE);
+    expect(entry).toContain("'\\''"); // the close-escape-reopen form
+    expect(entry).not.toMatch(/[^\\']'[^\\']/); // no bare apostrophe left inside the word
+    expect(entry).toContain("a:colon"); // only the FIRST colon splits an entry — do not escape it
+  });
+
+  test("a _describe completion NAME escapes a literal colon (man zshcompsys)", () => {
+    // Every name in the surface is `[a-z]+` today, so this is future-proofing — asserted as such.
+    for (const c of SURFACE.commands) {
+      expect(c.name).toMatch(/^[a-z]+$/);
+      for (const s of c.subcommands) expect(s.name).toMatch(/^[a-z]+$/);
+    }
+    expect(describeEntry("we:ird", "d")).toBe("'we\\:ird:d'");
+  });
+
+  test("an _arguments spec escapes brackets and backslash, and leaves the explanation's colon", () => {
+    const spec = argSpec({ name: "--x", arity: "bool", desc: HOSTILE });
+    expect(spec).toContain("\\[bracketed\\]"); // a bare `]` closes the explanation early
+    expect(spec).toContain("a:colon"); // zsh's own _git ships `[add Signed-off-by: trailer …]`
+    expect(spec).toContain("'\\''");
+  });
+
+  test.skipIf(!HAS_ZSH)("the escaped text ROUND-TRIPS through zsh exactly", async () => {
+    const root = mkdtempSync(join(tmpdir(), "std-esc-"));
+    try {
+      const file = join(root, "t.zsh");
+      writeFileSync(
+        file,
+        `local -a a\na=(${describeEntry("deploy", HOSTILE)} ${argSpec({ name: "--x", arity: "bool", desc: HOSTILE })})\nprint -r -- $a[1]\nprint -r -- $a[2]\n`,
+      );
+      const r = await spawnCapture("zsh", [file]);
+      expect(r.code).toBe(0);
+      const [entry, spec] = r.stdout.split("\n");
+      expect(entry).toBe(`deploy:${HOSTILE}`); // the description survives byte-for-byte
+      expect(spec).toBe("--x[it's \\[bracketed\\] a:colon \\\\ and `tick`]");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(!HAS_ZSH)("an UNESCAPED apostrophe would break the artifact — the red-turning input", async () => {
+    const root = mkdtempSync(join(tmpdir(), "std-esc-"));
+    try {
+      const file = join(root, "bad.zsh");
+      writeFileSync(file, `local -a a\na=('deploy:the estate's leg')\n`);
+      const r = await spawnCapture("zsh", ["-n", file]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("unmatched '");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -119,7 +371,7 @@ describe("installAlias — deploy to targets, fail-loud writes nothing (AC1)", (
     const root = mkdtempSync(join(tmpdir(), "std-install-"));
     try {
       const targets = defaultTargets(join(root, "zsh"));
-      const res = installAlias({ config: cfg, commands: ["gates", "alias"], targets });
+      const res = installAlias({ config: cfg, surface: SURFACE, targets });
       expect(existsSync(res.repoNavPath)).toBe(true);
       expect(existsSync(res.completionPath)).toBe(true);
       expect(readFileSync(res.repoNavPath, "utf-8")).toContain("typeset -gA ZSH_REPOS=(");
@@ -134,7 +386,7 @@ describe("installAlias — deploy to targets, fail-loud writes nothing (AC1)", (
     try {
       const targets = defaultTargets(join(root, "zsh"));
       expect(() =>
-        installAlias({ config: { entries: { "bad name": "/x" } }, commands: ["gates"], targets }),
+        installAlias({ config: { entries: { "bad name": "/x" } }, surface: SURFACE, targets }),
       ).toThrow(RepoNavError);
       // nothing was deployed
       expect(existsSync(join(root, "zsh"))).toBe(false);
@@ -157,7 +409,7 @@ describe("runAlias — the std-cli `alias` command (AC1)", () => {
       const lines: string[] = [];
       const code = runAlias(["--install"], {
         config: cfg,
-        commands: ["gates", "alias"],
+        surface: SURFACE,
         targets: defaultTargets(join(root, "zsh")),
         log: (l) => lines.push(l),
       });
@@ -175,7 +427,7 @@ describe("runAlias — the std-cli `alias` command (AC1)", () => {
     try {
       const code = runAlias(["--install"], {
         config: { entries: { "bad name": "/x" } },
-        commands: ["gates"],
+        surface: SURFACE,
         targets: defaultTargets(join(root, "zsh")),
         log: () => {},
       });
@@ -190,7 +442,7 @@ describe("runAlias — the std-cli `alias` command (AC1)", () => {
     const lines: string[] = [];
     const code = runAlias([], {
       config: cfg,
-      commands: ["gates"],
+      surface: SURFACE,
       targets: defaultTargets("/should/not/be/written"),
       log: (l) => lines.push(l),
     });
