@@ -125,7 +125,14 @@ export function renderBatch(
     p();
     p(`- branch: ${r.branch} (${r.ahead === "no-upstream" ? "no upstream" : `${r.ahead} ahead`})`);
     // `planned.*` are INTENTS, and the wording says so — never print an intent as if it were an outcome.
-    p(`- would run: \`${r.planned.installArgv.join(" ")}\``);
+    //
+    // ONE LINE PER INVOCATION since 2.5, and this is not cosmetic. `installArgv` is a LIST of argv now;
+    // a single `.join(" ")` over it renders the inner arrays COMMA-separated (`install,--directory,/x`),
+    // which is not a runnable command line — a preview that cannot be copied is a quietly wrong preview,
+    // and `update` plans two genuinely different invocations whose asymmetry (FR-9) is the whole point.
+    // `tsc` cannot catch this one: `string[][].join(" ")` is perfectly legal and silently wrong.
+    if (r.planned.installArgv.length === 0) p("- would run: (nothing)");
+    for (const argv of r.planned.installArgv) p(`- would run: \`${argv.join(" ")}\``);
     p(`- would back up to: ${r.planned.backupPath || "(none)"}`);
     p(`- would stage: ${r.planned.wouldStage.length > 0 ? r.planned.wouldStage.join(", ") : "(none)"}`);
     p(`- would commit: ${r.planned.wouldCommit ? "yes" : "no"}`);

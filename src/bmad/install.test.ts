@@ -537,9 +537,14 @@ describe("AC3 — exact FR-8 invocation through deps.exec, no self-copy (BM-3/BM
       parseBmadOpts(["--tools", "a,b"]),
       h.deps,
     );
-    expect(plan.installArgv).toContain("/srv/estate/gamma");
-    expect(plan.installArgv[plan.installArgv.indexOf("--custom-source") + 1]).toBe("/staging/fixed");
-    expect(plan.installArgv[plan.installArgv.indexOf("--tools") + 1]).toBe("a,b");
+    // ONE invocation — `install`'s leg emits a single-element list (2.5's widening; `update` is the
+    // command that emits two). Asserting the length pins that: an install that grew a second
+    // invocation would be running an unreviewed `bmad` command per repo.
+    expect(plan.installArgv).toHaveLength(1);
+    const argv = plan.installArgv[0]!;
+    expect(argv).toContain("/srv/estate/gamma");
+    expect(argv[argv.indexOf("--custom-source") + 1]).toBe("/staging/fixed");
+    expect(argv[argv.indexOf("--tools") + 1]).toBe("a,b");
   });
 });
 
@@ -730,7 +735,7 @@ describe("AC6 — the plan survives the mutation path unchanged (FR-5/SM-3/BM-14
     expect(h.spy.atomicWrite).toEqual([]);
     expect(h.spy.ensureDir).toEqual([]);
     // …and the render still reports the full intent, including the argv it did not run.
-    expect(rowsOf(h.spy)[0]?.planned.installArgv).toContain("--custom-source");
+    expect(rowsOf(h.spy)[0]?.planned.installArgv.flat()).toContain("--custom-source");
   });
 
   test("the plan is built EXACTLY ONCE per repo, on the apply path too", async () => {

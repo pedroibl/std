@@ -21,11 +21,16 @@ import { parseBmadOpts } from "./opts";
  */
 const DEPLOY_LEG: InstallLeg = {
   kind: "install",
+  // Wrapped in the outer list `InstallLeg.buildArgv` returns since 2.5 — a MECHANICAL consequence of
+  // that widening, not a step toward the real deploy rule. The provisional argv contents are untouched
+  // and the `--apply` fence below still makes them unreachable; 2.7 replaces this whole body.
   buildArgv: (ctx) => [
-    "install",
-    "--directory",
-    ctx.repo.path,
-    ...ctx.opts.set.flatMap((s) => ["--set", `${s.module}.${s.key}=${s.value}`]),
+    [
+      "install",
+      "--directory",
+      ctx.repo.path,
+      ...ctx.opts.set.flatMap((s) => ["--set", `${s.module}.${s.key}=${s.value}`]),
+    ],
   ],
 };
 

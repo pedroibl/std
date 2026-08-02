@@ -868,7 +868,7 @@ describe("Task 3 / AC6+AC11+AC12 — the pipeline verify filter (BM-4 ordering)"
     return { deps, spy };
   }
 
-  const LEG: InstallLeg = { kind: "install", buildArgv: (ctx) => ["install", "--directory", ctx.repo.path] };
+  const LEG: InstallLeg = { kind: "install", buildArgv: (ctx) => [["install", "--directory", ctx.repo.path]] };
 
   test("26. a divergent repo FAILS in the pipeline and the git spine never runs (BM-4 fail-fast)", async () => {
     const moduleRoot = makeEstateModule({ skills: SELECTED });

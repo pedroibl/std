@@ -22,7 +22,7 @@
 //
 // IDENTITY-FREE (AC9/D4): repos are `alpha`/`beta`/`gamma` under `os.tmpdir()`; no `/Users/…` literal.
 
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, jest, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,6 +51,25 @@ import {
 import type { BmadRepo } from "./manifest";
 import { DEFAULT_SKILLS, parseBmadOpts } from "./opts";
 import { runRepoPipeline } from "./pipeline";
+
+/**
+ * EVERY TEST IN THIS FILE SHELLS REAL GIT, so bun's 5s default timeout is the wrong default here.
+ *
+ * Each case builds a real posture (`git init`, config, seed, commit, sometimes a bare remote and a real
+ * `push`) — a dozen-plus subprocess spawns. That completes in well under a second on an idle machine,
+ * which is why the default sufficed while this was the only real-subprocess suite in `src/bmad/`. It is
+ * not idle-machine behavior that matters, though: under concurrent suite load the same cases were
+ * observed stalling to 8–10s and timing out, turning a real-git suite into a load-dependent coin flip.
+ *
+ * A timeout is a HANG GUARD, not a performance assertion. Sizing it just above the happy path means any
+ * unrelated load shows up as a false failure in the one suite whose job is proving git writes really
+ * took. Raised to a generous ceiling that still catches a genuine hang. Set file-wide rather than
+ * per-test because all 46 cases here share the identical property.
+ *
+ * (Surfaced by Story 2.5, which added the second real-subprocess suite to this directory; the fragility
+ * predates it and is not caused by anything in the update rule.)
+ */
+jest.setTimeout(60_000);
 
 /** The empirical dirty-file count of the real estate repo FR-11 was written for. Hardcoded on purpose. */
 const UNRELATED_DIRTY = 503;
@@ -292,7 +311,7 @@ function spyDeps(stub?: (repo: string, args: string[]) => string | undefined): {
 // reads it to render the Surfaces, which since 2.6 the pipeline verifies immediately afterwards.
 const LEG: InstallLeg = {
   kind: "install",
-  buildArgv: (ctx) => ["install", "--directory", ctx.repo.path],
+  buildArgv: (ctx) => [["install", "--directory", ctx.repo.path]],
 };
 
 /** Every `add` argv a run issued. */

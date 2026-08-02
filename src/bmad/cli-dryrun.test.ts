@@ -175,7 +175,7 @@ function countingLeg(counts: Counts): InstallLeg {
     kind: "install",
     buildArgv: (ctx) => {
       counts.buildArgv++;
-      return ["install", "--directory", ctx.repo.path];
+      return [["install", "--directory", ctx.repo.path]];
     },
   };
 }
@@ -297,8 +297,8 @@ describe("single source of plan (AC3 — BM-14, the --brain defect class)", () =
 
   test("the leg authors installArgv — the pipeline never inlines it (BM-15)", () => {
     const { deps } = fakeDeps();
-    const leg: InstallLeg = { kind: "update", buildArgv: () => ["sentinel-argv"] };
-    expect(buildPlan(ALPHA, leg, parseBmadOpts([]), deps).installArgv).toEqual(["sentinel-argv"]);
+    const leg: InstallLeg = { kind: "update", buildArgv: () => [["sentinel-argv"]] };
+    expect(buildPlan(ALPHA, leg, parseBmadOpts([]), deps).installArgv).toEqual([["sentinel-argv"]]);
   });
 
   test("backupPath composes backupRoot / repo name / clock (BM-8)", () => {
@@ -382,7 +382,7 @@ describe("zero side effects in DRY RUN (AC4 — NFR-1)", () => {
       kind: "install",
       buildArgv: (ctx) => {
         seen = ctx.deps as unknown as Record<string, unknown>;
-        return ["install"];
+        return [["install"]];
       },
     };
     await runRepoPipeline(ALPHA, spyLeg, parseBmadOpts(["--push"]), deps);
@@ -415,7 +415,7 @@ describe("batch (AC7 — BM-5/BM-16)", () => {
       kind: "install",
       buildArgv: (ctx) => {
         if (ctx.repo.path.endsWith("alpha")) throw new Error("leg exploded");
-        return ["install"];
+        return [["install"]];
       },
     };
     const results = await runBatch([ALPHA, beta], explodingLeg, parseBmadOpts([]), deps);
@@ -491,30 +491,63 @@ describe("router + exit contract (AC1/AC7 — BM-1)", () => {
       const payload = counts.json[0] as { repos: RepoResult[] };
       return payload.repos[0]?.planned.installArgv ?? [];
     };
-    expect((await argvOf("install"))[0]).toBe("install");
-    expect((await argvOf("update"))[0]).toBe("update");
+    // Since 2.5 BOTH commands shell `bmad install …` — `quick-update` is an `--action` VALUE, not a
+    // subcommand, so a first-token comparison no longer discriminates them and asserting one would
+    // pass for the wrong reason. The real BM-15 distinction is `--action`: a fresh install passes none
+    // (it IS fresh), and the update rule passes it on every invocation it emits.
+    const install = await argvOf("install");
+    const update = await argvOf("update");
+    for (const argv of [...install, ...update]) expect(argv[0]).toBe("install");
+    expect(install.every((a) => !a.includes("--action"))).toBe(true);
+    expect(update.every((a) => a.includes("--action"))).toBe(true);
+    expect(update.at(-1)).toContain("update");
   });
 
   // Story 2.3 gave the shared pipeline a real mutation path (BM-4: one per-repo filter chain), which
   // silently promoted `update --apply`/`deploy --apply` from 2.2 no-ops into REAL estate-wide runs of
-  // their PROVISIONAL legs. Fenced at the command entry until 2.5/2.7 author the real ones. These tests
-  // are the fence's tripwire: delete them in the same commit that removes the fence, never before.
-  test("update/deploy refuse --apply while their legs are provisional (exit 2, nothing shelled)", async () => {
-    for (const sub of ["update", "deploy"]) {
-      const { deps, counts } = fakeDeps();
-      expect(await runBmad([sub, "--apply"], deps)).toBe(2);
-      expect(await runBmad([sub, "--apply", "--push"], deps)).toBe(2);
-      // the deliberately-exploding fake would have thrown had the pipeline been reached at all
-      expect(counts.json).toHaveLength(0);
-    }
+  // their PROVISIONAL legs. Fenced at the command entry until 2.5/2.7 author the real ones.
+  //
+  // NARROWED TO `deploy` BY 2.5, in the same commit that authored the real update leg and deleted
+  // update's fence. Narrowed rather than deleted: `deploy` is still provisional until 2.7, and dropping
+  // the whole tripwire here would remove the guard protecting the OTHER command while it is still
+  // unbuilt — the precise sequencing hazard the fence's own comment warned about.
+  test("deploy refuses --apply while its leg is provisional (exit 2, nothing shelled)", async () => {
+    const { deps, counts } = fakeDeps();
+    expect(await runBmad(["deploy", "--apply"], deps)).toBe(2);
+    expect(await runBmad(["deploy", "--apply", "--push"], deps)).toBe(2);
+    // the deliberately-exploding fake would have thrown had the pipeline been reached at all
+    expect(counts.json).toHaveLength(0);
   });
 
-  test("the fence is on --apply only — update/deploy dry runs still plan normally", async () => {
-    for (const sub of ["update", "deploy"]) {
-      const { deps } = fakeDeps();
-      expect(await runBmad([sub], deps)).toBe(0);
-      expect(await runBmad([sub, "--push"], deps)).toBe(0);
+  test("the fence is on --apply only — deploy dry runs still plan normally", async () => {
+    const { deps } = fakeDeps();
+    expect(await runBmad(["deploy"], deps)).toBe(0);
+    expect(await runBmad(["deploy", "--push"], deps)).toBe(0);
+  });
+
+  // The 2.3 tripwire INVERTED for `update` — the same move 2.6 made for `verify`. It asserted a
+  // deliberate gap; 2.5 closes that gap, so the assertion has to flip or it would forbid the very
+  // apply path this story exists to author.
+  //
+  // `--apply` must now REACH the mutation path. Proven by the exploding fake's OWN write guard: this
+  // deps makes every `fs` write throw by name, so an `--apply` that gets as far as materializing the
+  // BM-12 staging dir surfaces `fs.ensureDir`. Under the old fence the run returned 2 having written
+  // nothing, so this message was unreachable — it can only appear once the fence is gone.
+  test("update --apply is no longer fenced — it reaches the staging write (2.5)", async () => {
+    const { deps } = fakeDeps();
+    let threw = "";
+    try {
+      await runBmad(["update", "--apply"], deps);
+    } catch (err) {
+      threw = err instanceof Error ? err.message : String(err);
     }
+    expect(threw).toContain("fs.ensureDir");
+  });
+
+  test("update dry runs still plan normally and write nothing (the fence's other half)", async () => {
+    const { deps } = fakeDeps();
+    expect(await runBmad(["update"], deps)).toBe(0);
+    expect(await runBmad(["update", "--push"], deps)).toBe(0);
   });
 
   test("no subcommand ⇒ usage, exit 2", async () => {
