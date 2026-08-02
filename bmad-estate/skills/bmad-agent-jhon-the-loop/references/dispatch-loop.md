@@ -69,9 +69,9 @@ Prompt files sit beside their outputs: `dispatch-dir/{phase}-{e}-{s}-prompt.md`.
 3. **Dispatch the drafter — `claude`** (composer paste; stays interactive, which `bmad-create-story`
    requires — a positional prompt would run one-shot and exit):
    ```sh
-   loom dispatch claude dispatch-dir/story-1-5-prompt.md /abs/path/to/project
+   loom dispatch claude-lean dispatch-dir/story-1-5-prompt.md /abs/path/to/project
    ```
-   Equivalent stdin form: `echo "read file: /abs/.../story-1-5-prompt.md and follow it" | loom dispatch claude /abs/path`.
+   Equivalent stdin form: `echo "read file: /abs/.../story-1-5-prompt.md and follow it" | loom dispatch claude-lean /abs/path`.
 4. **Watchdog** — background poll on the exact file, zero tokens while waiting:
    ```sh
    OUT=dispatch-dir/story-1-5-output.md
@@ -87,7 +87,7 @@ Prompt files sit beside their outputs: `dispatch-dir/{phase}-{e}-{s}-prompt.md`.
 5. **Dispatch the validator — a second fresh `claude` window running `checklist.md`.** Fill
    `references/validate-brief-template.md`, then:
    ```sh
-   loom dispatch claude dispatch-dir/val-1-5-prompt.md /abs/path/to/project
+   loom dispatch claude-lean dispatch-dir/val-1-5-prompt.md /abs/path/to/project
    ```
    Independence here comes from **fresh context**, which is exactly what the checklist assumes. This window
    **applies its own fixes** — the conductor reads the verdict, not the story.

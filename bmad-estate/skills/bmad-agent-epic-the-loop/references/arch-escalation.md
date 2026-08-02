@@ -42,7 +42,7 @@ This is the conductor's value-add and the reason the sub-loop beats "ask Winston
 Headless framing, subagents allowed, sentinel discipline — same contract as every other brief.
 
 ```sh
-loom dispatch claude dispatch-dir/arch-research-1-5-prompt.md /abs/path/to/project
+loom dispatch claude-lean dispatch-dir/arch-research-1-5-prompt.md /abs/path/to/project
 ```
 
 The window runs `bmad-technical-research`, which writes its report to
@@ -69,7 +69,7 @@ new AD written into the spine, with the rejected candidates and why. Report to
 or changed and every story it believes is affected.
 
 ```sh
-loom dispatch claude dispatch-dir/arch-decision-1-5-prompt.md /abs/path/to/project
+loom dispatch claude-lean dispatch-dir/arch-decision-1-5-prompt.md /abs/path/to/project
 ```
 
 ## Step 3 — the human gate (narrow, and it matters)
