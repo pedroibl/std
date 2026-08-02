@@ -11,7 +11,10 @@
 //
 // SCOPE (2.2): the gate STRUCTURE and the plan threading land here. No filter BODY did.
 // SCOPE (2.3): the first two filter BODIES land — backup (FR-7/BM-8) and the installer shell-out
-// (FR-8/BM-3/BM-15) — plus `skillTreeDigest` (FR-10/BM-10). Verify (2.6) remains a no-op stub.
+// (FR-8/BM-3/BM-15) — plus `skillTreeDigest` (FR-10/BM-10).
+// SCOPE (2.6): the verify filter is FILLED — delegated to `bmad-verify.ts`'s scoped engine (BM-10). It
+// sits between the installer and the git spine, and it is the only filter that can fail a repo for a
+// reason the installer reported as success.
 // SCOPE (2.4): the git filters are FILLED — but their bodies live in `git-safety.ts` (BM-7's one
 // chokepoint), and this file only ORDERS them and records their outcomes. Every git write below is
 // followed by a state check that proves the write happened, because `deps.git` is fail-soft and cannot
@@ -23,6 +26,7 @@ import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 
 import { walkFiles } from "../fsx/index";
+import { BmadVerifyError, verifyRepo } from "./bmad-verify";
 import type { BmadDeps, InstallLeg, PlanProjection, RepoResult } from "./deps";
 import {
   commitIfStaged,
@@ -171,7 +175,7 @@ export async function runRepoPipeline(
   //                   validates the estate SOURCE and is repo-invariant. See `estate-source.ts`.
   //   backup  (2.3) — ✅ below
   //   leg     (2.3/2.5) — ✅ below
-  //   verify  (2.6) — Parity/Faithfulness, BM-10 — still a no-op stub
+  //   verify  (2.6) — ✅ below — Parity/Faithfulness/set-Parity, BM-10 — delegated to `bmad-verify.ts`
   //   stage   (2.4) — ✅ below — scoped staging → `result.stagedPaths`; gitignored ⇒ `skipped-gitignored`
   //   commit  (2.4) — ✅ below — commit-if-staged → `result.committed`
   //   push    (2.4) — ✅ below — gated on `opts.push` → `result.pushed`
@@ -201,10 +205,34 @@ export async function runRepoPipeline(
     return result;
   }
 
-  // ── verify (2.6) ────────────────────────────────────────────────────────────────────────────────
-  // DELEGATED, not implemented here. 2.3 must not inline a checksum verify (BM-10 forbids it), and 2.4
-  // must not either — the git filters below run AFTER it precisely because BM-4 orders them that way,
-  // and a `skipped-gitignored` repo must still have been verified (BM-17).
+  // ── verify (2.6 / FR-16 / BM-10) ────────────────────────────────────────────────────────────────
+  // DELEGATED, never inlined: the engine is `bmad-verify.ts`, and this file must not grow a comparison
+  // of its own (BM-10 forbids a whole-repo checksum, and a second comparison rule is how one appears).
+  //
+  // POSITION IS THE CONTRACT (BM-4): AFTER the installer — there is nothing to verify until it has run —
+  // and BEFORE the git filters, so a divergent repo is never staged or committed. It sits ABOVE the
+  // gitignore short-circuit on purpose: a `skipped-gitignored` repo has been installed into and must
+  // still be verified (BM-17). Do not add a `claudeTracked` guard here.
+  //
+  // FAIL-FAST WITHIN THE REPO, ISOLATED ACROSS REPOS. `reason` carries the diverging paths VERBATIM
+  // (FR-15) — a count would tell the operator that something is wrong and not what.
+  try {
+    const errors = (await verifyRepo(repo.path, opts.skills, deps.estateModulePath, deps)).filter(
+      (f) => f.severity === "error",
+    );
+    if (errors.length > 0) {
+      result.status = "failed";
+      note(result, errors.map((f) => f.message).join("; "));
+      return result;
+    }
+  } catch (err) {
+    // A `diff` that could not RUN (exit ≥2, incl. a missing binary) is not drift — it means the repo was
+    // not verified at all, and an unverified repo must never reach the git spine. Fails this repo alone.
+    if (!(err instanceof BmadVerifyError)) throw err;
+    result.status = "failed";
+    note(result, err.message);
+    return result;
+  }
 
   // ── the git spine (2.4) ─────────────────────────────────────────────────────────────────────────
   // TWO GUARDS, THEN THREE MUTATIONS, EACH MUTATION FOLLOWED BY A STATE CHECK. The guards come first

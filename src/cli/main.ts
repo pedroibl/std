@@ -49,6 +49,7 @@ commands:
   dashkit deploy    bundle src/dashkit -> <vault>/Scripts/dashkit.js (one-way; the vault is build output only)
   dashkit verify    check a vault against dashkit's declared plugin envelope (AD-6)
   bmad install|update|deploy   dry-run by default; --apply to mutate, --push to push
+  bmad verify       prove both Surfaces are byte-faithful to source (read-only)
 
 cn deploy options:
   --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)

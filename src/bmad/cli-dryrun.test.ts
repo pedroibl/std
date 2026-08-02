@@ -36,7 +36,7 @@
 // invariant that was always meant. The provisional-posture test below became the live-read test.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -130,6 +130,18 @@ function fakeDeps(overrides: Partial<BmadDeps> = {}): { deps: BmadDeps; counts: 
       atomicWrite: boom("fs.atomicWrite"),
       ensureDir: boom("fs.ensureDir"),
       cpDir: boom("fs.cpDir"),
+      // A READ, like `exists` — 2.6's set-Parity check needs it, and a dry run never reaches that
+      // filter anyway. Fail-soft `[]` matches the production wiring.
+      listDirs: (root: string) => {
+        try {
+          return readdirSync(root, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => d.name)
+            .sort();
+        } catch {
+          return [];
+        }
+      },
     },
     report: {
       lines: () => {
@@ -517,10 +529,15 @@ describe("router + exit contract (AC1/AC7 — BM-1)", () => {
     expect(counts.logged.join("\n")).toContain("unknown subcommand 'bogus'");
   });
 
-  test("`verify` is not wired yet (2.6) and falls through to usage/2", async () => {
+  test("`verify` IS wired (2.6) — it routes, it does not fall through to usage/2", async () => {
+    // The 2.2 tripwire inverted. It asserted the deliberate gap ("(coming — Story 2.6)"); 2.6 closes it,
+    // so the assertion has to flip or it would forbid the very wiring it was placed to schedule.
     const { deps } = fakeDeps();
-    expect(await runBmad(["verify"], deps)).toBe(2);
-    expect(BMAD_USAGE).toContain("Story 2.6");
+    // The fixture repo has no Surfaces, so the run legitimately reports divergence and exits 1. What
+    // this pins is that it ROUTED — a 2 here would mean the handler map never gained the entry.
+    expect(await runBmad(["verify"], deps)).toBe(1);
+    expect(BMAD_USAGE).not.toContain("coming");
+    expect(BMAD_USAGE).toContain("verify");
   });
 
   test("an inherited prototype key is not a subcommand", async () => {

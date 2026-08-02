@@ -13,7 +13,7 @@
 // std reuse (build less): `spawnCapture` from `src/proc` is the one subprocess primitive — never-reject,
 // never-hang, `{stdout,stderr,code}`, missing binary → 127. `git init` shells through it (BM-9).
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -160,6 +160,52 @@ export function makeEstateModule(spec: EstateSpec = {}): string {
     writeFileSync(join(dir, ".claude-plugin", "marketplace.json"), body, "utf-8");
   }
   return dir;
+}
+
+/**
+ * Bring a repo to the state a SUCCESSFUL `bmad install` leaves it in: both Surfaces rendered from
+ * `moduleRoot`, byte-identical to each other and to the module source (Story 2.6).
+ *
+ * EVERY SUITE THAT DRIVES THE APPLY PIPELINE NEEDS THIS, and the reason is the whole point of Story 2.6.
+ * Since 2.6 the pipeline VERIFIES the post-install state, so an installer fake that exits 0 while writing
+ * nothing describes a run that cannot happen on a real machine — and the verify filter fails it, exactly
+ * as it should. Before 2.6 that fake was harmless because verify was a no-op stub; it is not harmless now.
+ *
+ * Deliberately a plain `cpSync`, not a call through any `BmadDeps.fs` seam: this stands in for the
+ * EXTERNAL installer's writes, and routing them through the seam would make a suite's write-spy report
+ * `bmad-manager` as having copied into the repo — the exact self-copy claim `install.test.ts` asserts is
+ * false (FR-8: the installer does all of it).
+ */
+export function renderInstalledSurfaces(
+  repoRoot: string,
+  moduleRoot: string,
+  skills: readonly string[] = listSkillDirs(moduleRoot),
+): void {
+  for (const surface of [join(".claude", "skills"), join(".agents", "skills")]) {
+    for (const skill of skills) {
+      const src = join(moduleRoot, "skills", skill);
+      if (!existsSync(src)) continue;
+      cpSync(src, join(repoRoot, surface, skill), { recursive: true });
+    }
+  }
+}
+
+/**
+ * The skill directory names a module (or a materialized staging source) holds. Fail-soft `[]`.
+ *
+ * Defaulting {@link renderInstalledSurfaces} to this is what lets a harness point the fake installer at
+ * the run's `--custom-source` staging dir and get exactly the skills that run SELECTED — the same set a
+ * real `bmad install` would render, rather than everything the estate happens to ship.
+ */
+export function listSkillDirs(moduleRoot: string): string[] {
+  try {
+    return readdirSync(join(moduleRoot, "skills"), { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+      .sort();
+  } catch {
+    return [];
+  }
 }
 
 /** `rm -rf` a temp tree. Idempotent and never throws — safe in an `afterAll` that may run twice. */
