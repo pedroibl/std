@@ -25,12 +25,29 @@ export type FlagArity = "bool" | "value";
 /** The SEMANTIC shape of a value, for a completer. Orthogonal to `metavar`, which is display-only. */
 export type FlagValueKind = "path" | "list" | "enum";
 
+/**
+ * Where a `value: 'list'` flag's values come from AT COMPLETION TIME.
+ *
+ * The estate list is the machine owner's identity, not std's — it lives at
+ * `$XDG_CONFIG_HOME/std/estate.toml` precisely so publishing this package never ships a consumer's
+ * filesystem. So the model names a SOURCE and the completer emits a reader keyed on it; std never
+ * emits the values themselves (D4/NFR3).
+ */
+export type FlagValueSource = "estate.repos" | "estate.tools";
+
 export interface FlagSpec {
   readonly name: string;
   readonly arity: FlagArity;
   /** Display string in the usage row (`<dir>`, `a,b`, `m.k=v`). Never parsed — see `value`. */
   readonly metavar?: string;
   readonly value?: FlagValueKind;
+  /** See {@link FlagValueSource}. Orthogonal to `value`: `--repos` IS a comma list AND its items come
+   *  from the estate, and collapsing the two facts into one field would make 3.2's `'list'` tail rule
+   *  branch twice on the same key. */
+  readonly source?: FlagValueSource;
+  /** Values this flag always offers regardless of the caller's estate — std's own vocabulary, not the
+   *  caller's. Unioned with whatever the reader finds. */
+  readonly defaults?: readonly string[];
   readonly enum?: readonly string[];
   readonly repeatable?: boolean;
   readonly short?: string;
@@ -114,20 +131,33 @@ const FORCE_TRACK = {
   desc: "stage a repo whose .claude is gitignored (manual, never routine)",
 } as const;
 
+// `--repos` and `--tools` are the only two selectors with an enumerable value space, which is why they
+// are the only two carrying a `source`. `--skills` is NOT one: its vocabulary is the estate MODULE's
+// `skills/` directory, resolved from the installed package rather than from the caller's estate file, and
+// each skill has two accepted spellings (the `bmad-agent-` shorthand). `--set` (`m.k=v`) has no
+// enumerable source anywhere in the repo. Both keep the empty action 3.2 emits, asserted as an absence.
 const REPOS = {
   name: "--repos",
   arity: "value",
   metavar: "a,b",
   value: "list",
+  source: "estate.repos",
   group: "selectors",
   desc: "only these repos (by name; default is the Manifest minus source-only entries)",
 } as const;
 
+// `defaults` RESTATES `src/bmad/manifest.ts`'s `DEFAULT_TOOLS` — the effective tool set of every estate
+// entry that omits `tools`, i.e. the common case, without which an estate where nobody declares `tools`
+// completes nothing here. It is restated rather than imported because `manifest.ts` pulls `node:os` +
+// `node:path` + `src/fsx`, and this module is fs-free and env-free by contract. `surface.test.ts` holds
+// the two in parity — a test file may import anything.
 const TOOLS = {
   name: "--tools",
   arity: "value",
   metavar: "a,b",
   value: "list",
+  source: "estate.tools",
+  defaults: ["claude-code", "antigravity-cli"],
   group: "selectors",
   desc: "only these tools",
 } as const;
@@ -368,6 +398,16 @@ export function flagEnum(
   flag: string,
 ): readonly string[] | undefined {
   return flagSpecs(s, cmd, sub).find((f) => f.name === flag)?.enum;
+}
+
+/** The `defaults` of `cmd sub flag`. Same contract as {@link flagEnum}: `undefined`, never a throw. */
+export function flagDefaults(
+  s: CommandSurface,
+  cmd: string,
+  sub: string,
+  flag: string,
+): readonly string[] | undefined {
+  return flagSpecs(s, cmd, sub).find((f) => f.name === flag)?.defaults;
 }
 
 // ── renderers ────────────────────────────────────────────────────────────────────────────────────

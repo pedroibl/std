@@ -2,18 +2,24 @@ import { describe, expect, test } from "bun:test";
 
 import { bmadHandlers } from "../bmad/cli";
 import { defaultBmadDeps, type BmadDeps } from "../bmad/deps";
+// A TEST-ONLY cross-slice import, and the one the AC2 parity assertion rests on. `*.test.ts` sits
+// outside every gate's glob and `check:dep-root` builds its graph over production files, so this edge is
+// invisible to them — which is exactly why the restated copy lives in `surface.ts` and the real one here.
+import { DEFAULT_TOOLS } from "../bmad/manifest";
 import { CN_SPEC } from "./cn-deploy";
 import { DASHKIT_SPEC } from "./dashkit-deploy";
 import {
   BMAD_FLAG_GROUPS,
   HELP_OPTION_BLOCKS,
   SURFACE,
+  flagDefaults,
   flagEnum,
   flagNames,
   renderAliasUsage,
   subNames,
   type BmadSub,
   type CommandSurface,
+  type FlagSpec,
 } from "./surface";
 
 /** `bmadHandlers` only builds closures — nothing is dispatched here, only the map's KEYS are read. */
@@ -154,15 +160,76 @@ describe("the bmad flag matrix is represented EXACTLY (AC6)", () => {
   // The union that renders BMAD_USAGE's flat flag block is only order-independent while the eight are
   // shared const references. The day someone inlines one, duplicate names stop carrying identical text
   // and the block silently depends on which subcommand is visited first.
-  test("a flag name shared across bmad subcommands carries one identical desc", () => {
-    const seen = new Map<string, string>();
+  test("a flag name shared across bmad subcommands carries one identical desc, source AND defaults", () => {
+    // `source`/`defaults` ride the same rule for a sharper reason (3.3): the emitter keys ONE reader per
+    // source, so a second `--repos` object inlined under `verify` with `source` omitted would complete
+    // values under `install` and nothing under `verify` — a difference no `desc` assertion can see.
+    const seen = new Map<string, FlagSpec>();
     for (const sub of S.commands.find((c) => c.name === "bmad")!.subcommands) {
       for (const f of sub.flags) {
-        if (seen.has(f.name)) expect(f.desc, f.name).toBe(seen.get(f.name)!);
-        else seen.set(f.name, f.desc);
+        const first = seen.get(f.name);
+        if (first === undefined) {
+          seen.set(f.name, f);
+          continue;
+        }
+        expect(f.desc, f.name).toBe(first.desc);
+        expect(f.source, f.name).toBe(first.source);
+        expect(f.defaults, f.name).toEqual(first.defaults);
       }
     }
     expect(seen.size).toBe(8);
+  });
+
+  // ── 3.3: the two value sources ────────────────────────────────────────────────────────────────
+  test("exactly --repos and --tools carry a `source`; --skills and --set deliberately do not", () => {
+    const bySource = new Map<string, string | undefined>();
+    for (const sub of S.commands.find((c) => c.name === "bmad")!.subcommands) {
+      for (const f of sub.flags) bySource.set(f.name, f.source);
+    }
+    expect(bySource.get("--repos")).toBe("estate.repos");
+    expect(bySource.get("--tools")).toBe("estate.tools");
+    // Absences, and they are the point: `--skills`' vocabulary is the estate MODULE's `skills/` dir
+    // (resolved from the installed package, not the caller's estate) and is doubled by the
+    // `bmad-agent-` shorthand; `--set`'s `m.k=v` has no enumerable source anywhere in the repo.
+    expect(bySource.get("--skills")).toBeUndefined();
+    expect(bySource.get("--set")).toBeUndefined();
+    expect([...bySource].filter(([, s]) => s !== undefined).map(([n]) => n)).toEqual([
+      "--repos",
+      "--tools",
+    ]);
+  });
+
+  // 🔴 The parity that replaces an import. `manifest.ts` pulls `node:os` + `node:path` + `src/fsx`, and
+  // `surface.ts` is fs-free and env-free by contract — but the purity grep only reads `surface.ts`'s OWN
+  // text, so importing it there would leave that gate GREEN FOR THE WRONG REASON. Restate + assert is
+  // the same trade `CN_SPEC` already documents. Changing either side fires this, in either direction.
+  test("--tools' defaults are `DEFAULT_TOOLS`, restated in the model and pinned here", () => {
+    expect(flagDefaults(S, "bmad", "install", "--tools")).toEqual([...DEFAULT_TOOLS]);
+    expect(flagDefaults(S, "bmad", "update", "--tools")).toEqual([...DEFAULT_TOOLS]);
+    expect(flagDefaults(S, "bmad", "deploy", "--tools")).toEqual([...DEFAULT_TOOLS]);
+    // Without them, an estate where nobody declares `tools` — the common case, since every entry that
+    // omits the key gets exactly this set — completes NOTHING for `--tools`.
+    expect(DEFAULT_TOOLS.length).toBeGreaterThan(0);
+    expect(flagDefaults(S, "bmad", "install", "--repos")).toBeUndefined();
+  });
+
+  // ⚠ A `defaults` value lands in the artifact as a BARE ZSH WORD — the reader body is plain zsh, so the
+  // emitter's `'…'` escaping never reaches it. One containing a space or a quote would word-split
+  // silently into two completions: `zsh -n` accepts it and no probe assertion sees it. The emitter
+  // fails loud on the same charset (`repo-nav.test.ts`); this pins the DATA.
+  test("every `defaults` value is a bare zsh word", () => {
+    for (const c of S.commands) {
+      for (const f of [...(c.flags ?? []), ...c.subcommands.flatMap((s) => s.flags)]) {
+        for (const d of f.defaults ?? []) expect(d, `${f.name}: ${d}`).toMatch(/^[A-Za-z0-9._-]+$/);
+      }
+    }
+  });
+
+  test("flagDefaults honours the same unknown-name contract as flagEnum", () => {
+    expect(flagDefaults(S, "nope", "install", "--tools")).toBeUndefined();
+    expect(flagDefaults(S, "bmad", "nope", "--tools")).toBeUndefined();
+    expect(flagDefaults(S, "bmad", "install", "--nope")).toBeUndefined();
+    expect(() => flagDefaults(S, "nope", "nope", "nope")).not.toThrow();
   });
 
   test("every bmad flag's group is a listed heading, and every heading is non-empty", () => {
