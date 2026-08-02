@@ -625,6 +625,37 @@ describe("AC4 — the marketplace skills ARRAY is the install gate (BM-12)", () 
     materializeStaging(h.deps, [DEV], staging);
     expect(stagedSkillsArray(h.spy)).toEqual([`./skills/${DEV}`]);
   });
+
+  test("BM-12 — the staging base and the full-module base are byte-identical per SELECTED skill", async () => {
+    // Faithfulness bases on the FULL module (verify.ts:115) while the install leg's --custom-source
+    // points at staging. BM-12 ratifies that ONLY because materialization is a verbatim whole-directory
+    // copy per selected skill. This assertion IS that condition, and it is the ONLY observable form of
+    // it — without it the amendment is ratified in prose and nothing can ever be seen to stop holding.
+    // Goes red the day materializeStaging transforms anything INSIDE skills/ (break condition 1), and
+    // the same assertion catches a sub-tree selection for free (condition 2: `diff -rq` then reports
+    // `Only in <module>` and the failure carries the path).
+    const h = harness();
+    const selected = [JHON, EPIC, DEV];
+    const staging = join(h.stateHome, "staging", "bm12");
+    materializeStaging(h.deps, selected, staging);
+
+    for (const skill of selected) {
+      const r = await spawnCapture("diff", [
+        "-rq",
+        "--",
+        join(h.estate, "skills", skill),
+        join(staging, "skills", skill),
+      ]);
+      // The object shape is deliberate: comparing `{skill, code, out}` rather than `code` alone means a
+      // diff that exits 0 having compared NOTHING cannot satisfy this silently — the positive control
+      // rides on the same assertion (Epic-3 rule: every absence assertion carries one on its own path).
+      expect({ skill, code: r.code, out: r.stdout.trim() }).toEqual({ skill, code: 0, out: "" });
+    }
+
+    // marketplace.json is deliberately NOT in the compared set: it is the one staged artifact that is a
+    // REWRITE rather than a copy (AC4 above pins that), so including it would break on correct code.
+    // BM-12's equivalence is scoped to `skills/<s>` sub-trees, and this is where that scope is stated.
+  });
 });
 
 // ── AC5 — idempotency digest ──────────────────────────────────────────────────────────────────────

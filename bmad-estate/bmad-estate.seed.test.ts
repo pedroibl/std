@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, existsSync, readFileSync } from "node:fs";
+import { readdirSync, existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 // Identity-free: everything resolves from this file's own location, so no
@@ -60,6 +60,15 @@ function listFilesRecursive(root: string): string[] {
   return out.sort();
 }
 
+// Every regular file under root carrying ANY executable bit (0o111), as relative paths.
+// Returns the offending PATHS rather than a boolean so the failure message names what
+// broke the mode-uniformity — an empty-set assertion is only useful if it can point.
+function executableFilesUnder(root: string): string[] {
+  return listFilesRecursive(root).filter(
+    (rel) => (statSync(join(root, rel)).mode & 0o111) !== 0,
+  );
+}
+
 describe("bmad-estate seed", () => {
   test("AC1/AC5 — marketplace.json parses and lists exactly the two Default-estate skills", () => {
     const raw = require("node:fs").readFileSync(
@@ -89,6 +98,14 @@ describe("bmad-estate seed", () => {
       // any stray extra (including inside references/), enforcing the verbatim seed shape.
       expect(listFilesRecursive(root)).toEqual([...files].sort());
     }
+  });
+
+  test("BM-21 — no file under bmad-estate carries an executable bit", () => {
+    // `diff -rq` (FR-16) compares CONTENT, not MODE (bmad-verify.test.ts case 22). That blindness is
+    // tolerable ONLY while this payload is mode-uniform: a mode-uniform module gives Faithfulness no
+    // mode channel to be blind on. The day a loop skill ships a runnable script, this goes red and the
+    // mechanism question reopens by design — do not silence it, rule it.
+    expect(executableFilesUnder(ESTATE)).toEqual([]);
   });
 
   test("AC2/AC3 — each SKILL.md name matches its dir and ^bmad-[a-z0-9-]+$", () => {
