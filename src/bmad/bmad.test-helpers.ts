@@ -41,6 +41,10 @@ export async function makeScratchRepo(): Promise<ScratchRepo> {
     await rm(dir, { recursive: true, force: true });
     throw new Error(`git init failed (code ${init.code}) in ${dir}: ${init.stderr.trim()}`);
   }
+  // THE choke point: every fixture repo in this slice is born here, so persisting the identity once
+  // covers 2.4's postures, 2.5's live fixtures and 2.7's harness alike. Required because the PRODUCT
+  // code commits through `src/git` with no `-c` overrides — see `persistFixtureIdentity`.
+  persistFixtureIdentity(dir);
   return {
     dir,
     async cleanup() {
@@ -248,8 +252,17 @@ export function resolveEstateModule(): string {
  * identity is present, so the omission would have been silent here.
  *
  * `commit.gpgsign=false` survives a machine whose global config signs every commit (no key in CI ⇒ every
- * fixture commit fails). Passed as `-c` FLAGS rather than `git config` writes so one runner carries them
- * to every invocation, including those made against a repo this file did not create.
+ * fixture commit fails). Passed as `-c` FLAGS so one runner carries them to every invocation, including
+ * those made against a repo this file did not create.
+ *
+ * ⚠ `-c` FLAGS ARE PER-INVOCATION AND DO NOT PERSIST — which is why {@link persistFixtureIdentity}
+ * exists and must be called on every repo the PRODUCT code will commit in. Caught by CI on PR #69 after
+ * passing three local reviews: this file's `-c` flags cover the calls the HARNESS makes, but the code
+ * under test commits through `src/git`, which carries no `-c` and therefore falls back to the global
+ * config — present on a developer machine, absent in a bare CI container. 21 tests failed there and zero
+ * failed here. The identity must be written INTO each repo's own config, not merely passed alongside the
+ * harness's calls. (Story 2.4 had this right incidentally, via three `git config` writes; consolidating
+ * them onto `-c` flags for AC11 dropped the persistence they were providing.)
  */
 export const FIXTURE_IDENTITY: readonly string[] = [
   "-c",
@@ -259,6 +272,27 @@ export const FIXTURE_IDENTITY: readonly string[] = [
   "-c",
   "commit.gpgsign=false",
 ];
+
+/**
+ * Write {@link FIXTURE_IDENTITY} into a repo's own `.git/config` so it survives for git processes this
+ * harness does not launch — specifically the PRODUCT code under test, which commits via `src/git` with
+ * no `-c` overrides of its own.
+ *
+ * The key/value pairs are DERIVED from `FIXTURE_IDENTITY` rather than restated, so `user.email` still
+ * appears exactly once in `src/bmad/` (AC11's gate) and the two mechanisms cannot drift apart.
+ */
+export function persistFixtureIdentity(dir: string): void {
+  // FIXTURE_IDENTITY is a flat ["-c", "k=v", "-c", "k=v", …] argv; take every value slot and split once
+  // on "=" so a value containing "=" would survive.
+  for (let i = 1; i < FIXTURE_IDENTITY.length; i += 2) {
+    const pair = FIXTURE_IDENTITY[i] as string;
+    const eq = pair.indexOf("=");
+    execFileSync("git", ["-C", dir, "config", pair.slice(0, eq), pair.slice(eq + 1)], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }
+}
 
 /**
  * THE ONE GIT RUNNER FOR FIXTURE CONSTRUCTION — carries {@link FIXTURE_IDENTITY} and THROWS on failure.

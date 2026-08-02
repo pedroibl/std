@@ -879,6 +879,36 @@ describe("AC5/AC6 — the six-posture harness, and the traps that make it honest
     }
   });
 
+  // ── TRAP 2b: the identity must PERSIST for git processes the harness does not launch ───────────
+  test("TRAP 2b — the identity is written INTO the repo config, so the PRODUCT's own commit inherits it", async () => {
+    // WHY THIS EXISTS: TRAP 2 above passes with identity supplied ONLY as `-c` flags — and `-c` flags are
+    // per-invocation. The code under test commits through `src/git`, which carries no `-c` of its own, so
+    // it falls back to the GLOBAL config: present on a developer machine, absent in a bare CI container.
+    // PR #69's CI failed 21 tests on exactly this while every local review passed. TRAP 2 could not catch
+    // it because it only ever inspects commits the HARNESS made.
+    const f = await makeFixtureRepo("tracked", { moduleRoot: FIXTURE_MODULE, skills: SELECTED });
+    try {
+      // `--local` is the load-bearing word: without it, git happily reports the machine's global value
+      // and this assertion passes on a developer box while CI still fails — the very shape it guards.
+      const local = execFileSync("git", ["-C", f.dir, "config", "--local", EMAIL_KEY], {
+        encoding: "utf-8",
+      }).trim();
+      expect(local).toBe("bmad-fixture@example.invalid");
+
+      // The end-to-end proof: a commit made with NO `-c` overrides and NO global config still lands.
+      // This is the product path, reproduced. Remove `persistFixtureIdentity` and it fails here.
+      writeFileSync(join(f.dir, "product-path.txt"), "x", "utf-8");
+      execFileSync("git", ["-C", f.dir, "add", "product-path.txt"], { encoding: "utf-8" });
+      execFileSync("git", ["-C", f.dir, "commit", "-m", "product-path commit"], {
+        encoding: "utf-8",
+        env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+      });
+      expect(fixtureGit(f.dir, "log", "-1", "--format=%s")).toBe("product-path commit");
+    } finally {
+      await f.cleanup();
+    }
+  });
+
   // ── TRAP 3: the default branch must be normalized explicitly ───────────────────────────────────
   test("TRAP 3 — every fixture lands on `main`, even where git would default to `master`", async () => {
     const estate = await hermeticEstate(["tracked", "no-upstream", "dirty", "source-only"]);
