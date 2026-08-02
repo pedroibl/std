@@ -30,8 +30,15 @@ import { dirname, join } from "node:path";
 
 import { exists, readIfExists } from "../fsx/index";
 import { git as realGit } from "../git/index";
+import { spawnCapture } from "../proc/index";
 import { batchExit } from "./batch";
-import { makeScratchRepo, removeTempTree, type ScratchRepo } from "./bmad.test-helpers";
+import {
+  makeEstateModule,
+  makeScratchRepo,
+  removeTempTree,
+  renderInstalledSurfaces,
+  type ScratchRepo,
+} from "./bmad.test-helpers";
 import type { BmadDeps, InstallLeg, RepoResult } from "./deps";
 import {
   commitIfStaged,
@@ -42,7 +49,7 @@ import {
   stagingFailed,
 } from "./git-safety";
 import type { BmadRepo } from "./manifest";
-import { parseBmadOpts } from "./opts";
+import { DEFAULT_SKILLS, parseBmadOpts } from "./opts";
 import { runRepoPipeline } from "./pipeline";
 
 /** The empirical dirty-file count of the real estate repo FR-11 was written for. Hardcoded on purpose. */
@@ -64,8 +71,23 @@ const FEATURE_BRANCH = "feature/product-development-mkt";
  */
 const DEFAULT_BRANCH = "main";
 
+/** The scoped trees a fixture seeds unless it asks for others — both Surfaces, so Parity holds. */
+const SEEDED_TREES = ["_bmad", join(".claude", "skills"), join(".agents", "skills")];
+/** Last segment of a Surface tree — how the seeder tells a Surface from `_bmad`. */
+const SKILLS_LEAF = "skills";
+
 const scratch = mkdtempSync(join(tmpdir(), "bmad-git-safety-"));
-afterAll(() => removeTempTree(scratch));
+/**
+ * The estate module every fixture "installs" from (2.6). The verify filter compares each SELECTED skill
+ * against `<module>/skills/<s>`, so the module must be real and must hold the BM-12 default pair — a
+ * `join(scratch, "estate-module")` that was never created made every Faithfulness comparison a
+ * "module skill missing" finding the moment the filter stopped being a no-op.
+ */
+const FIXTURE_MODULE = makeEstateModule({ skills: [...DEFAULT_SKILLS] });
+afterAll(() => {
+  removeTempTree(scratch);
+  removeTempTree(FIXTURE_MODULE);
+});
 
 /** Unique-suffix counter — two fixtures sharing a repo name must not share a bare remote directory. */
 let seq = 0;
@@ -150,13 +172,28 @@ async function makePosture(name: string, opts: PostureOpts = {}): Promise<Fixtur
     g(s.dir, "push", "-q", "-u", "origin", "HEAD");
   }
 
-  for (const tree of opts.scoped ?? ["_bmad", join(".claude", "skills")]) {
-    put(join(s.dir, tree, "s", "SKILL.md"), `# ${tree} skill\n`);
+  // SEEDED TO MATCH WHAT THE INSTALLER RENDERS (amended by 2.6). The seed used to write `# <tree> skill`
+  // into `.claude/skills/s` alone — different content per Surface, and only one Surface. Both were
+  // invisible while verify was a no-op stub and are real Parity/set-Parity divergences now: a fixture
+  // that is ALREADY divergent cannot be used to test what the git spine does to a CLEAN install. Seeding
+  // the Surfaces from the same module the fake installer renders from is also what makes an IDEMPOTENT
+  // RE-RUN modellable — `commitScoped` can then commit a state the next install reproduces exactly.
+  const seeded = opts.scoped ?? SEEDED_TREES;
+  for (const tree of seeded) {
+    if (tree.endsWith(SKILLS_LEAF)) {
+      // A Surface: seeded from the SAME module the fake installer renders from, one tree at a time so a
+      // fixture can still ask for one Surface and not the other (the partial-add posture below).
+      for (const skill of DEFAULT_SKILLS) {
+        cpSync(join(FIXTURE_MODULE, "skills", skill), join(s.dir, tree, skill), { recursive: true });
+      }
+    } else {
+      put(join(s.dir, tree, "s", "SKILL.md"), "# seeded skill\n");
+    }
   }
   if (opts.commitScoped) {
     // Explicit pathspecs even in fixture setup — `git add -A` appears NOWHERE in this file, so a reader
     // grepping the slice for it finds nothing at all, test or shipped.
-    for (const tree of opts.scoped ?? ["_bmad", join(".claude", "skills")]) g(s.dir, "add", "--", tree);
+    for (const tree of seeded) g(s.dir, "add", "--", tree);
     g(s.dir, "commit", "-m", "seed scoped");
   }
 
@@ -191,7 +228,18 @@ function spyDeps(stub?: (repo: string, args: string[]) => string | undefined): {
   const calls: Calls = [];
   const backupRoot = scratchPath("backups");
   const deps: BmadDeps = {
-    exec: async () => ({ stdout: "", stderr: "", code: 0 }),
+    // AMENDED BY 2.6, and the amendment is the story in miniature. `diff` is passed through to the REAL
+    // `spawnCapture`, so the verify filter genuinely compares the trees this fixture built rather than
+    // being stubbed green — a stubbed verify would make every assertion below pass over an unverified
+    // repo, which is the false green 2.6 exists to prevent. Everything else is the INSTALLER, and a real
+    // one RENDERS both Surfaces; a fake that exits 0 while writing nothing is a run that cannot happen,
+    // and the verify filter now correctly fails it.
+    exec: async (cmd, args, o) => {
+      if (cmd === "diff") return spawnCapture(cmd, args, o);
+      const dir = args[args.indexOf("--directory") + 1];
+      if (dir !== undefined) renderInstalledSurfaces(dir, FIXTURE_MODULE, DEFAULT_SKILLS);
+      return { stdout: "", stderr: "", code: 0 };
+    },
     git: (repo, args) => {
       calls.push(args);
       const stubbed = stub?.(repo, args);
@@ -203,6 +251,16 @@ function spyDeps(stub?: (repo: string, args: string[]) => string | undefined): {
       atomicWrite: (p, c) => put(p, c),
       ensureDir: (d) => mkdirSync(d, { recursive: true }),
       cpDir: (src, dest) => cpSync(src, dest, { recursive: true }),
+      listDirs: (root) => {
+        try {
+          return readdirSync(root, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => d.name)
+            .sort();
+        } catch {
+          return [];
+        }
+      },
     },
     report: {
       lines: () => {
@@ -217,14 +275,19 @@ function spyDeps(stub?: (repo: string, args: string[]) => string | undefined): {
     clock: () => "T0",
     bmadBin: "bmad-under-test",
     manifestPath: join(scratch, "estate.toml"),
-    estateModulePath: join(scratch, "estate-module"),
+    estateModulePath: FIXTURE_MODULE,
     backupRoot,
   };
   return { deps, calls };
 }
 
 /** A leg whose argv is irrelevant here — the installer is mocked to exit 0 so the git filters are reached. */
-const LEG: InstallLeg = { kind: "install", buildArgv: () => ["install"] };
+// Carries `--directory <repo>` like the real `installLeg` does — the fake installer in `spyDeps`
+// reads it to render the Surfaces, which since 2.6 the pipeline verifies immediately afterwards.
+const LEG: InstallLeg = {
+  kind: "install",
+  buildArgv: (ctx) => ["install", "--directory", ctx.repo.path],
+};
 
 /** Every `add` argv a run issued. */
 function addCalls(calls: Calls): string[][] {
@@ -257,7 +320,9 @@ describe("AC1 — staging is scoped, and `git add -A`/`git add .` exist nowhere 
       expect(staged).toEqual(actuallyStaged);
       expect(actuallyStaged.length).toBeGreaterThan(0);
       for (const p of actuallyStaged) {
-        expect(p.startsWith("_bmad/") || p.startsWith(".claude/skills")).toBe(true);
+        expect(
+          p.startsWith("_bmad/") || p.startsWith(".claude/skills") || p.startsWith(".agents/skills"),
+        ).toBe(true);
       }
 
       // All 503 are still sitting there, untracked, exactly as the operator left them.
@@ -288,10 +353,12 @@ describe("AC1 — staging is scoped, and `git add -A`/`git add .` exist nowhere 
 
       const adds = addCalls(calls);
       expect(adds.length).toBe(2);
-      expect(adds[0]).toEqual(["add", "--", "_bmad/", ".claude/skills"]);
-      expect(adds[1]).toEqual(["add", "-f", "--", "_bmad/", ".claude/skills"]);
+      // All THREE scoped pathspecs, because the fixture now seeds both Surfaces (2.6 — a fixture with
+      // only `.claude/skills` is a Parity divergence before the run even starts).
+      expect(adds[0]).toEqual(["add", "--", "_bmad/", ".claude/skills", ".agents/skills"]);
+      expect(adds[1]).toEqual(["add", "-f", "--", "_bmad/", ".claude/skills", ".agents/skills"]);
       // The `--` is what makes a pathspec unable to be re-read as a flag. Its position is the contract.
-      for (const a of adds) expect(a.indexOf("--")).toBe(a.length - 3);
+      for (const a of adds) expect(a.indexOf("--")).toBe(a.length - 4);
     } finally {
       await f.cleanup();
     }
@@ -337,7 +404,7 @@ describe("AC1 — staging is scoped, and `git add -A`/`git add .` exist nowhere 
       // result. Returning the request as the result is precisely how a failed add reports success.
       expect(staged).not.toContain("_bmad/");
       expect(staged).toContain("_bmad/s/SKILL.md");
-      expect(staged).toContain(".claude/skills/s/SKILL.md");
+      expect(staged).toContain(`.claude/skills/${DEFAULT_SKILLS[0]}/SKILL.md`);
     } finally {
       await f.cleanup();
     }
@@ -705,7 +772,11 @@ describe("AC6 — every git write is state-verified; a silent no-op is never `ok
     // Nothing under the scoped paths has changed (they are committed and clean), so the index is
     // legitimately empty. That is the idempotent re-run — the common case on a healthy estate — and it
     // must NOT be reported as a staging failure.
-    const f = await makePosture("alpha", { scoped: ["_bmad"], commitScoped: true });
+    // The FULL post-install state is seeded and committed (amended by 2.6), so the installer that runs
+    // inside the pipeline re-renders byte-identical content and git genuinely sees nothing. Seeding only
+    // `_bmad` would leave the Surfaces to be created by that installer, which is a first install, not a
+    // re-run — the case this test is not about.
+    const f = await makePosture("alpha", { commitScoped: true });
     try {
       const { deps } = spyDeps();
       expect(stagingFailed(f.repo, deps)).toBe(false);
@@ -725,10 +796,21 @@ describe("AC6 — every git write is state-verified; a silent no-op is never `ok
     const f = await makePosture("alpha", { scoped: [], unrelated: UNRELATED_DIRTY });
     try {
       const { deps } = spyDeps();
+      // THE GUARD ITSELF, read against a repo that genuinely has no scoped path — the whole subject of
+      // this test, and asserted BEFORE the pipeline runs, because the installer inside the pipeline
+      // creates the Surfaces and that state can no longer be observed afterwards (2.6).
+      expect(presentScopedPaths(f.dir, deps)).toEqual([]);
       expect(stagingFailed(f.repo, deps)).toBe(false);
+
       const r = await runRepoPipeline(f.repo, LEG, parseBmadOpts(["--apply"]), deps);
       expect(r.status).toBe("ok");
-      expect(r.reason).toContain("nothing to commit");
+      // The 503 files the operator left are still theirs — untouched, unstaged, untracked. That is the
+      // real invariant behind the guard, and it survives the installer having created the Surfaces.
+      for (const p of r.stagedPaths) expect(p).not.toContain("unrelated-");
+      const untracked = g(f.dir, "status", "--porcelain")
+        .split("\n")
+        .filter((l) => l.startsWith("??") && l.includes("unrelated-"));
+      expect(untracked.length).toBe(UNRELATED_DIRTY);
     } finally {
       await f.cleanup();
     }
@@ -965,7 +1047,7 @@ describe("AC8 — 2.4 populates 2.2's single records and declares nothing new (B
 
       // Two different kinds of thing, and the suite says so explicitly because conflating them is how a
       // correct plan gets read as a wrong one.
-      expect(r.planned.wouldStage).toEqual(["_bmad/", ".claude/skills"]);
+      expect(r.planned.wouldStage).toEqual(["_bmad/", ".claude/skills", ".agents/skills"]);
       expect(r.planned.wouldCommit).toBe(true);
       expect(r.stagedPaths).toContain("_bmad/s/SKILL.md");
       expect(r.stagedPaths).not.toContain("_bmad/");

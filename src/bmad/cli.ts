@@ -23,7 +23,11 @@ import { BmadError, defaultBmadDeps, type BmadDeps } from "./deps";
 import { runBmadDeploy } from "./deploy";
 import { runBmadInstall } from "./install";
 import { ManifestError } from "./manifest";
+// A re-export does NOT bind the symbol in the re-exporting module's scope, so calling `parseBmadOpts`
+// in the handler map below needs this explicit import even though line 31 re-exports the same name.
+import { parseBmadOpts } from "./opts";
 import { runBmadUpdate } from "./update";
+import { runBmadVerify } from "./verify";
 
 // The flag framework's canonical home is `./opts` (splitting it out of this file is what keeps the
 // slice acyclic — see that module's header). Re-exported here so `bmad/cli`'s declared surface holds;
@@ -39,7 +43,7 @@ subcommands:
   install           install the loop-family skills across the estate
   update            update the installed modules across the estate
   deploy            compose and deploy the estate's leg across the Manifest
-  verify            (coming — Story 2.6)
+  verify            prove both Surfaces are byte-faithful to source (read-only, never mutates)
 
 safety flags:
   --apply           actually execute the plan. WITHOUT IT NOTHING MUTATES (dry-run is the default)
@@ -92,7 +96,11 @@ export async function runBmad(argv: string[], deps: BmadDeps = defaultBmadDeps()
         install: () => runBmadInstall(rest, deps),
         update: () => runBmadUpdate(rest, deps),
         deploy: () => runBmadDeploy(rest, deps),
-        // 2.6 adds: verify: () => runBmadVerify(rest, deps)   — its own module (BM-10)
+        // `verify` is the one handler that takes parsed opts rather than raw argv (2.6). It reads no
+        // `--apply`, so its option type is a deliberate SUBSET of `BmadOpts` that has no such field —
+        // and a `BmadOpts` satisfies it structurally, so nothing is cast. The raw `rest` still goes
+        // through for the render-only `--json` read.
+        verify: () => runBmadVerify(parseBmadOpts(rest), rest, deps),
       },
       onUnknown,
     );

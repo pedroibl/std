@@ -32,6 +32,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -39,7 +40,9 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 
-import { makeEstateModule, removeTempTree } from "./bmad.test-helpers";
+import { spawnCapture } from "../proc/index";
+
+import { makeEstateModule, removeTempTree, renderInstalledSurfaces } from "./bmad.test-helpers";
 import { runBmad } from "./cli";
 import { BmadError, type BmadDeps, type RepoResult } from "./deps";
 import { materializeStaging, moduleGuard, stagingPathFor } from "./estate-source";
@@ -175,13 +178,25 @@ function harness(opts: HarnessOpts = {}): Harness {
   let tick = 0;
 
   const deps: BmadDeps = {
-    exec: async (cmd, args) => {
+    exec: async (cmd, args, o) => {
       spy.exec.push({ cmd, args });
+      // `diff` goes to the REAL `spawnCapture` (2.6). The pipeline's verify filter must genuinely compare
+      // the trees this harness built — a stubbed-green verify would let every assertion below pass over
+      // an unverified repo, which is precisely the false green Story 2.6 exists to prevent.
+      if (cmd === "diff") return spawnCapture(cmd, args, o);
       // Keyed off `--directory`, so a two-repo batch can make one repo fail and one succeed.
       const dirFlag = args.indexOf("--directory");
       const target = dirFlag >= 0 ? (args[dirFlag + 1] ?? "") : "";
       const key = Object.keys(execTable).find((k) => k !== "*" && target.endsWith(k));
       const r = (key ? execTable[key] : execTable["*"]) ?? { code: 0 };
+      // A SUCCESSFUL install RENDERS BOTH SURFACES, and since 2.6 the pipeline verifies that it did.
+      // The rendering is a plain `cpSync` standing in for the EXTERNAL installer's writes — routing it
+      // through `deps.fs` would make `spy.cpDir` report bmad-manager as having copied into the repo,
+      // falsifying the AC3 no-self-copy assertion. A failing install (non-zero code) renders nothing,
+      // which is what lets the failure cases below still be failures.
+      const csFlag = args.indexOf("--custom-source");
+      const source = csFlag >= 0 ? (args[csFlag + 1] ?? "") : "";
+      if (r.code === 0 && target !== "" && source !== "") renderInstalledSurfaces(target, source);
       return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", code: r.code };
     },
     // AMENDED BY 2.4, which lands the real git spine on the apply path — "this harness never reaches
@@ -220,6 +235,16 @@ function harness(opts: HarnessOpts = {}): Harness {
         guardRepoWrite("cpDir", dest);
         spy.cpDir.push({ src, dest });
         cpSync(src, dest, { recursive: true });
+      },
+      listDirs: (root) => {
+        try {
+          return readdirSync(root, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => d.name)
+            .sort();
+        } catch {
+          return [];
+        }
       },
     },
     report: {
@@ -290,7 +315,7 @@ describe("AC1 — module guard aborts the WHOLE RUN before any repo is touched (
     // The red-turning input for the two cases above — if this did not shell, they would pass vacuously.
     const { deps, spy } = harness();
     expect(await runBmadInstall(["--repos", "alpha", "--apply"], deps)).toBe(0);
-    expect(spy.exec.length).toBe(1);
+    expect(installerCalls(spy).length).toBe(1);
   });
 
   test("the guard runs in DRY RUN too — a half-family is surfaced without writing anything", async () => {
@@ -397,6 +422,15 @@ describe("AC2 — backup of both Surface trees, out-of-repo, reported (FR-7/BM-8
 });
 
 /** The `--json` ledger rows of the most recent render. */
+/**
+ * Only the INSTALLER shell-outs. Since 2.6 the exec spy ALSO records the verify filter's `diff` calls, so
+ * a bare `spy.exec.length` no longer answers "how many times did the installer fire?" — it answers
+ * "how many subprocesses ran", which is a different question and silently a larger number.
+ */
+function installerCalls(spy: { exec: { cmd: string; args: string[] }[] }): { cmd: string; args: string[] }[] {
+  return spy.exec.filter((e) => e.cmd !== "diff");
+}
+
 function rowsOf(spy: Spy): RepoResult[] {
   const payload = spy.json[spy.json.length - 1] as { repos: RepoResult[] } | undefined;
   return payload?.repos ?? [];
@@ -567,7 +601,7 @@ describe("AC4 — the marketplace skills ARRAY is the install gate (BM-12)", () 
   test("staging is materialized ONCE per run, not once per repo", async () => {
     const h = harness();
     await runBmadInstall(["--apply"], h.deps); // two repos
-    expect(h.spy.exec.length).toBe(2);
+    expect(installerCalls(h.spy).length).toBe(2);
     expect(h.spy.atomicWrite.filter((w) => w.path.endsWith("marketplace.json")).length).toBe(1);
   });
 
@@ -741,7 +775,7 @@ describe("AC7 — installer failures are per-repo, verbatim, and never silent (F
     expect(alpha!.status).toBe("failed");
     expect(alpha!.reason).toContain(ANCESTOR); // VERBATIM — never paraphrased (BM-11)
     expect(beta!.status).toBe("ok"); // the loop continued (FR-15/BM-16)
-    expect(h.spy.exec.length).toBe(2);
+    expect(installerCalls(h.spy).length).toBe(2);
   });
 
   test("after a failed install the later filters do NOT run for that repo (fail-fast within a repo)", async () => {

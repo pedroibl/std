@@ -21,7 +21,7 @@
 //
 // D1 core purity: a Bun edge, so `node:os`/`node:path` and `process` are legal here and forbidden in core.
 
-import { cpSync } from "node:fs";
+import { cpSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -156,6 +156,13 @@ export interface BmadDeps {
    * `node:fs` is edge-legal here per D1). It is NOT promoted into `src/fsx`: this slice is its only
    * caller today (Rule-of-Three unmet). Promote it at the second caller, not before.
    *
+   * `listDirs` IS THE SECOND FSX GAP (2.6). `src/fsx` ships no directory-listing primitive across its
+   * nine exports, and 2.6's set-Parity check needs the top-level skill DIRECTORY names of each Surface.
+   * Deriving them from `walkFiles` was weighed and rejected: it walks every file to answer a top-level
+   * question, and — the disqualifying part — it CANNOT SEE AN EMPTY DIRECTORY, which is precisely one of
+   * the divergences set Parity exists to name. A verification tool blind to a class of divergence is
+   * worse than no tool. Not promoted into `src/fsx` for the same reason as `cpDir`: one caller today.
+   *
    * Every member is on the SEAM rather than imported directly so a test can make a write THROW — which
    * is how both the AC4 zero-IO-in-dry-run guard and the AC3 no-self-copy guard are expressed.
    */
@@ -166,6 +173,8 @@ export interface BmadDeps {
     ensureDir(dir: string): void;
     /** Recursive, byte-faithful directory copy. Creates `dest` and any missing parents. */
     cpDir(src: string, dest: string): void;
+    /** Immediate child DIRECTORY names of `root`, sorted. Fail-soft `[]` for a missing/unreadable root. */
+    listDirs(root: string): string[];
   };
   /**
    * The render seam. `lines`/`jsonOutput`/`emitJson`/`log` are `src/report`'s shipped primitives — the
@@ -211,6 +220,20 @@ export function defaultBmadDeps(env: NodeJS.ProcessEnv = process.env): BmadDeps 
       // The one non-fsx member (see the `fs` doc): std ships no recursive copy, and `atomicWrite` is
       // string-only, so a hand-rolled walk would not be byte-faithful. `cpSync` is the platform's.
       cpDir: (src: string, dest: string) => cpSync(src, dest, { recursive: true }),
+      // Fail-soft `[]`, mirroring `fsx.exists`/`walkFiles`: a missing root is the Surface pre-check's
+      // concern (it produces a NAMED finding), not this primitive's, and throwing here would turn that
+      // report into a crash. Sorted so the set-Parity difference is deterministic and so the `comm -3`
+      // oracle in the test suite compares like with like.
+      listDirs: (root: string) => {
+        try {
+          return readdirSync(root, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => d.name)
+            .sort();
+        } catch {
+          return [];
+        }
+      },
     },
     report: {
       lines,
