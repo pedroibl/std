@@ -254,3 +254,75 @@ export function pushGate(
   if (raw !== "" && Number(raw) === 0) return { pushed: true };
   return { pushed: false, reason: "push failed (upstream not advanced)" };
 }
+
+/**
+ * Every TRACKED path the installer changed OUTSIDE the BMAD-managed set — the BM-23 out-of-scope guard.
+ *
+ * WHY THIS EXISTS. `bmad install --tools claude-code,antigravity-cli` **removes surfaces belonging to
+ * tools not in the `--tools` set**. Measured on the first real `--apply` (zsh-planning, 2026-08-03): it
+ * deleted the entire `.agent/skills` tree — the **Antigravity IDE** surface, which PRD §2.2 names an
+ * explicit NON-USER — **1594 tracked files**, and the run reported `ok`.
+ *
+ * THE SAFETY CONTRACT IS WHAT HID IT, WHICH IS WHY THE FIX GOES HERE AND NOT IN THE STAGER. `.agent/` is
+ * not a BMAD-managed path, so `scopedStage` correctly refused to stage the deletions (FR-11) — leaving a
+ * clean-looking commit beside a wrecked working tree. Staging them would be WORSE: committing the removal
+ * of a surface this tool does not own. The only correct move is to NOTICE and REPORT (FR-15), which is the
+ * same disposition BM-19 took for `deploy --repos`: refuse loudly rather than proceed silently.
+ *
+ * GENERAL, NOT `.agent`-SPECIFIC. Hardcoding one directory would catch today's instance and miss the next
+ * tool BMAD learns to clean. The question asked is "did the installer touch anything outside the paths we
+ * own?", so any future surface is covered on the day it appears.
+ *
+ * BASELINE-DIFFERENCED, because a dirty tree is a legitimate posture. `claude-code-customs` carries 87
+ * unrelated dirty files by design, and the fixture matrix has a `dirty` posture precisely so scoped-add is
+ * proven against it. Only paths that were CLEAN before the leg and are dirty after are the installer's
+ * doing.
+ *
+ * `-uall` IS LOAD-BEARING, not a flag copied for tidiness. Bare `git status --porcelain` COLLAPSES an
+ * untracked directory to its top entry — a repo with no existing Surfaces reports `.claude/` and
+ * `.agents/`, never `.claude/skills/<skill>/SKILL.md`. Those collapsed names do not match the scoped
+ * pathspecs, so the first draft of this guard flagged a normal first install as an out-of-scope mutation
+ * and failed three fixtures. `-uall` lists real file paths, which is the only form a prefix test can
+ * reason about. The baseline and the after-read must pass the SAME flag or the diff is meaningless.
+ *
+ * WHAT IT CANNOT SEE, stated so the green is not over-read: `git status` reports tracked files and
+ * untracked-but-not-ignored ones. A repo whose out-of-scope surface is **gitignored** (measured:
+ * opentofu-terraform's `.agent/`, 1622 files, 0 tracked) can still lose it on disk with nothing to
+ * report. That is a real residual — but the committed history, which is what is unrecoverable, is exactly
+ * what git can see.
+ */
+export function outOfScopeMutations(repo: BmadRepo, before: string[], deps: BmadDeps): string[] {
+  const baseline = new Set(before);
+  return gitStatusSnapshot(repo, deps)
+    .filter((line) => !baseline.has(line))
+    .sort();
+}
+
+/**
+ * `git status --porcelain` for `repo`, SCOPED BY GIT to everything the BMAD-managed set excludes.
+ *
+ * GIT DOES THE SCOPING, deliberately, via `:(exclude)` pathspecs — this function parses no paths. The
+ * first draft sliced the 2-char status prefix off each line by hand (`line.slice(3)`) and compared the
+ * remainder against {@link SCOPED_PATHSPECS}. That was wrong twice over: it assumed a fixed-width prefix
+ * that the porcelain format does not guarantee (renames render as `old -> new`), and it silently mangled
+ * a path when the separator differed by one character — CASE 12 reported `bmad/_config/files-manifest.csv`
+ * for a file actually at `_bmad/_config/files-manifest.csv`, i.e. a MANAGED path misread as an out-of-scope
+ * one. A guard whose parser can invent a violation is worse than no guard: it fails honest runs and
+ * teaches the next person to disable it.
+ *
+ * Exclude pathspecs also match git's own semantics for nested paths and trailing slashes, which a
+ * `startsWith` test only approximates.
+ */
+export function gitStatusSnapshot(repo: BmadRepo, deps: BmadDeps): string[] {
+  return deps
+    .git(repo.path, [
+      "status",
+      "--porcelain",
+      "-uall",
+      "--",
+      ".",
+      ...SCOPED_PATHSPECS.map((p) => `:(exclude)${p.replace(/\/$/, "")}`),
+    ])
+    .split("\n")
+    .filter((l) => l.trim() !== "");
+}

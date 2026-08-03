@@ -30,6 +30,8 @@ import { BmadVerifyError, verifyRepo } from "./bmad-verify";
 import type { BmadDeps, InstallLeg, PlanProjection, RepoResult } from "./deps";
 import {
   commitIfStaged,
+  gitStatusSnapshot,
+  outOfScopeMutations,
   presentScopedPaths,
   pushGate,
   readGitPosture,
@@ -209,6 +211,11 @@ export async function runRepoPipeline(
   // multi-invocation leg it is worse than on a single one: leg 1 can succeed, leg 2 fail, and the repo
   // is left HALF-UPDATED. That repo must never report `ok` (FR-15/AC6), and the `reason` must say which
   // leg died, so the operator knows whether the built-ins or the estate module is the half that landed.
+  // BM-23 baseline, taken BEFORE the first invocation. A dirty tree is a legitimate posture
+  // (claude-code-customs carries 87 unrelated dirty files by design), so the guard differences against
+  // this rather than demanding a clean tree. Read-only; `git()` is fail-soft.
+  const preLegStatus = gitStatusSnapshot(repo, deps);
+
   for (const [i, invocation] of planned.installArgv.entries()) {
     const install = await deps.exec(deps.bmadBin, invocation);
     if (install.code !== 0) {
@@ -224,6 +231,27 @@ export async function runRepoPipeline(
       // built-in refresh failed must not then have the estate module written over the top of it.
       return result;
     }
+  }
+
+  // ── out-of-scope surface guard (BM-23 / FR-15) ──────────────────────────────────────────────────
+  // POSITION IS THE CONTRACT: after the installer (there is nothing to detect until it has run) and
+  // BEFORE verify, stage and commit. A repo whose out-of-scope surface the installer wrecked must never
+  // reach the git filters — the scoped commit would look clean while the working tree is gutted, which
+  // is exactly how this went unnoticed on the first real `--apply`.
+  //
+  // FAIL-FAST, VERBATIM PATHS. A count would tell the operator something is wrong and not what; the
+  // remediation is `git checkout -- <path>`, and that needs the path.
+  const strayed = outOfScopeMutations(repo, preLegStatus, deps);
+  if (strayed.length > 0) {
+    result.status = "failed";
+    note(
+      result,
+      `installer mutated ${strayed.length} path(s) OUTSIDE the BMAD-managed set — not staged, not ` +
+        `committed, and NOT this tool's to own (PRD §2.2). Restore with \`git checkout -- <path>\`: ` +
+        strayed.slice(0, 5).join(", ") +
+        (strayed.length > 5 ? `, …and ${strayed.length - 5} more` : ""),
+    );
+    return result;
   }
 
   // ── verify (2.6 / FR-16 / BM-10) ────────────────────────────────────────────────────────────────
