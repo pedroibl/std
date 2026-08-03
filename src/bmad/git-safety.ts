@@ -291,6 +291,15 @@ export function pushGate(
  * report. That is a real residual — but the committed history, which is what is unrecoverable, is exactly
  * what git can see.
  */
+/**
+ * Returns `git status --porcelain` RECORDS, not pathnames — `?? .agent/skills/x/SKILL.md`, ` D _foo`.
+ *
+ * That is deliberate and the caller must not treat them as paths. Detection here does no parsing at all
+ * (git scopes via `:(exclude)`), and the status code is load-bearing INFORMATION for the operator: a
+ * ` D` is a tracked loss that `git checkout --` restores, while a `??` is an untracked addition that
+ * `git checkout` **cannot** restore because it has no HEAD version. The pipeline's report states both
+ * remediations rather than guessing one — see its note at the BM-23 guard.
+ */
 export function outOfScopeMutations(repo: BmadRepo, before: string[], deps: BmadDeps): string[] {
   const baseline = new Set(before);
   return gitStatusSnapshot(repo, deps)

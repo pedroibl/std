@@ -244,12 +244,21 @@ export async function runRepoPipeline(
   const strayed = outOfScopeMutations(repo, preLegStatus, deps);
   if (strayed.length > 0) {
     result.status = "failed";
+    // THE LINES ARE VERBATIM `git status --porcelain` RECORDS, not pathnames, and the remediation is
+    // stated per status code rather than as one command. Both PR #76 reviewers caught the first draft
+    // here: it printed these records after the words "Restore with `git checkout -- <path>`", which is
+    // wrong twice — the record carries a 2-char status prefix so the path is not copy-pasteable, and
+    // `git checkout` cannot restore an UNTRACKED stray at all (there is no HEAD version of it). An
+    // operator following a confidently-wrong remediation on a data-loss report is worse off than one
+    // given the raw facts.
     note(
       result,
       `installer mutated ${strayed.length} path(s) OUTSIDE the BMAD-managed set — not staged, not ` +
-        `committed, and NOT this tool's to own (PRD §2.2). Restore with \`git checkout -- <path>\`: ` +
-        strayed.slice(0, 5).join(", ") +
-        (strayed.length > 5 ? `, …and ${strayed.length - 5} more` : ""),
+        `committed, and NOT this tool's to own (PRD §2.2). Lines are \`git status --porcelain\` records: ` +
+        `a leading \` D\`/\` M\` is a TRACKED loss (restore it with \`git checkout -- <path>\`), \`??\` is an ` +
+        `untracked addition (delete it if unwanted). ` +
+        strayed.slice(0, 5).join(" | ") +
+        (strayed.length > 5 ? ` | …and ${strayed.length - 5} more` : ""),
     );
     return result;
   }
