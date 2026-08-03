@@ -42,7 +42,7 @@ import { dirname, join, resolve, sep } from "node:path";
 
 import { spawnCapture } from "../proc/index";
 
-import { makeEstateModule, removeTempTree, renderInstalledSurfaces } from "./bmad.test-helpers";
+import { argvValueOf as valueOf, makeEstateModule, removeTempTree, renderInstalledSurfaces } from "./bmad.test-helpers";
 import { runBmad } from "./cli";
 import { BmadError, type BmadDeps, type RepoResult } from "./deps";
 import { materializeStaging, moduleGuard, stagingPathFor } from "./estate-source";
@@ -954,12 +954,6 @@ describe("AC9 — render composes the 2.2 path, and nothing bakes an identity", 
 // `--custom-source`, which is the part that matters — a first probe without it left bmm alone):
 //   before: _bmad/{_config, bmm, core, custom, render, scripts}
 //   after:  _bmad/{_config, bmad-estate, core, custom, render, scripts}   ← bmm GONE, rc=0, silent
-/** The value following `flag` in an argv, or `undefined`. Mirrors `update.test.ts`. */
-function valueOf(argv: string[], flag: string): string | undefined {
-  const i = argv.indexOf(flag);
-  return i < 0 ? undefined : argv[i + 1];
-}
-
 describe("BM-18.1 — install's --modules is PROBED, not the frozen `core` literal", () => {
   test("a repo carrying built-ins beyond core has every one of them named", () => {
     // RED against the frozen literal: it emits `core` and bmad deletes bmm, tea and wds from disk.
