@@ -476,8 +476,16 @@ describe("AC3 — --modules is PROBED on disk, never hardcoded", () => {
     // POSITIVE CONTROL on the same path: the real modules must still be named, so a probe that
     // returned `[]` cannot satisfy this test by emitting nothing.
     const h = harness({ builtins: ["core", "tea"] });
+    // 🔬 AN ARBITRARY UNMARKED DIRECTORY, and it is the whole point of this case (PR #74 reviewer).
+    // Asserting only against BMAD_BOOKKEEPING_DIRS is VACUOUS: a probe reimplemented as a denylist of
+    // those four names would pass every line below it. A name nothing has ever heard of can only be
+    // excluded by the `config.yaml` MARKER actually doing the work.
+    mkdirSync(join(h.repos.alpha, "_bmad", "zzz-unmarked-dir"), { recursive: true });
     const modules = valueOf(legFor("/s", h.deps).buildArgv(ctxFor(h.repos.alpha, h.deps)).at(-1)!, "--modules");
+    // POSITIVE CONTROL on the same path: the real modules must still be named, so a probe that
+    // returned `[]` cannot satisfy this test by emitting nothing.
     expect(modules).toBe("core,tea");
+    expect(modules).not.toContain("zzz-unmarked-dir");
     for (const d of BMAD_BOOKKEEPING_DIRS) expect(modules).not.toContain(d);
   });
 
@@ -500,10 +508,19 @@ describe("AC3 — --modules is PROBED on disk, never hardcoded", () => {
   test("BM-18.1 — the emitted set is SORTED, so deploy's byte-identity assertion cannot flake", () => {
     // BM-18 requires deploy's recorded argv to be byte-identical to update's for the same repo set.
     // `readdir` order is a filesystem detail; without the sort that assertion is at its mercy.
+    //
+    // 🔬 THE FILESYSTEM IS FORCED TO LIE (PR #74 reviewer). Seeding dirs out of order proves nothing:
+    // `readdirSync` on APFS returns them sorted anyway, so this case passed with production sorting
+    // DELETED — a textbook vacuous gate. Scrambling `listDirs` at the seam is the only input that makes
+    // the assertion depend on the production `.sort()`, and it is REVERSED rather than shuffled so the
+    // test is deterministic (`Math.random` would make a red flaky and a green meaningless).
     const h = harness({ builtinsPerRepo: { alpha: ["wds", "core", "tea", "bmm"] } });
+    const real = h.deps.fs.listDirs;
+    h.deps.fs.listDirs = (root: string) => [...real(root)].reverse();
     expect(valueOf(legFor("/s", h.deps).buildArgv(ctxFor(h.repos.alpha, h.deps)).at(-1)!, "--modules")).toBe(
       "core,bmm,tea,wds",
     );
+    h.deps.fs.listDirs = real;
   });
 });
 
