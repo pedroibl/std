@@ -1264,3 +1264,74 @@ describe("AC9 — inputs that violate the stated invariants (the class that bit 
     expect(bySpec(".agents/skills")).toEqual(["git-safety.ts"]);
   });
 });
+
+// ── BM-23 — the out-of-scope surface guard ────────────────────────────────────────────────────────
+//
+// FOUND ON THE FIRST REAL `--apply` (zsh-planning, 2026-08-03). `bmad install --tools
+// claude-code,antigravity-cli` REMOVES surfaces belonging to tools absent from `--tools`: it deleted the
+// whole `.agent/skills` tree — the Antigravity IDE surface, an explicit NON-USER per PRD §2.2 — 1594
+// tracked files, and the run reported `ok`.
+//
+// THE SAFETY CONTRACT IS WHAT HID IT. `.agent/` is not a BMAD-managed path, so `scopedStage` correctly
+// refused to stage the deletions (FR-11), leaving a clean-looking commit beside a wrecked worktree.
+// Staging them would be WORSE — committing the removal of a surface this tool does not own. The only
+// correct move is to notice and report, which is BM-19's disposition applied to a second surprise.
+describe("BM-23 — an installer that mutates OUTSIDE the BMAD-managed set fails the repo (FR-15)", () => {
+  test("a stray out-of-scope write fails the repo, names the path, and never stages or commits", async () => {
+    const f = await makePosture("alpha", { scoped: ["_bmad"] });
+    try {
+      // The leg's `exec` is what stands in for `bmad install`. This one does what the real installer did:
+      // it writes OUTSIDE the managed set. `.agent/skills` — singular — is the measured real case.
+      const { deps } = spyDeps();
+      const stray = join(f.dir, ".agent", "skills", "victim", "SKILL.md");
+      const strayLeg: InstallLeg = { kind: "install", buildArgv: (ctx) => [["install", "--directory", ctx.repo.path]] };
+      const execWriting: BmadDeps = {
+        ...deps,
+        exec: async (cmd, args) => {
+          mkdirSync(dirname(stray), { recursive: true });
+          writeFileSync(stray, "# clobbered\n", "utf-8");
+          return deps.exec(cmd, args);
+        },
+      };
+
+      const r = await runRepoPipeline(f.repo, strayLeg, parseBmadOpts(["--apply"]), execWriting);
+
+      // RED-TURNING INPUT: delete the `outOfScopeMutations` check from the pipeline and this run reports
+      // `ok` — the stray write is invisible to a scoped stage, so a clean commit lands beside it.
+      expect(r.status).toBe("failed");
+      expect(r.reason).toMatch(/OUTSIDE the BMAD-managed set/);
+      expect(r.reason).toMatch(/\.agent/);
+      expect(r.committed).toBe(false);
+      expect(stagedIn(f.dir)).toEqual([]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  test("POSITIVE CONTROL — an installer that stays inside the managed set is untouched by the guard", async () => {
+    // Without this, a guard that failed EVERY repo would satisfy the case above. It also pins the real
+    // shape: an ordinary install writes only under `_bmad/`, `.claude/skills`, `.agents/skills`.
+    const f = await makePosture("alpha", { scoped: ["_bmad"] });
+    try {
+      const { deps } = spyDeps();
+      const r = await runRepoPipeline(f.repo, LEG, parseBmadOpts(["--apply"]), deps);
+      expect(r.reason ?? "").not.toMatch(/OUTSIDE the BMAD-managed set/);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  test("a PRE-EXISTING dirty file outside the managed set is NOT blamed on the installer", async () => {
+    // `claude-code-customs` carries 87 unrelated dirty files by design, and the fixture matrix has a
+    // `dirty` posture for exactly that reason. The guard differences against a baseline taken before the
+    // leg; without that, every dirty repo in the estate would fail on its first run.
+    const f = await makePosture("alpha", { scoped: ["_bmad"], unrelated: 3 });
+    try {
+      const { deps } = spyDeps();
+      const r = await runRepoPipeline(f.repo, LEG, parseBmadOpts(["--apply"]), deps);
+      expect(r.reason ?? "").not.toMatch(/OUTSIDE the BMAD-managed set/);
+    } finally {
+      await f.cleanup();
+    }
+  });
+});

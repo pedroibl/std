@@ -662,7 +662,11 @@ describe("AC7/NFR-5 — read-only, proven on the working tree", () => {
       expect(spy.writes).toEqual([]);
       // 4. The `deps.git` VERB ALLOWLIST — git mutations ride `deps.git`, not `deps.exec`, so the exec
       //    spy alone cannot prove their absence.
-      for (const argv of spy.git) expect(["rev-parse", "rev-list"]).toContain(argv[0]!);
+      // The claim is that no git WRITE ran, so the allowlist is every git READ the pipeline legitimately
+    // issues before verify. `status` joined it with BM-23's out-of-scope guard (2026-08-03), which reads
+    // `git status --porcelain -uall` either side of the installer. `add`, `commit` and `push` still fail
+    // this line, which is the property it exists to hold.
+    for (const argv of spy.git) expect(["rev-parse", "rev-list", "status"]).toContain(argv[0]!);
       // 5. The exec-operand spy: only `diff`, and never against `repoRoot`.
       for (const call of spy.exec) {
         expect(call.cmd).toBe("diff");
@@ -888,7 +892,11 @@ describe("Task 3 / AC6+AC11+AC12 — the pipeline verify filter (BM-4 ordering)"
     // have been staged and committed before anyone noticed.
     expect(r.stagedPaths).toEqual([]);
     expect(r.committed).toBe(false);
-    for (const argv of spy.git) expect(["rev-parse", "rev-list"]).toContain(argv[0]!);
+    // The claim is that no git WRITE ran, so the allowlist is every git READ the pipeline legitimately
+    // issues before verify. `status` joined it with BM-23's out-of-scope guard (2026-08-03), which reads
+    // `git status --porcelain -uall` either side of the installer. `add`, `commit` and `push` still fail
+    // this line, which is the property it exists to hold.
+    for (const argv of spy.git) expect(["rev-parse", "rev-list", "status"]).toContain(argv[0]!);
     removeTempTree(moduleRoot);
   });
 
