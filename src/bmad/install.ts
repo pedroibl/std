@@ -19,14 +19,29 @@ import type { BmadDeps, InstallLeg } from "./deps";
 import { materializeStaging, moduleGuard, stagingPathFor } from "./estate-source";
 import { DEFAULT_TOOLS, loadManifest, selectRepos } from "./manifest";
 import { parseBmadOpts } from "./opts";
+import { presentBuiltins } from "./update";
 
 /**
  * The FR-8 install rule (BM-15), closing over the run's single staging directory.
  *
- * THE ARGV IS FROZEN, and its first six-and-a-half tokens are byte-identical to the Epic-0 proof that
- * demonstrated a real dual-surface install (`dual-surface-proof.test.ts`):
+ * THE ARGV WAS FROZEN AS `--modules core`, AND THAT SHAPE DELETES MODULES FROM DISK (BM-18.1, fixed
+ * 2026-08-03). The Epic-0 proof it was byte-frozen against installs into a **fresh scratch repo**, where
+ * `core` is the whole truth. Against a repo that already carries built-ins it is a destructive set
+ * assertion, exactly as BM-18 describes for `update`.
  *
- *     bmad install --directory <repo> --modules core --custom-source <staging> --tools <a,b> --yes
+ * MEASURED on the live `bmad 6.10.0`, with THIS command's own argv shape — `--modules core` **plus
+ * `--custom-source`**, which is the part that matters:
+ *
+ *     before:  _bmad/{_config, bmm, core, custom, render, scripts}
+ *     after:   _bmad/{_config, bmad-estate, core, custom, render, scripts}      ← bmm GONE, rc=0
+ *
+ * A first probe WITHOUT `--custom-source` left `bmm` alone, which is how this survived the `update` fix:
+ * BM-18's own text says the frozen shape is *"safe for a fresh install"*, and that sentence was taken as
+ * covering `install` the command rather than `install` the fresh case. **Citing beat probing, one rung
+ * below the rung where probing had just caught a nine-repo hazard.** The fix is the same probe `update`
+ * uses; the transferable part is that "the sibling command was already checked" is not evidence.
+ *
+ *     bmad install --directory <repo> --modules <PROBED> --custom-source <staging> --tools <a,b> --yes
  *
  * `--custom-source` is the CLOSED-OVER `stagingDir`, never a `ctx` field. `stagingPathFor` embeds
  * `deps.clock()`, so re-deriving it in here would, under the production clock, point the installer at a
@@ -41,18 +56,21 @@ import { parseBmadOpts } from "./opts";
  * documented flag silently ignored, which is worse than not offering it. With no `--set` the argv is
  * exactly the frozen string.
  */
-export function installLeg(stagingDir: string): InstallLeg {
+export function installLeg(stagingDir: string, builtinsOf: (repoPath: string) => string[]): InstallLeg {
   return {
     kind: "install",
-    // ONE invocation, wrapped in the outer list `InstallLeg.buildArgv` returns since 2.5. The argv
-    // CONTENTS are unchanged and still byte-identical to the frozen Epic-0 proof; only the nesting moved.
+    // ONE invocation, wrapped in the outer list `InstallLeg.buildArgv` returns since 2.5.
     buildArgv: (ctx) => [
       [
         "install",
         "--directory",
         ctx.repo.path,
         "--modules",
-        "core",
+        // Every built-in that must survive this invocation, PROBED from the target repo (BM-18/BM-18.1).
+        // The `|| "core"` fallback is the genuinely-fresh case — no `_bmad/` at all — where the estate
+        // module still needs a host module to render alongside. It is a fallback for an EMPTY probe,
+        // never a default that can mask a populated one.
+        builtinsOf(ctx.repo.path).join(",") || "core",
         "--custom-source",
         stagingDir,
         // `--tools` is the RUN-level override; absent, it falls back to 2.1's `DEFAULT_TOOLS` (FR-4).
@@ -103,7 +121,7 @@ export async function runBmadInstall(argv: string[], deps: BmadDeps): Promise<nu
   const stagingDir = stagingPathFor(deps);
   if (opts.apply) materializeStaging(deps, skills, stagingDir);
 
-  const results = await runBatch(repos, installLeg(stagingDir), opts, deps);
+  const results = await runBatch(repos, installLeg(stagingDir, (repoPath) => presentBuiltins(repoPath, deps)), opts, deps);
   renderBatch("install", results, opts, deps, hasFlag(argv, "json"));
   return batchExit(results);
 }

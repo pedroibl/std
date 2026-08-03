@@ -618,3 +618,15 @@ export function resolveBmadBin(): string | null {
   }
   return null;
 }
+
+/**
+ * The value following `flag` in an argv, or `undefined`.
+ *
+ * ONE definition — the Rule-of-Three second caller (`update.test.ts` and `install.test.ts` both assert
+ * `--modules` sets). Two copies would be free to drift on the exact helper that reads the flag whose
+ * mis-set DELETES modules from disk (BM-18.1), which is the last place a silent divergence should live.
+ */
+export function argvValueOf(argv: string[], flag: string): string | undefined {
+  const i = argv.indexOf(flag);
+  return i < 0 ? undefined : argv[i + 1];
+}

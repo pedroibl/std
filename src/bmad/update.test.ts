@@ -34,6 +34,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { spawnCapture } from "../proc/index";
 
 import {
+  argvValueOf as valueOf,
   BMAD_BOOKKEEPING_DIRS,
   makeEstateModule,
   makeScratchRepo,
@@ -290,11 +291,9 @@ function callsFor(spy: Spy, repo: string): string[][] {
   return bmadCalls(spy).filter((a) => a[a.indexOf("--directory") + 1] === repo);
 }
 
-/** The value following `flag` in an argv, or `undefined` when the flag is absent. */
-function valueOf(argv: string[], flag: string): string | undefined {
-  const i = argv.indexOf(flag);
-  return i < 0 ? undefined : argv[i + 1];
-}
+// `valueOf` is `argvValueOf`, imported from the shared helpers — the Rule-of-Three second caller
+// (PR #75 review). Two copies of the reader for the flag whose mis-set DELETES modules from disk is
+// the last place a silent divergence should be free to live.
 
 /** The ledger rows a `--json` run emitted. */
 function rowsOf(spy: Spy): RepoResult[] {
