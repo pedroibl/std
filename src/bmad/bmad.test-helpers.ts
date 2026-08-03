@@ -453,7 +453,13 @@ export async function makeFixtureRepo(
 
   // 3. + 4. the seed working tree.
   writeFixtureFile(join(s.dir, "README.md"), `# ${name}\n`);
-  for (const m of opts.builtins ?? ["core"]) writeFixtureFile(join(s.dir, "_bmad", m, ".keep"), "");
+  // A module dir is marked by its `config.yaml`, which is what the BM-18.1 probe discriminates on and
+  // what a real installed module carries. The bookkeeping dirs go in on EVERY posture so the probe is
+  // permanently required to tell them apart — a probe returning every child would otherwise pass.
+  for (const m of opts.builtins ?? ["core"]) writeFixtureFile(join(s.dir, "_bmad", m, "config.yaml"), "");
+  for (const d of ["_config", "custom", "scripts", "render"]) {
+    writeFixtureFile(join(s.dir, "_bmad", d, ".keep"), "");
+  }
   renderInstalledSurfaces(s.dir, moduleRoot, skills);
 
   // `add -A` is legal HERE and nowhere in the shipped slice: this is fixture CONSTRUCTION, not the

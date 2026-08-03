@@ -137,10 +137,22 @@ function harness(opts: HarnessOpts = {}): Harness {
   mkdirSync(beta, { recursive: true });
 
   // The built-in modules the AC3 probe will find. Seeded as REAL directories, because the probe is a
-  // real `deps.fs.exists` — stubbing its answer would test the stub, not the probe.
+  // real `deps.fs` read — stubbing its answer would test the stub, not the probe.
+  //
+  // Each carries a `config.yaml` MODULE MARKER, because that is what the probe now discriminates on
+  // (BM-18.1) and what a real installed module carries. A bare directory is NOT a module: `_bmad/` also
+  // holds `_config`, `custom`, `scripts` and `render`, and naming one of those in `--modules` would ask
+  // `bmad` to install a module that does not exist.
   for (const [name, repo] of [["alpha", alpha], ["beta", beta]] as const) {
     for (const m of opts.builtinsPerRepo?.[name] ?? opts.builtins ?? ["core", "bmm"]) {
       mkdirSync(join(repo, "_bmad", m), { recursive: true });
+      writeFileSync(join(repo, "_bmad", m, "config.yaml"), "", "utf-8");
+    }
+    // The bookkeeping dirs every real `_bmad/` carries, seeded on EVERY fixture so the probe is
+    // permanently required to discriminate. Without these the marker check is untested — a probe that
+    // returned every child directory would pass every assertion in this file.
+    for (const d of ["_config", "custom", "scripts", "render"]) {
+      mkdirSync(join(repo, "_bmad", d), { recursive: true });
     }
   }
 
@@ -427,6 +439,50 @@ describe("AC3 — --modules is PROBED on disk, never hardcoded", () => {
     expect(valueOf(argv.at(-1)!, "--modules")).toBe("core,bmm");
     // Both invocations agree on the set — a divergence is the shape that loses a module.
     expect(valueOf(argv[0]!, "--modules")).toBe(valueOf(argv.at(-1)!, "--modules"));
+  });
+
+  // ── BM-18.1 — THE INPUT THAT WAS MISSING FOR THREE EPICS ──────────────────────────────────────
+  // Every assertion above supplies only `core` and/or `bmm`. Against that input a correct disk probe
+  // and the old `BUILTIN_MODULES = ["core","bmm"]` intersection return IDENTICAL answers, so the whole
+  // describe block passed while the shipped probe could not name a single module outside that pair.
+  // The gate was real; the input that makes it fail did not exist. Found 2026-08-03 on first contact
+  // with the real estate: all 9 repos hold 4–7 built-ins, so `update --apply` would have deleted 2–5
+  // modules from every one of them.
+  test("BM-18.1 — a built-in OUTSIDE {core,bmm} is named; the probe enumerates disk, not a literal", () => {
+    // `tea` and `wds` are real modules in the live estate. RED against the pre-BM-18.1 probe, which
+    // returns `core,bmm` here and hands `--action update` an argv that DELETES tea and wds from disk.
+    const h = harness({ builtins: ["core", "bmm", "tea", "wds"] });
+    const argv = legFor("/s", h.deps).buildArgv(ctxFor(h.repos.alpha, h.deps));
+    for (const a of argv) expect(valueOf(a, "--modules")).toBe("core,bmm,tea,wds");
+  });
+
+  test("BM-18.1 — a repo with NO core still names what it has; nothing is assumed", () => {
+    // The inverse blind spot: an intersection cannot return a module it does not list, and it also
+    // cannot notice that `core` is absent. Enumeration reports exactly what is on disk.
+    const h = harness({ builtins: ["tea"] });
+    const argv = legFor("/s", h.deps).buildArgv(ctxFor(h.repos.alpha, h.deps));
+    expect(valueOf(argv.at(-1)!, "--modules")).toBe("tea");
+  });
+
+  test("BM-18.1 — `_bmad`'s bookkeeping dirs are NEVER named as modules", () => {
+    // `_config`, `custom`, `scripts` and `render` are seeded into every fixture repo. Naming one in
+    // `--modules` asks bmad to install a module that does not exist. This is the assertion that makes
+    // "enumerate the directory" safe — without it, the cure is worse than the disease.
+    // POSITIVE CONTROL on the same path: the real modules must still be named, so a probe that
+    // returned `[]` cannot satisfy this test by emitting nothing.
+    const h = harness({ builtins: ["core", "tea"] });
+    const modules = valueOf(legFor("/s", h.deps).buildArgv(ctxFor(h.repos.alpha, h.deps)).at(-1)!, "--modules");
+    expect(modules).toBe("core,tea");
+    for (const d of ["_config", "custom", "scripts", "render"]) expect(modules).not.toContain(d);
+  });
+
+  test("BM-18.1 — the emitted set is SORTED, so deploy's byte-identity assertion cannot flake", () => {
+    // BM-18 requires deploy's recorded argv to be byte-identical to update's for the same repo set.
+    // `readdir` order is a filesystem detail; without the sort that assertion is at its mercy.
+    const h = harness({ builtinsPerRepo: { alpha: ["wds", "core", "tea", "bmm"] } });
+    expect(valueOf(legFor("/s", h.deps).buildArgv(ctxFor(h.repos.alpha, h.deps)).at(-1)!, "--modules")).toBe(
+      "core,bmm,tea,wds",
+    );
   });
 });
 
