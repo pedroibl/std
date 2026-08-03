@@ -50,10 +50,37 @@ import { cite } from "std/core";
 cite("scripts/glab.ts"); // → "`scripts/glab.ts`"
 ```
 
+## `std bmad` — the estate command family
+
+Distributes the loop-family skills across a multi-repo BMAD estate: `install`, `update`, `verify`,
+`deploy`. It **shells BMAD's own installer** (the bare `bmad` binary off `$PATH`, `$BMAD_BIN`-overridable
+— never a package runner, never `npx`) and owns only what that installer doesn't: batching across a
+shared manifest, commits scoped to `_bmad/` + the two skill surfaces, dual-surface verification.
+
+```bash
+std bmad verify                                    # read-only; proves both Surfaces byte-faithful
+std bmad install --repos zsh-planning              # DRY RUN — the default; mutates nothing
+std bmad install --repos zsh-planning --apply      # execute that exact plan
+std bmad update --repos loom --apply --push        # --push is opt-in, never implied
+std bmad deploy --apply                            # estate-wide by identity; REFUSES --repos (exit 2)
+```
+
+Three invariants worth knowing before the first `--apply`:
+
+- **Dry-run is the default.** Every mutating leg prints its plan and exits without touching disk until
+  `--apply`. `--push` is a second, separate opt-in.
+- **The manifest is caller-local** (D4/BM-2) — `$XDG_CONFIG_HOME/std/estate.toml`, never in `src/`. Start
+  from `estate.example.toml`; paths must be **absolute** (`~` is not expanded by any consumer, and a `~`
+  path reports `missing Surface` on every repo, which reads as estate corruption).
+- **The payload ships with the package** — `bmad-estate/`, resolved relative to the package root
+  (`src/bmad/deps.ts`, BM-13). `$BMAD_ESTATE_DIR` overrides it.
+
 ## Consumers
 
-`std` is the **doctrinal root** of Pedro's personal standard; consumers adopt it via `bun link` (dev)
-or `workspace:*` (CI), and import nothing back (clean dependency root).
+`std` is the **doctrinal root** of Pedro's personal standard; consumers install it from the registry
+under an alias so imports stay byte-identical — `bun add std@npm:@pedroibl/std`, then
+`import { cite } from "std/core"`. A global `bun link` is the **dev-only override** for testing a
+consumer against an unpublished change. std imports nothing back (clean dependency root).
 
 - **zsh-planning** — the **first conforming consumer across the runtime wall** (zsh ↔ Bun/TS share no
   executable code; the severity vocabulary is hand-mirrored by design). It shipped its v2 ZDOTDIR
