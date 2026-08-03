@@ -33,7 +33,14 @@ import { dirname, join, resolve, sep } from "node:path";
 
 import { spawnCapture } from "../proc/index";
 
-import { makeEstateModule, makeScratchRepo, removeTempTree, renderInstalledSurfaces, resolveBmadBin } from "./bmad.test-helpers";
+import {
+  BMAD_BOOKKEEPING_DIRS,
+  makeEstateModule,
+  makeScratchRepo,
+  removeTempTree,
+  renderInstalledSurfaces,
+  resolveBmadBin,
+} from "./bmad.test-helpers";
 import { runBmad } from "./cli";
 import { BmadError, type BmadDeps, type LegCtx, type RepoResult } from "./deps";
 import { materializeStaging, moduleGuard, stagingPathFor } from "./estate-source";
@@ -151,9 +158,7 @@ function harness(opts: HarnessOpts = {}): Harness {
     // The bookkeeping dirs every real `_bmad/` carries, seeded on EVERY fixture so the probe is
     // permanently required to discriminate. Without these the marker check is untested — a probe that
     // returned every child directory would pass every assertion in this file.
-    for (const d of ["_config", "custom", "scripts", "render"]) {
-      mkdirSync(join(repo, "_bmad", d), { recursive: true });
-    }
+    for (const d of BMAD_BOOKKEEPING_DIRS) mkdirSync(join(repo, "_bmad", d), { recursive: true });
   }
 
   const estate = makeEstateModule({
@@ -473,7 +478,23 @@ describe("AC3 — --modules is PROBED on disk, never hardcoded", () => {
     const h = harness({ builtins: ["core", "tea"] });
     const modules = valueOf(legFor("/s", h.deps).buildArgv(ctxFor(h.repos.alpha, h.deps)).at(-1)!, "--modules");
     expect(modules).toBe("core,tea");
-    for (const d of ["_config", "custom", "scripts", "render"]) expect(modules).not.toContain(d);
+    for (const d of BMAD_BOOKKEEPING_DIRS) expect(modules).not.toContain(d);
+  });
+
+  test("BM-18.1 — a repo with NO `_bmad` at all yields [] and falls back, it does NOT throw", () => {
+    // Raised by the PR #74 reviewer as "listDirs may throw where the exists-based probe did not".
+    // The MECHANISM claim is wrong — `deps.fs.listDirs` is fail-soft `[]` by construction
+    // (`deps.ts:245`), measured: `listDirs("/nope") === []`. The CONCERN was right, though: nothing
+    // asserted the enumeration probe's behaviour on a repo that has never had bmad installed, and
+    // "the primitive is fail-soft" is a property a future refactor can silently drop.
+    const h = harness();
+    const virgin = join(h.repos.alpha, "..", "virgin");
+    mkdirSync(virgin, { recursive: true }); // a repo dir with NO `_bmad/` whatsoever
+    expect(presentBuiltins(virgin, h.deps)).toEqual([]);
+    // …and the leg still emits a usable argv: the estate module needs a host module to render beside.
+    const argv = legFor("/s", h.deps).buildArgv(ctxFor(virgin, h.deps));
+    expect(argv).toHaveLength(1);
+    expect(valueOf(argv[0]!, "--modules")).toBe("core");
   });
 
   test("BM-18.1 — the emitted set is SORTED, so deploy's byte-identity assertion cannot flake", () => {

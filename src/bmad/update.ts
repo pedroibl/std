@@ -84,12 +84,16 @@ const MODULE_MARKER = "config.yaml";
  */
 export function presentBuiltins(repoPath: string, deps: BmadDeps): string[] {
   const root = join(repoPath, "_bmad");
-  const found = deps.fs
-    .listDirs(root)
-    .filter((name) => deps.fs.exists(join(root, name, MODULE_MARKER)))
-    .sort();
-  // `core` first, then the rest alphabetically — see the ordering note above.
-  return found.includes("core") ? ["core", ...found.filter((m) => m !== "core")] : found;
+  return (
+    deps.fs
+      .listDirs(root)
+      .filter((name) => deps.fs.exists(join(root, name, MODULE_MARKER)))
+      // ONE comparator rather than a sort-then-reshuffle: `core` sorts lowest, everything else
+      // alphabetically. A missing `_bmad` needs no branch here — `deps.fs.listDirs` is fail-soft `[]`
+      // by construction (`deps.ts:245`), exactly as the previous `exists`-based probe was, and
+      // `updateLeg` already falls back to `core` on an empty set.
+      .sort((a, b) => (a === "core" ? -1 : b === "core" ? 1 : a.localeCompare(b)))
+  );
 }
 
 /**

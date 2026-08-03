@@ -340,6 +340,22 @@ export const ALL_POSTURES = [
 /** The branch every fixture is normalised onto before its seed commit. */
 export const FIXTURE_BRANCH = "main";
 
+/**
+ * The non-module directories a real `_bmad/` carries. Seeded into EVERY fixture repo so the BM-18.1
+ * built-in probe is permanently required to discriminate: without them a probe that returned every
+ * child directory would satisfy the whole suite, which is the vacuous shape BM-18.1 exists to close.
+ *
+ * ONE definition, consumed by both fixture builders (this file's `makeFixtureRepo` and
+ * `update.test.ts`'s `harness`) — the Rule-of-Three second caller, so it earns the constant. A drifting
+ * second copy would let one builder's fixtures stop exercising the discriminator without anything
+ * noticing.
+ *
+ * `render` is in the list on purpose: it appears in NO estate repo and only surfaced from a fresh
+ * `bmad install` into a scratch repo. It is the reminder that this set is observed, never assumed —
+ * which is exactly why the SHIPPED probe keys off a positive `config.yaml` marker instead of a denylist.
+ */
+export const BMAD_BOOKKEEPING_DIRS: readonly string[] = ["_config", "custom", "scripts", "render"];
+
 /** The live branch the `feature-branch` posture checks out — a repo whose HEAD is NOT `main` (FR-14). */
 export const FIXTURE_FEATURE_BRANCH = "feature/product-development-mkt";
 
@@ -457,9 +473,7 @@ export async function makeFixtureRepo(
   // what a real installed module carries. The bookkeeping dirs go in on EVERY posture so the probe is
   // permanently required to tell them apart — a probe returning every child would otherwise pass.
   for (const m of opts.builtins ?? ["core"]) writeFixtureFile(join(s.dir, "_bmad", m, "config.yaml"), "");
-  for (const d of ["_config", "custom", "scripts", "render"]) {
-    writeFixtureFile(join(s.dir, "_bmad", d, ".keep"), "");
-  }
+  for (const d of BMAD_BOOKKEEPING_DIRS) writeFixtureFile(join(s.dir, "_bmad", d, ".keep"), "");
   renderInstalledSurfaces(s.dir, moduleRoot, skills);
 
   // `add -A` is legal HERE and nowhere in the shipped slice: this is fixture CONSTRUCTION, not the
