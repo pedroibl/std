@@ -37,17 +37,40 @@ import { DEFAULT_TOOLS, loadManifest, selectRepos } from "./manifest";
 import { parseBmadOpts } from "./opts";
 
 /**
- * The built-in modules FR-9 names. PROBED per repo, never assumed present — see {@link presentBuiltins}.
+ * The file every installed BMAD module carries at its root. It is the MODULE MARKER — the discriminator
+ * that separates a module directory from `_bmad/`'s bookkeeping directories.
+ *
+ * A POSITIVE MARKER, deliberately, not a denylist of known non-modules. Measured 2026-08-03 across the
+ * real estate: the 8 modules in use (`automator bmb bmm cis core gds tea wds`) all carry `config.yaml`;
+ * the bookkeeping dirs (`_config`, `custom`, `scripts`) all lack it. So does `render`, which a fresh
+ * `bmad install` creates and which appears in NO estate repo — the exact entry a hand-maintained denylist
+ * would have missed on the day it was written. A denylist rots the moment `bmad` adds a directory; a
+ * marker cannot.
  */
-const BUILTIN_MODULES = ["core", "bmm"] as const;
+const MODULE_MARKER = "config.yaml";
 
 /**
- * Which of {@link BUILTIN_MODULES} are actually installed in `repoPath` (AC3).
+ * Every built-in module actually installed in `repoPath` (AC3, BM-18, **BM-18.1**).
  *
- * PROBED, NEVER HARDCODED. Naming an absent built-in in `--modules` asks `bmad` to *install* it, which
- * silently WIDENS the estate: a repo that deliberately runs `core` only would acquire `bmm` from an
- * `update`. Today every target has both, so the probe and a hardcoded `"core,bmm"` agree — the probe
- * exists so the tenth repo does not surprise anyone.
+ * ENUMERATED FROM DISK, NEVER INTERSECTED WITH A LITERAL. This function previously filtered a closed
+ * `["core","bmm"]` constant, so it answered *"which of core and bmm are present"* rather than *"which
+ * built-ins are present"* — and BM-18's measured semantics (`--action update` treats `--modules` as the
+ * set that SHOULD EXIST) then **deleted every module it could not name**. Measured on the real estate
+ * 2026-08-03: all 9 repos would have lost 2–5 modules each, 8 distinct modules at risk. An allowlist is
+ * a hardcoded set wearing a probe's clothing, which BM-18's own rule forbids by name — *"never a
+ * constant, never carried forward from another repo, never inherited from a planning document."*
+ *
+ * DETERMINISTIC ORDER, AND `core` LEADS. `deploy`'s byte-identity assertion against `update` (BM-18)
+ * compares recorded argv, and `readdir` order is a filesystem detail rather than a contract — so an
+ * unsorted probe puts that assertion at the filesystem's mercy. A plain `.sort()` would fix that but
+ * would also emit `bmm,core` where every frozen argv in this slice reads `core,bmm`. `--modules` is a
+ * SET, so the reordering is almost certainly inert to `bmad` — and "almost certainly" is not a standard
+ * this rule gets to use, because being wrong here deletes modules from disk. Keeping `core` first is
+ * free, so the value stays byte-identical to the shipped shape and no merged assertion has to be
+ * rewritten to accommodate a helper.
+ *
+ * Naming an ABSENT built-in is the opposite hazard and is still prevented: enumeration cannot invent a
+ * directory, so a repo deliberately running `core` alone never acquires `bmm` from an update.
  *
  * A READ, and therefore legal on the dry-run path: `buildPlan` already reads the filesystem through the
  * seam (`presentScopedPaths`), and FR-5's guarantee is that a dry run performs no WRITE and no subprocess.
@@ -60,7 +83,17 @@ const BUILTIN_MODULES = ["core", "bmm"] as const;
  * reviewable in one place: this function is the only filesystem the leg can touch.
  */
 export function presentBuiltins(repoPath: string, deps: BmadDeps): string[] {
-  return BUILTIN_MODULES.filter((m) => deps.fs.exists(join(repoPath, "_bmad", m)));
+  const root = join(repoPath, "_bmad");
+  return (
+    deps.fs
+      .listDirs(root)
+      .filter((name) => deps.fs.exists(join(root, name, MODULE_MARKER)))
+      // ONE comparator rather than a sort-then-reshuffle: `core` sorts lowest, everything else
+      // alphabetically. A missing `_bmad` needs no branch here — `deps.fs.listDirs` is fail-soft `[]`
+      // by construction (`deps.ts:245`), exactly as the previous `exists`-based probe was, and
+      // `updateLeg` already falls back to `core` on an empty set.
+      .sort((a, b) => (a === "core" ? -1 : b === "core" ? 1 : a.localeCompare(b)))
+  );
 }
 
 /**

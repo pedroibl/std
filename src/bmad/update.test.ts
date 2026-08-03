@@ -33,7 +33,14 @@ import { dirname, join, resolve, sep } from "node:path";
 
 import { spawnCapture } from "../proc/index";
 
-import { makeEstateModule, makeScratchRepo, removeTempTree, renderInstalledSurfaces, resolveBmadBin } from "./bmad.test-helpers";
+import {
+  BMAD_BOOKKEEPING_DIRS,
+  makeEstateModule,
+  makeScratchRepo,
+  removeTempTree,
+  renderInstalledSurfaces,
+  resolveBmadBin,
+} from "./bmad.test-helpers";
 import { runBmad } from "./cli";
 import { BmadError, type BmadDeps, type LegCtx, type RepoResult } from "./deps";
 import { materializeStaging, moduleGuard, stagingPathFor } from "./estate-source";
@@ -137,11 +144,21 @@ function harness(opts: HarnessOpts = {}): Harness {
   mkdirSync(beta, { recursive: true });
 
   // The built-in modules the AC3 probe will find. Seeded as REAL directories, because the probe is a
-  // real `deps.fs.exists` — stubbing its answer would test the stub, not the probe.
+  // real `deps.fs` read — stubbing its answer would test the stub, not the probe.
+  //
+  // Each carries a `config.yaml` MODULE MARKER, because that is what the probe now discriminates on
+  // (BM-18.1) and what a real installed module carries. A bare directory is NOT a module: `_bmad/` also
+  // holds `_config`, `custom`, `scripts` and `render`, and naming one of those in `--modules` would ask
+  // `bmad` to install a module that does not exist.
   for (const [name, repo] of [["alpha", alpha], ["beta", beta]] as const) {
     for (const m of opts.builtinsPerRepo?.[name] ?? opts.builtins ?? ["core", "bmm"]) {
       mkdirSync(join(repo, "_bmad", m), { recursive: true });
+      writeFileSync(join(repo, "_bmad", m, "config.yaml"), "", "utf-8");
     }
+    // The bookkeeping dirs every real `_bmad/` carries, seeded on EVERY fixture so the probe is
+    // permanently required to discriminate. Without these the marker check is untested — a probe that
+    // returned every child directory would pass every assertion in this file.
+    for (const d of BMAD_BOOKKEEPING_DIRS) mkdirSync(join(repo, "_bmad", d), { recursive: true });
   }
 
   const estate = makeEstateModule({
@@ -427,6 +444,83 @@ describe("AC3 — --modules is PROBED on disk, never hardcoded", () => {
     expect(valueOf(argv.at(-1)!, "--modules")).toBe("core,bmm");
     // Both invocations agree on the set — a divergence is the shape that loses a module.
     expect(valueOf(argv[0]!, "--modules")).toBe(valueOf(argv.at(-1)!, "--modules"));
+  });
+
+  // ── BM-18.1 — THE INPUT THAT WAS MISSING FOR THREE EPICS ──────────────────────────────────────
+  // Every assertion above supplies only `core` and/or `bmm`. Against that input a correct disk probe
+  // and the old `BUILTIN_MODULES = ["core","bmm"]` intersection return IDENTICAL answers, so the whole
+  // describe block passed while the shipped probe could not name a single module outside that pair.
+  // The gate was real; the input that makes it fail did not exist. Found 2026-08-03 on first contact
+  // with the real estate: all 9 repos hold 4–7 built-ins, so `update --apply` would have deleted 2–5
+  // modules from every one of them.
+  test("BM-18.1 — a built-in OUTSIDE {core,bmm} is named; the probe enumerates disk, not a literal", () => {
+    // `tea` and `wds` are real modules in the live estate. RED against the pre-BM-18.1 probe, which
+    // returns `core,bmm` here and hands `--action update` an argv that DELETES tea and wds from disk.
+    const h = harness({ builtins: ["core", "bmm", "tea", "wds"] });
+    const argv = legFor("/s", h.deps).buildArgv(ctxFor(h.repos.alpha, h.deps));
+    for (const a of argv) expect(valueOf(a, "--modules")).toBe("core,bmm,tea,wds");
+  });
+
+  test("BM-18.1 — a repo with NO core still names what it has; nothing is assumed", () => {
+    // The inverse blind spot: an intersection cannot return a module it does not list, and it also
+    // cannot notice that `core` is absent. Enumeration reports exactly what is on disk.
+    const h = harness({ builtins: ["tea"] });
+    const argv = legFor("/s", h.deps).buildArgv(ctxFor(h.repos.alpha, h.deps));
+    expect(valueOf(argv.at(-1)!, "--modules")).toBe("tea");
+  });
+
+  test("BM-18.1 — `_bmad`'s bookkeeping dirs are NEVER named as modules", () => {
+    // `_config`, `custom`, `scripts` and `render` are seeded into every fixture repo. Naming one in
+    // `--modules` asks bmad to install a module that does not exist. This is the assertion that makes
+    // "enumerate the directory" safe — without it, the cure is worse than the disease.
+    // POSITIVE CONTROL on the same path: the real modules must still be named, so a probe that
+    // returned `[]` cannot satisfy this test by emitting nothing.
+    const h = harness({ builtins: ["core", "tea"] });
+    // 🔬 AN ARBITRARY UNMARKED DIRECTORY, and it is the whole point of this case (PR #74 reviewer).
+    // Asserting only against BMAD_BOOKKEEPING_DIRS is VACUOUS: a probe reimplemented as a denylist of
+    // those four names would pass every line below it. A name nothing has ever heard of can only be
+    // excluded by the `config.yaml` MARKER actually doing the work.
+    mkdirSync(join(h.repos.alpha, "_bmad", "zzz-unmarked-dir"), { recursive: true });
+    const modules = valueOf(legFor("/s", h.deps).buildArgv(ctxFor(h.repos.alpha, h.deps)).at(-1)!, "--modules");
+    // POSITIVE CONTROL on the same path: the real modules must still be named, so a probe that
+    // returned `[]` cannot satisfy this test by emitting nothing.
+    expect(modules).toBe("core,tea");
+    expect(modules).not.toContain("zzz-unmarked-dir");
+    for (const d of BMAD_BOOKKEEPING_DIRS) expect(modules).not.toContain(d);
+  });
+
+  test("BM-18.1 — a repo with NO `_bmad` at all yields [] and falls back, it does NOT throw", () => {
+    // Raised by the PR #74 reviewer as "listDirs may throw where the exists-based probe did not".
+    // The MECHANISM claim is wrong — `deps.fs.listDirs` is fail-soft `[]` by construction
+    // (`deps.ts:245`), measured: `listDirs("/nope") === []`. The CONCERN was right, though: nothing
+    // asserted the enumeration probe's behaviour on a repo that has never had bmad installed, and
+    // "the primitive is fail-soft" is a property a future refactor can silently drop.
+    const h = harness();
+    const virgin = join(h.repos.alpha, "..", "virgin");
+    mkdirSync(virgin, { recursive: true }); // a repo dir with NO `_bmad/` whatsoever
+    expect(presentBuiltins(virgin, h.deps)).toEqual([]);
+    // …and the leg still emits a usable argv: the estate module needs a host module to render beside.
+    const argv = legFor("/s", h.deps).buildArgv(ctxFor(virgin, h.deps));
+    expect(argv).toHaveLength(1);
+    expect(valueOf(argv[0]!, "--modules")).toBe("core");
+  });
+
+  test("BM-18.1 — the emitted set is SORTED, so deploy's byte-identity assertion cannot flake", () => {
+    // BM-18 requires deploy's recorded argv to be byte-identical to update's for the same repo set.
+    // `readdir` order is a filesystem detail; without the sort that assertion is at its mercy.
+    //
+    // 🔬 THE FILESYSTEM IS FORCED TO LIE (PR #74 reviewer). Seeding dirs out of order proves nothing:
+    // `readdirSync` on APFS returns them sorted anyway, so this case passed with production sorting
+    // DELETED — a textbook vacuous gate. Scrambling `listDirs` at the seam is the only input that makes
+    // the assertion depend on the production `.sort()`, and it is REVERSED rather than shuffled so the
+    // test is deterministic (`Math.random` would make a red flaky and a green meaningless).
+    const h = harness({ builtinsPerRepo: { alpha: ["wds", "core", "tea", "bmm"] } });
+    const real = h.deps.fs.listDirs;
+    h.deps.fs.listDirs = (root: string) => [...real(root)].reverse();
+    expect(valueOf(legFor("/s", h.deps).buildArgv(ctxFor(h.repos.alpha, h.deps)).at(-1)!, "--modules")).toBe(
+      "core,bmm,tea,wds",
+    );
+    h.deps.fs.listDirs = real;
   });
 });
 
