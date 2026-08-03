@@ -530,7 +530,7 @@ describe("AC3 — exact FR-8 invocation through deps.exec, no self-copy (BM-3/BM
 
   test("the leg reads ctx.repo.path and ctx.opts.tools, and closes over the staging dir", () => {
     const h = harness();
-    const leg = installLeg("/staging/fixed");
+    const leg = installLeg("/staging/fixed", () => ["core"]);
     const plan = buildPlan(
       { path: "/srv/estate/gamma", tools: ["x"], claudeTracked: true, hasUpstream: true },
       leg,
@@ -940,5 +940,66 @@ describe("AC9 — render composes the 2.2 path, and nothing bakes an identity", 
         expect(`${file}: ${src.includes(root)}`).toBe(`${file}: false`);
       }
     }
+  });
+});
+
+// ── BM-18.1 — `install`'s OWN argv is a destructive set assertion too ─────────────────────────────
+//
+// The `update` fix (PR #74) left this one standing, because BM-18's text says the frozen `--modules
+// core` shape is "safe for a fresh install" — and that sentence was read as covering `install` THE
+// COMMAND rather than `install` THE FRESH CASE. Citing beat probing, one rung below the rung where
+// probing had just caught a nine-repo data-loss hazard.
+//
+// MEASURED on the live bmad 6.10.0 with THIS command's own argv shape (`--modules core` PLUS
+// `--custom-source`, which is the part that matters — a first probe without it left bmm alone):
+//   before: _bmad/{_config, bmm, core, custom, render, scripts}
+//   after:  _bmad/{_config, bmad-estate, core, custom, render, scripts}   ← bmm GONE, rc=0, silent
+/** The value following `flag` in an argv, or `undefined`. Mirrors `update.test.ts`. */
+function valueOf(argv: string[], flag: string): string | undefined {
+  const i = argv.indexOf(flag);
+  return i < 0 ? undefined : argv[i + 1];
+}
+
+describe("BM-18.1 — install's --modules is PROBED, not the frozen `core` literal", () => {
+  test("a repo carrying built-ins beyond core has every one of them named", () => {
+    // RED against the frozen literal: it emits `core` and bmad deletes bmm, tea and wds from disk.
+    const leg = installLeg("/staging/fixed", () => ["core", "bmm", "tea", "wds"]);
+    const plan = buildPlan(
+      { path: "/srv/estate/gamma", tools: ["x"], claudeTracked: true, hasUpstream: true },
+      leg,
+      parseBmadOpts([]),
+      harness().deps,
+    );
+    expect(valueOf(plan.installArgv[0]!, "--modules")).toBe("core,bmm,tea,wds");
+  });
+
+  test("a GENUINELY fresh repo — empty probe — still falls back to core", () => {
+    // The Epic-0 case the frozen literal was right about, kept as a fallback for an EMPTY probe and
+    // never as a default that can mask a populated one. POSITIVE CONTROL for the test above: without
+    // this, a probe hardwired to return [] would satisfy nothing and a hardwired ["core"] would look
+    // identical to the old bug.
+    const leg = installLeg("/staging/fixed", () => []);
+    const plan = buildPlan(
+      { path: "/srv/estate/fresh", tools: ["x"], claudeTracked: true, hasUpstream: true },
+      leg,
+      parseBmadOpts([]),
+      harness().deps,
+    );
+    expect(valueOf(plan.installArgv[0]!, "--modules")).toBe("core");
+  });
+
+  test("the probe is called with THIS repo's path — not a constant, not another repo's", () => {
+    // BM-18: the set "MUST be probed from the target repo at build time — never a constant, never
+    // carried forward from another repo". A leg that probed a fixed path would satisfy both cases
+    // above and still ship the estate-wide hazard, so the argument itself is asserted.
+    const seen: string[] = [];
+    const leg = installLeg("/staging/fixed", (p) => {
+      seen.push(p);
+      return ["core", "tea"];
+    });
+    for (const path of ["/srv/estate/one", "/srv/estate/two"]) {
+      buildPlan({ path, tools: ["x"], claudeTracked: true, hasUpstream: true }, leg, parseBmadOpts([]), harness().deps);
+    }
+    expect(seen).toEqual(["/srv/estate/one", "/srv/estate/two"]);
   });
 });
