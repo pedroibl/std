@@ -1,11 +1,14 @@
 {
   "name": "@pedroibl/std",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "Pedro's personal standard — shared Bun+TypeScript vocabulary for reports, notes, and CLIs.",
   "//publish": "Published as @pedroibl/std ('std' unscoped is an abandoned-but-owned 2011 pkg). Consumers keep byte-identical imports via the npm alias: `bun add std@npm:@pedroibl/std` → `import { cite } from \"std/core\"`. Internal `std/*` self-imports (proof/ has 116) resolve via tsconfig.json compilerOptions.paths — NOT package self-referencing — so they survive this scoped name. Bun-only (raw .ts exports).",
+  "//files": "`bmad-estate` is the PAYLOAD `std bmad` installs, not an example — src/bmad/deps.ts:312 resolves it as `<package root>/bmad-estate` (BM-13: relative, never baked). Omit it and a registry install ships a CLI whose install/update/deploy legs resolve to a directory that isn't in the tarball. Measured 2026-08-03: 0.1.1 shipped 22 src/bmad files and 0 bmad-estate files.",
   "files": [
     "src",
+    "bmad-estate",
+    "estate.example.toml",
     "README.md",
     "LICENSE"
   ],
