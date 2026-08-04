@@ -98,3 +98,13 @@ jobs:
       # (BM-19), so a per-subcommand form would fail the build on correct code.
       - name: Surface drift
         run: bun run check:surface-drift
+
+      # Gate 9 — no proof/ test can reach the caller's real estate: a test that redirects a framework
+      # root must pin the WHOLE precedence chain (`LIFEOS_DIR || PAI_DIR || resolveFrameworkDir(HOME)`,
+      # RT-2/AD-9.3). Three tests pinned PAI_DIR alone, an ambient LIFEOS_DIR outranked it, and
+      # `main()` — a WRITER — appended to the operator's real WISDOM frame; the resulting red was
+      # dismissed as unrelated through four story reviews. CI is where that stops being someone's
+      # local shell problem: on a runner LIFEOS_DIR is unset, so the leak is invisible at run time and
+      # only this static check catches the drift at the moment it is written.
+      - name: Hermetic test env
+        run: bun run check:hermetic-env

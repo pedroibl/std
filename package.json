@@ -46,6 +46,7 @@
     "check:single-source": "bun run scripts/check-single-source.ts",
     "check:no-consumer-ids": "bun run scripts/check-no-consumer-ids.ts",
     "check:surface-drift": "bun run scripts/check-surface-drift.ts",
+    "check:hermetic-env": "bun run scripts/check-hermetic-env.ts",
     "review:cr": "bash scripts/cr-review.sh"
   },
   "devDependencies": {

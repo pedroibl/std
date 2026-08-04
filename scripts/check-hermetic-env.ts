@@ -10,7 +10,9 @@
 // writing somewhere it should not.
 //
 // The rule: within a single test file, any assignment to a lower-precedence key must be accompanied
-// by an assignment to every key that outranks it. Order is highest-first.
+// by an explicit PIN of every key that outranks it. Order is highest-first. A pin is either
+// `process.env.K = <tmp>` or a bare `delete process.env.K` — see `pinCount` for why the delete form
+// counts and why the `=== undefined` restore form does not.
 //
 // This scans TEXT, not behaviour, so it is a cheap tripwire rather than a proof — the durable proof
 // is that each redirected test asserts against its own tmp dir. It exists to make the drift LOUD at
@@ -24,18 +26,34 @@ export const ROOT_KEYS = ["LIFEOS_DIR", "PAI_DIR"] as const;
 export type EnvFinding = { line: number; key: string; missing: string[] };
 
 /**
- * How many times this source assigns the key.
+ * How many times this source PINS the key — assigns it, or deliberately unsets it.
  *
- * COUNTS, NOT PRESENCE — and that distinction is the whole gate. A correct block assigns each key
+ * COUNTS, NOT PRESENCE — and that distinction is the whole gate. A correct block controls each key
  * TWICE: once to pin it at the tmp root, once to put the caller's value back in `afterEach`/`finally`.
  * A presence check therefore passes on the restore alone, so a file that only ever restores the
  * higher key reads as compliant. The first draft of this gate did exactly that and could not fail —
  * caught by reverting a known-good fix and watching it stay green. Requiring the higher key to be
- * assigned at least as often as the lower one distinguishes "pinned and restored" from "restored
- * only".
+ * pinned at least as often as the lower one distinguishes "pinned and restored" from "restored only".
+ *
+ * WHY `delete` COUNTS. Unsetting the higher key is the OTHER way to make the lower one authoritative,
+ * and for a precedence test it is the only way: `test("PAI_DIR honored when LIFEOS_DIR unset")` must
+ * `delete process.env.LIFEOS_DIR` and then set PAI_DIR alone. Counting assignments only, this gate
+ * read every such test as an exposure and reported 12 of them across 12 files — all of which already
+ * controlled the whole chain, several by the very `delete` the gate refused to see. 12/12 false
+ * positives is not a tuning problem; it is the gate disagreeing with the idiom its own corpus uses.
+ * A gate that cries wolf gets ignored, which is how the bug this gate exists for survived four
+ * story reviews.
+ *
+ * WHY THE RESTORE FORM DOES NOT. `if (prev === undefined) delete process.env.K;` is a restore, not a
+ * pin — it hands the key BACK to the caller. Counting it would let a file that pins the lower key and
+ * merely restores the higher one balance out, which is precisely the "restored only" shape above. The
+ * two forms are told apart by the `undefined` guard that every restore branch carries and no pin does.
  */
-function assignCount(src: string, key: string): number {
-  return src.match(new RegExp(`process\\.env\\.${key}\\s*=`, "g"))?.length ?? 0;
+function pinCount(src: string, key: string): number {
+  const assigns = src.match(new RegExp(`process\\.env\\.${key}\\s*=`, "g"))?.length ?? 0;
+  const deletes = (src.match(new RegExp(`^.*\\bdelete\\s+process\\.env\\.${key}\\b.*$`, "gm")) ?? [])
+    .filter((line) => !line.includes("undefined")).length;
+  return assigns + deletes;
 }
 
 /**
@@ -49,10 +67,10 @@ export function scanSource(src: string): EnvFinding[] {
   ROOT_KEYS.forEach((key, i) => {
     const higher = ROOT_KEYS.slice(0, i);
     if (higher.length === 0) return; // the top key outranks nothing
-    const lowerCount = assignCount(clean, key);
+    const lowerCount = pinCount(clean, key);
     if (lowerCount === 0) return;
-    // Under-assigned means the higher key is missing at least one PIN, not merely present.
-    const missing = higher.filter((h) => assignCount(clean, h) < lowerCount);
+    // Under-pinned means the higher key is missing at least one PIN, not merely present.
+    const missing = higher.filter((h) => pinCount(clean, h) < lowerCount);
     if (missing.length === 0) return;
     const first = new RegExp(`process\\.env\\.${key}\\s*=`).exec(clean);
     out.push({ line: clean.slice(0, first?.index ?? 0).split("\n").length, key, missing });
