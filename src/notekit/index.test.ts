@@ -7,9 +7,12 @@
 // property STRUCTURALLY — by walking the real import graph on disk — which is what turns "the root
 // typecheck happened to be green" into "the graph cannot reach the DOM half".
 
-import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+
+import { specifiers, stripStringsAndComments } from "../../scripts/lib/specifiers";
 
 import {
   NK_MAX_DEPTH,
@@ -50,20 +53,34 @@ function resolveSpecifier(fromFile: string, spec: string): string | null {
 }
 
 /**
- * Blank out comments so a source scan sees code only.
+ * Blank out comments (and string/regex interiors) so a source scan sees code only.
  *
- * ⚠ LINE COMMENTS FIRST, AND THE ORDER IS THE WHOLE POINT. The estate's usual masker strips block
- * comments first, and on THESE files that is catastrophic: the headers explain ⚠️-1 by quoting the
- * forbidden path `edge/**`, whose `/*` opens a block comment the stripper then closes at the next real
- * `*\/` — the JSDoc far below — swallowing every `export … from` statement in between. Measured: the
- * specifier scan found ZERO imports and the assertion passed for entirely the wrong reason. Killing
- * `//` lines first removes the prose before it can be read as a delimiter.
+ * ⚠ LINE COMMENTS FIRST, AND THE ORDER IS THE WHOLE POINT. A masker that strips block comments first
+ * is catastrophic on THESE files: the headers explain ⚠️-1 by quoting the forbidden path `edge/**`,
+ * whose `/*` opens a block comment the stripper then closes at the next real `*\/` — the JSDoc far
+ * below — swallowing every `export … from` statement in between. Measured: the specifier scan found
+ * ZERO imports and the assertion passed for entirely the wrong reason.
+ *
+ * ⚠ AND THE FIX FOR THAT WAS ITSELF ERASIVE. Killing whole `//` LINES removes the prose, but it also
+ * removes `import { x } from "./y"; // note` — a real edge, gone, with every assertion below still
+ * green. Under-reporting the graph is the ONE failure mode this file cannot survive, because ⚠️-1 is a
+ * ZERO-edge claim: a scan that sees nothing proves nothing and looks identical to a scan that sees
+ * everything. So this now delegates to the estate's shared masker, which blanks comment/string/regex
+ * INTERIORS to spaces and preserves every other byte — non-erasive by construction.
  */
 function maskComments(src: string): string {
-  return src.replace(/^[^\n]*?\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  return stripStringsAndComments(src);
 }
 
-/** Every intra-repo `.ts` file reachable from `entry` through `import`/`export … from` edges. */
+/**
+ * Every intra-repo `.ts` file reachable from `entry` through a module edge — `import … from`,
+ * `export … from`, AND the bare side-effect `import "./x"`.
+ *
+ * ⚠ THE SIDE-EFFECT FORM IS NOT OPTIONAL HERE. `import "./edge/index"` binds no name, so a scan
+ * written around `from` clauses cannot see it — and it is a perfectly good way to drag the DOM half
+ * into this barrel's graph while the zero-edge assertion below stays green. One resolver, every form,
+ * via `specifiers()`; the regression is at the bottom of this file.
+ */
 function importGraph(entry: string): string[] {
   const seen = new Set<string>();
   const queue = [resolve(entry)];
@@ -71,9 +88,8 @@ function importGraph(entry: string): string[] {
     const file = queue.pop()!;
     if (seen.has(file)) continue;
     seen.add(file);
-    const src = maskComments(readFileSync(file, "utf-8"));
-    for (const m of src.matchAll(/^[ \t]*(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/gm)) {
-      const next = resolveSpecifier(file, m[1]!);
+    for (const { spec } of specifiers(maskComments(readFileSync(file, "utf-8")))) {
+      const next = resolveSpecifier(file, spec);
       if (next !== null) queue.push(next);
     }
   }
@@ -127,9 +143,82 @@ describe("⚠️-1 — the barrel's import graph never reaches the DOM half", ()
     // QUOTES the forbidden `export … from "./edge/…"` in order to forbid it, and a scan that could not
     // tell documentation from a dependency would fail on the sentence explaining the rule.
     const src = maskComments(readFileSync(join(HERE, "index.ts"), "utf-8"));
-    const specifiers = [...src.matchAll(/from\s*["']([^"']+)["']/g)].map((m) => m[1]!);
-    expect(specifiers.length).toBeGreaterThan(0); // the mask did not eat the real imports
-    for (const spec of specifiers) expect(spec).not.toContain("edge");
+    const specs = [...src.matchAll(/from\s*["']([^"']+)["']/g)].map((m) => m[1]!);
+    expect(specs.length).toBeGreaterThan(0); // the mask did not eat the real imports
+    for (const spec of specs) expect(spec).not.toContain("edge");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// THE ZERO-EDGE PROOF, PROVEN NON-VACUOUS.
+//
+// "ZERO files under edge/ are reachable" is the strongest-sounding and weakest-failing kind of
+// assertion: it passes on an empty graph, on a broken resolver, and on a scan blind to whichever
+// import form the violation happens to use. The vacuity check above covers the first two. This covers
+// the third — the scan is shown to CATCH a planted violation, in the exact form it used to miss.
+//
+// If this ever goes green with the walker's side-effect handling removed, the ⚠️-1 proof is back to
+// being decorative.
+// ---------------------------------------------------------------------------------------------
+describe("⚠️-1's zero-edge proof would actually go red (planted-violation regression)", () => {
+  /** The scan as it shipped in the first cut: `from` clauses only, side-effect imports invisible. */
+  function legacyGraph(entry: string): string[] {
+    const seen = new Set<string>();
+    const queue = [resolve(entry)];
+    while (queue.length > 0) {
+      const file = queue.pop()!;
+      if (seen.has(file)) continue;
+      seen.add(file);
+      const src = readFileSync(file, "utf-8")
+        .replace(/^[^\n]*?\/\/.*$/gm, "")
+        .replace(/\/\*[\s\S]*?\*\//g, "");
+      for (const m of src.matchAll(/^[ \t]*(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/gm)) {
+        const next = resolveSpecifier(file, m[1]!);
+        if (next !== null) queue.push(next);
+      }
+    }
+    return [...seen];
+  }
+
+  /** A miniature notekit: a barrel, a pure file, and an `edge/` the barrel must never reach. */
+  function plantBarrel(body: string): { dir: string; barrel: string; edge: string } {
+    const dir = mkdtempSync(join(tmpdir(), "std-nk-barrel-"));
+    mkdirSync(join(dir, "edge"), { recursive: true });
+    writeFileSync(join(dir, "core-pure.ts"), "export const pure = 1;\n");
+    writeFileSync(join(dir, "edge", "index.ts"), "export const dom = () => document.body;\n");
+    writeFileSync(join(dir, "index.ts"), body);
+    return { dir, barrel: join(dir, "index.ts"), edge: join(dir, "edge", "index.ts") };
+  }
+
+  const planted: string[] = [];
+  const plant = (body: string) => {
+    const p = plantBarrel(body);
+    planted.push(p.dir);
+    return p;
+  };
+  afterAll(() => {
+    for (const d of planted) rmSync(d, { recursive: true, force: true });
+  });
+
+  test("a SIDE-EFFECT import of the edge is caught — the form the first cut could not see", () => {
+    const { barrel, edge } = plant('export { pure } from "./core-pure";\nimport "./edge/index";\n');
+    expect(importGraph(barrel)).toContain(edge); // ⚠️-1's `edgeFiles).toEqual([])` would now FAIL
+    expect(legacyGraph(barrel)).not.toContain(edge); // …and used to pass, with the violation present
+  });
+
+  test("an edge import hidden behind a trailing `//` comment is caught too", () => {
+    const { barrel, edge } = plant(
+      'export { dom } from "./edge/index"; // the DOM half, smuggled past a line-erasing masker\n',
+    );
+    expect(importGraph(barrel)).toContain(edge);
+    expect(legacyGraph(barrel)).not.toContain(edge);
+  });
+
+  test("the control: a clean barrel still reports zero edge files under BOTH scans", () => {
+    // Without this, the two cases above would also pass on a scan that flagged everything.
+    const { barrel, edge } = plant('export { pure } from "./core-pure";\n');
+    expect(importGraph(barrel)).not.toContain(edge);
+    expect(legacyGraph(barrel)).not.toContain(edge);
   });
 });
 

@@ -310,9 +310,12 @@ describe("globalReposPath", () => {
 //
 // ⚠ RE-FROZEN at Story 1.4 (notekit's delivery rail), and this is the ONLY sanctioned way to move it: a
 // story that ADDS A COMMAND changes the shipped help text by definition, so the oracle is re-measured
-// against the new text and the delta is stated here. Story 1.4's delta is exactly three additions — the
-// `notekit deploy` row in `commands:`, the `notekit deploy options:` block, and its two flag rows — all of
-// them BETWEEN `dashkit verify` and `bmad` / between the dashkit and cn option blocks. Every pre-existing
+// against the new text and the delta is stated here. Story 1.4's delta is exactly FIVE added LINES, in
+// three groups — the `notekit deploy` row in `commands:`; the blank separator plus the `notekit deploy
+// options:` header; and its two flag rows — all of them BETWEEN `dashkit verify` and `bmad` / between
+// the dashkit and cn option blocks. (Counted in LINES, which is what the delta test below enumerates and
+// what a diff of this constant shows: an earlier wording said "three additions", counting the groups,
+// and the two counts disagreeing is exactly the ambiguity an audit trail cannot afford.) Every pre-existing
 // byte is unchanged; that is what the diff of this constant must show. Editing it for any other reason
 // (to "make a test pass", to reflow a line) is the failure this oracle exists to catch.
 const FROZEN_HELP = `std — Pedro's standard CLI
@@ -368,7 +371,7 @@ describe("HELP — byte-identity oracle (3.1 AC2)", () => {
     expect(HELP).toBe(FROZEN_HELP);
   });
 
-  // The re-freeze is only honest if the delta is ITSELF asserted. Removing the three notekit additions
+  // The re-freeze is only honest if the delta is ITSELF asserted. Removing the five notekit lines
   // from FROZEN_HELP must reproduce the 32-line/1573-char text 3.1 measured — so a re-freeze that
   // quietly reflowed or dropped a pre-existing line fails here even though the `toBe` above is green.
   test("the delta from the 3.1 baseline is EXACTLY the notekit additions, nothing else", () => {

@@ -187,6 +187,38 @@ const JSON_FLAG = {
   desc: "emit the machine-readable ledger; it is then the only thing on stdout",
 } as const;
 
+// ---------------------------------------------------------------------------------------------
+// THE EDGE-FAMILY `--vault`, STATED ONCE PER MEANING.
+//
+// Every Obsidian edge takes a `--vault`, and it means two different things: for `deploy` it is the
+// WRITE target, for `verify` it is the READ target. So there are two consts, not one — collapsing them
+// would be the opposite error, a single description that fits neither command.
+//
+// Within each meaning the declaration was byte-identical across cn, dashkit and (at 1.4) notekit, and
+// this file already keeps the `bmad` family's shared flags as consts for exactly this reason. Three
+// copies of one string is three places for the shipped help to drift; one const is none.
+//
+// ⚠ THE EXTRACTION IS PROVABLY INERT, and that is the only reason it belongs in a review follow-up:
+// `FROZEN_HELP` in `main.test.ts` is a byte-identity oracle over the rendered help, so if hoisting had
+// changed one character of shipped text that test goes red. `--watch` is deliberately NOT hoisted —
+// its description names each command's own watch directories, so the three are not the same string.
+// ---------------------------------------------------------------------------------------------
+const DEPLOY_VAULT = {
+  name: "--vault",
+  arity: "value",
+  metavar: "<dir>",
+  value: "path",
+  desc: "the Obsidian vault to deploy into (required — std bakes in no vault path)",
+} as const;
+
+const VERIFY_VAULT = {
+  name: "--vault",
+  arity: "value",
+  metavar: "<dir>",
+  value: "path",
+  desc: "the Obsidian vault to check (required)\ndrift is reported and never fatal; a missing foundation exits 1",
+} as const;
+
 /**
  * The whole `std` surface.
  *
@@ -230,13 +262,7 @@ export const SURFACE = {
           name: "deploy",
           desc: "bundle src/cn -> <vault>/Scripts/cn.js (one-way; the vault is build output only)",
           flags: [
-            {
-              name: "--vault",
-              arity: "value",
-              metavar: "<dir>",
-              value: "path",
-              desc: "the Obsidian vault to deploy into (required — std bakes in no vault path)",
-            },
+            DEPLOY_VAULT,
             {
               name: "--format",
               arity: "value",
@@ -258,13 +284,7 @@ export const SURFACE = {
           name: "verify",
           desc: "check a vault against cn's declared plugin envelope (AD-6)",
           flags: [
-            {
-              name: "--vault",
-              arity: "value",
-              metavar: "<dir>",
-              value: "path",
-              desc: "the Obsidian vault to check (required)\ndrift is reported and never fatal; a missing foundation exits 1",
-            },
+            VERIFY_VAULT,
           ],
         },
       ],
@@ -279,13 +299,7 @@ export const SURFACE = {
           desc: "bundle src/dashkit -> <vault>/Scripts/dashkit.js (one-way; the vault is build output only)",
           // No `--format`: DASHKIT_SPEC declares no `formats`, so `edge-deploy` never parses one.
           flags: [
-            {
-              name: "--vault",
-              arity: "value",
-              metavar: "<dir>",
-              value: "path",
-              desc: "the Obsidian vault to deploy into (required — std bakes in no vault path)",
-            },
+            DEPLOY_VAULT,
             {
               name: "--watch",
               arity: "bool",
@@ -297,13 +311,7 @@ export const SURFACE = {
           name: "verify",
           desc: "check a vault against dashkit's declared plugin envelope (AD-6)",
           flags: [
-            {
-              name: "--vault",
-              arity: "value",
-              metavar: "<dir>",
-              value: "path",
-              desc: "the Obsidian vault to check (required)\ndrift is reported and never fatal; a missing foundation exits 1",
-            },
+            VERIFY_VAULT,
           ],
         },
       ],
@@ -322,13 +330,7 @@ export const SURFACE = {
           desc: "bundle src/notekit -> <vault>/Scripts/notekit.js (one-way; the vault is build output only)",
           // No `--format`: NOTEKIT_SPEC declares no `formats`, so `edge-deploy` never parses one.
           flags: [
-            {
-              name: "--vault",
-              arity: "value",
-              metavar: "<dir>",
-              value: "path",
-              desc: "the Obsidian vault to deploy into (required — std bakes in no vault path)",
-            },
+            DEPLOY_VAULT,
             {
               name: "--watch",
               arity: "bool",

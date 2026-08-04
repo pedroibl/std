@@ -30,6 +30,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 
+import { specifiers, stripStringsAndComments } from "../../scripts/lib/specifiers";
 import { BANNER as CN_BANNER } from "./cn-deploy";
 import { BANNER as DASHKIT_BANNER } from "./dashkit-deploy";
 import {
@@ -55,6 +56,15 @@ import {
 const MEASURED_BYTES = 22_439;
 const SIZE_FLOOR = 10_000;
 const SIZE_CEILING = 40_000;
+// The DRIFT tolerance, which is a different claim from the band and must be MUCH tighter or it says
+// nothing: the widest distance from `MEASURED_BYTES` that still sits inside the band is 12,439, so the
+// first cut's `SIZE_CEILING - SIZE_FLOOR` (30,000) was passed by every value the band already passed —
+// an assertion with no reachable failure, which reads as coverage and is worse than no line at all.
+// 2,000 is floored by a MEASURED effect, not a guess: `Bun.build` embeds source-path comments relative
+// to the process cwd, so the same artifact is 22,439 units built from the repo root and 22,931 from
+// `/tmp` (re-measured 2026-08-05). The tolerance is ~4x that 492-unit spread, so running the suite from
+// another directory cannot flake it, while a real 9% drift in the slice goes red.
+const SIZE_DRIFT_TOLERANCE = 2_000;
 
 // ---------------------------------------------------------------------------------------------
 // ⚠ VERIFIED BUN GOTCHA — the FIRST `Bun.build` in a `bun test` process can fail to resolve a
@@ -308,7 +318,12 @@ describe("buildBundle — the artifact contract", () => {
     const bytes = (await buildBundle()).length;
     expect(bytes).toBeGreaterThan(SIZE_FLOOR);
     expect(bytes).toBeLessThan(SIZE_CEILING);
-    expect(Math.abs(bytes - MEASURED_BYTES)).toBeLessThan(SIZE_CEILING - SIZE_FLOOR);
+    expect(Math.abs(bytes - MEASURED_BYTES)).toBeLessThan(SIZE_DRIFT_TOLERANCE);
+    // The tolerance is inside the band, not around it — stated so a future widening of either bound
+    // cannot silently re-create the assertion that could not fail.
+    expect(SIZE_DRIFT_TOLERANCE).toBeLessThan(
+      Math.max(SIZE_CEILING - MEASURED_BYTES, MEASURED_BYTES - SIZE_FLOOR),
+    );
   });
 
   test("is deterministic — two builds of unchanged source are byte-identical", async () => {
@@ -346,46 +361,59 @@ describe("buildBundle — the artifact contract", () => {
 // which is the `../core` root a text policy keys on, so a text scan would flag notekit's own files. The
 // stronger check is available anyway — resolve every specifier against its own file and assert where it
 // LANDS. Grepping the built output is a tautology a bundler defeats; this reads the graph.
+//
+// ⚠ THE MASKER IS PART OF THE CLAIM, AND THE FIRST CUT OF IT WAS ERASIVE. It deleted every LINE
+// containing `//`, so `import { x } from "./y"; // note` dropped a real edge — and a walker that sees
+// FEWER files reports a SMALLER graph, which makes every assertion below pass more easily without ever
+// going red. Same hole for a `//` inside a string on an import line, and for `import "./x"`, which was
+// filed as an external dep instead of being followed. None of that was reachable on today's sources
+// (measured: old and new walkers return the identical 25 files), which is exactly why it had to be
+// fixed — a latent hole in a load-bearing test is invisible until the day it matters.
+//
+// So the scan now uses the estate's shared, already-unit-tested machinery from
+// `scripts/lib/specifiers.ts`: `stripStringsAndComments` blanks comment/string/regex INTERIORS to
+// spaces and keeps every other byte, and `specifiers()` covers all five edge forms (import-from,
+// export-from, side-effect, require, dynamic) through ONE resolver. The regression that proves the fix
+// is not vacuous is the last `describe` in this section.
 // ---------------------------------------------------------------------------------------------
+
+/** Resolve one relative specifier to a real `.ts` on disk, or null when it leaves the repo. */
+function resolveSpecifier(fromFile: string, spec: string): string | null {
+  if (!spec.startsWith(".")) return null;
+  const base = resolve(dirname(fromFile), spec);
+  for (const candidate of [base, `${base}.ts`, join(base, "index.ts")]) {
+    if (existsSync(candidate) && candidate.endsWith(".ts")) return candidate;
+  }
+  return null;
+}
+
+/** Every module edge in one file, read through the shared string/comment/regex-aware masker. */
+function edgesOf(file: string): string[] {
+  return specifiers(stripStringsAndComments(readFileSync(file, "utf-8"))).map((s) => s.spec);
+}
+
+function walk(entry: string, from: string): { files: string[]; bare: string[] } {
+  const seen = new Set<string>();
+  const bare: string[] = [];
+  const queue = [resolve(entry)];
+  while (queue.length > 0) {
+    const file = queue.pop()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    for (const spec of edgesOf(file)) {
+      // ONE resolver for every edge form — a relative side-effect import is an internal edge to be
+      // FOLLOWED, not an external dependency to be reported.
+      const next = resolveSpecifier(file, spec);
+      if (next !== null) queue.push(next);
+      else bare.push(`${relative(from, file)} → ${spec}`);
+    }
+  }
+  return { files: [...seen], bare };
+}
+
 describe("the bundle's import graph can only reach src/notekit + src/core (AD-5 rule 2)", () => {
-  function resolveSpecifier(fromFile: string, spec: string): string | null {
-    if (!spec.startsWith(".")) return null;
-    const base = resolve(dirname(fromFile), spec);
-    for (const candidate of [base, `${base}.ts`, join(base, "index.ts")]) {
-      if (existsSync(candidate) && candidate.endsWith(".ts")) return candidate;
-    }
-    return null;
-  }
-
-  /** Line comments first — a header quoting a path must not be read as a block-comment delimiter. */
-  const mask = (s: string): string =>
-    s.replace(/^[^\n]*?\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-
-  function walk(entry: string): { files: string[]; bare: string[] } {
-    const seen = new Set<string>();
-    const bare: string[] = [];
-    const queue = [resolve(entry)];
-    while (queue.length > 0) {
-      const file = queue.pop()!;
-      if (seen.has(file)) continue;
-      seen.add(file);
-      const src = mask(readFileSync(file, "utf-8"));
-      for (const m of src.matchAll(/^[ \t]*(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/gm)) {
-        const spec = m[1]!;
-        const next = resolveSpecifier(file, spec);
-        if (next !== null) queue.push(next);
-        else bare.push(`${relative(join(import.meta.dir, ".."), file)} → ${spec}`);
-      }
-      // A bare side-effect import is a runtime edge with no binding — it would be invisible above.
-      for (const m of src.matchAll(/^[ \t]*import\s*["']([^"']+)["']/gm)) {
-        bare.push(`${relative(join(import.meta.dir, ".."), file)} → (side-effect) ${m[1]}`);
-      }
-    }
-    return { files: [...seen], bare };
-  }
-
   const SRC = join(import.meta.dir, "..");
-  const graph = walk(entrypoint());
+  const graph = walk(entrypoint(), SRC);
 
   test("the walk is not vacuous — it reached the renderer and the pure half", () => {
     const names = graph.files.map((f) => relative(SRC, f));
@@ -417,8 +445,11 @@ describe("the bundle's import graph can only reach src/notekit + src/core (AD-5 
   });
 
   test("no reachable file requires or dynamically imports a non-node specifier", () => {
+    // Deliberately NOT `specifiers()`: that reads only LITERAL specifiers, and the claim here also
+    // covers a COMPUTED one — `import(someVar)` — which has no literal to capture. The optional group
+    // is what makes an unquoted argument visible as `spec === undefined`.
     for (const f of graph.files) {
-      const src = mask(readFileSync(f, "utf-8"));
+      const src = stripStringsAndComments(readFileSync(f, "utf-8"));
       for (const m of src.matchAll(/\b(?:require|import)\s*\(\s*(?:(["'])([^"']*)\1)?/g)) {
         const spec = m[2];
         expect({ file: relative(SRC, f), spec, ok: spec !== undefined }).toEqual({
@@ -429,6 +460,123 @@ describe("the bundle's import graph can only reach src/notekit + src/core (AD-5 
         expect(spec!.startsWith("node:") || spec!.startsWith(".")).toBe(true);
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// THE WALKER'S OWN REGRESSION — a fix to a weak test is itself a claim, so it carries evidence.
+//
+// The three assertions above are only as strong as the scan that feeds them, and the failure mode of a
+// broken scan is SILENCE: fewer files found, every assertion still green. So the constructs the first
+// cut could not see are PLANTED here in a throwaway module tree, and the legacy walker is kept — as the
+// thing being disproved — so each case is a measured old-misses/new-catches pair rather than a promise.
+//
+// Delete the legacy half and this file loses the only proof that the fix changed anything.
+// ---------------------------------------------------------------------------------------------
+describe("the graph walker is non-erasive (regression: the masker that ate real edges)", () => {
+  /** The masker exactly as it shipped in the first cut: whole-LINE erasure on any `//`. */
+  const LEGACY_MASK = (s: string): string =>
+    s.replace(/^[^\n]*?\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+
+  /** The first cut's scan: from-clauses only, line-anchored, side-effect imports filed as external. */
+  function legacyWalk(entry: string): string[] {
+    const seen = new Set<string>();
+    const queue = [resolve(entry)];
+    while (queue.length > 0) {
+      const file = queue.pop()!;
+      if (seen.has(file)) continue;
+      seen.add(file);
+      const src = LEGACY_MASK(readFileSync(file, "utf-8"));
+      for (const m of src.matchAll(/^[ \t]*(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/gm)) {
+        const next = resolveSpecifier(file, m[1]!);
+        if (next !== null) queue.push(next);
+      }
+    }
+    return [...seen];
+  }
+
+  /**
+   * A four-leaf module tree whose entry reaches every leaf through a DIFFERENT construct — one
+   * construct per leaf, so a failure names which one regressed.
+   */
+  function plantGraph(): { entry: string; leaf: (n: string) => string } {
+    const dir = join(tmp, "graph");
+    mkdirSync(dir, { recursive: true });
+    for (const n of ["a", "b", "c", "d"]) {
+      writeFileSync(join(dir, `${n}.ts`), `export const ${n} = "${n}";\n`);
+    }
+    writeFileSync(
+      join(dir, "entry.ts"),
+      [
+        `import { a } from "./a"; // a trailing comment — the legacy masker ate this whole line`,
+        `export {`,
+        `  b,`,
+        `} from "./b"; // a multi-line head AND a trailing comment on the \`from\` line`,
+        `import "./c";`,
+        `import { d } from "./d"; const NOT_A_COMMENT = "//d";`,
+        `export const all = [a, d, NOT_A_COMMENT];`,
+        ``,
+      ].join("\n"),
+    );
+    return { entry: join(dir, "entry.ts"), leaf: (n: string) => join(dir, `${n}.ts`) };
+  }
+
+  test("the premise: each planted construct is a REAL edge the fixed walker follows", () => {
+    const { entry, leaf } = plantGraph();
+    const found = walk(entry, tmp).files;
+    for (const n of ["a", "b", "c", "d"]) expect(found).toContain(leaf(n));
+    expect(found.length).toBe(5); // entry + four leaves, nothing invented
+    expect(walk(entry, tmp).bare).toEqual([]); // …and no real edge was misfiled as external
+  });
+
+  test("…and the LEGACY walker missed every one of them — the fix is not cosmetic", () => {
+    const { entry, leaf } = plantGraph();
+    const legacy = legacyWalk(entry);
+    expect(legacy).toEqual([resolve(entry)]); // it walked NOTHING but the entry itself
+    for (const n of ["a", "b", "c", "d"]) expect(legacy).not.toContain(leaf(n));
+  });
+
+  test("a trailing `//` comment on an import line no longer deletes the edge", () => {
+    const dir = join(tmp, "trailing");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "x.ts"), "export const x = 1;\n");
+    writeFileSync(join(dir, "e.ts"), 'import { x } from "./x"; // AD-8: never sideways\nexport { x };\n');
+    expect(walk(join(dir, "e.ts"), tmp).files).toContain(join(dir, "x.ts"));
+    expect(legacyWalk(join(dir, "e.ts"))).not.toContain(join(dir, "x.ts"));
+  });
+
+  test("a relative side-effect import is FOLLOWED, not filed as an external dependency", () => {
+    // This is the shape that would defeat the barrel's DOM-freedom proof: `import "./edge/index"` is a
+    // real module edge with no binding, and the first cut pushed it to `bare` instead of walking it.
+    const dir = join(tmp, "sideeffect");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "s.ts"), "console.log(1);\n");
+    writeFileSync(join(dir, "e.ts"), 'import "./s";\nexport const e = 1;\n');
+    const g = walk(join(dir, "e.ts"), tmp);
+    expect(g.files).toContain(join(dir, "s.ts"));
+    expect(g.bare).toEqual([]);
+  });
+
+  test("a genuinely external specifier is still reported — the masker did not make the scan blind", () => {
+    // The other direction: over-masking would empty `bare` and turn the zero-external-deps assertion
+    // into a tautology. Plant a real bare import and require it to surface.
+    const dir = join(tmp, "external");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "e.ts"), 'import { parse } from "yaml";\nexport const e = parse;\n');
+    expect(walk(join(dir, "e.ts"), tmp).bare).toEqual([join("external", "e.ts") + " → yaml"]);
+  });
+
+  test("a `from` clause inside a STRING is not read as an edge (no phantom files)", () => {
+    const dir = join(tmp, "phantom");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "real.ts"), "export const real = 1;\n");
+    writeFileSync(
+      join(dir, "e.ts"),
+      'import { real } from "./real";\nexport const q = `select x from "./ghost"`;\n',
+    );
+    const g = walk(join(dir, "e.ts"), tmp);
+    expect(g.files).toContain(join(dir, "real.ts"));
+    expect(g.bare).toEqual([]); // `./ghost` does not exist — had it been read, it would show up here
   });
 });
 
@@ -795,13 +943,73 @@ describe("the real CLI, in a cold subprocess", () => {
     expect(second.exitCode).toBe(0);
     expect(readFileSync(artifactPath(cold)).equals(bytes)).toBe(true);
     expect(statSync(artifactPath(cold)).mtimeMs).toBe(mtime); // skip-if-identical, across processes
-    // ⚠ Both runs use the SAME cwd on purpose. The shared engine builds with `Bun.build`, whose output
-    // embeds source-path comments relative to the process cwd — measured on this branch: the notekit
-    // artifact is 22,439 chars built from the repo root and 22,931 from `/tmp`, and dashkit shows the
-    // same spread (24,013 vs 24,218). So "idempotent" holds per-cwd, and deploying from two different
-    // working directories rewrites the artifact each time. That is a property of the engine cn and
-    // dashkit already ship, not something this story introduced — recorded here, fixed elsewhere.
+    // ⚠ Both runs use the SAME cwd on purpose — idempotence holds PER-CWD only. The characterization
+    // test below is the oracle for that caveat; this line is not the place it is proven.
     expect(first.stdout.toString()).toBe(second.stdout.toString());
+  });
+
+  // -------------------------------------------------------------------------------------------
+  // THE CWD-DEPENDENCE, AS A TEST RATHER THAN A COMMENT.
+  //
+  // The claim used to live only in prose above: `Bun.build` embeds source-path comments relative to
+  // `process.cwd()`, so the artifact's bytes depend on where the deploy ran from. Two reasons that was
+  // not good enough:
+  //
+  //   1. It is a REAL PRODUCT PROPERTY, not a test artefact. A deploy from a different working
+  //      directory rewrites a byte-identical-in-spirit artifact, so a vault on iCloud re-syncs and
+  //      Obsidian re-reads a file whose meaning did not change — the exact cost skip-if-identical
+  //      (AC4) exists to avoid.
+  //   2. It is worse than an idempotence caveat: the off-root build embeds the ABSOLUTE path of the
+  //      repo, so the artifact written into a vault carries the operator's home directory. That is a
+  //      D4/NFR3 identity leak in the DEPLOYED bytes, which `check:no-consumer-ids` cannot see because
+  //      it scans SOURCE, and which the identity-free cases at the bottom of this file cannot see
+  //      because they read the source too.
+  //
+  // NOT FIXED HERE, and the cheap fix was tried and rejected on evidence: `Bun.build`'s `root` option
+  // does NOT re-anchor these comments — measured 2026-08-05, `{root: repoRoot}` produced byte-identical
+  // output to no-`root` from BOTH cwds (22,330 from the repo root, 22,822 from `/tmp`, `/Users/` still
+  // embedded). A real fix means either mutating `process.cwd()` around the build — global state in a
+  // shared engine with a resident watch loop, so no — or post-processing the emitted path comments,
+  // which is a change to `src/cli/edge-deploy.ts`, the engine cn and dashkit also ship. Story 1.4 does
+  // not own that file and this PR does not touch it.
+  //
+  // So it is CHARACTERIZED instead: pinned as measured behaviour, both halves stated, and deliberately
+  // written to go RED the day the engine is fixed — at which point delete this test and the caveat
+  // above with it. A comment cannot do that.
+  // -------------------------------------------------------------------------------------------
+  test("KNOWN DEFECT (shared engine): a deploy from another cwd rewrites the artifact, and leaks the repo path into it", async () => {
+    const cold = bareVault(join(tmp, "cwd"));
+    const repoRoot = join(import.meta.dir, "..", "..");
+    const run = (cwd: string) =>
+      Bun.spawnSync({
+        cmd: ["bun", join(repoRoot, "src", "cli", "main.ts"), "notekit", "deploy", "--vault", cold],
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+    expect(run(repoRoot).exitCode).toBe(0);
+    const fromRoot = readFileSync(artifactPath(cold), "utf-8");
+    // The repo-root artifact is clean: relative source-path comments, no absolute path in it.
+    expect(fromRoot).not.toContain(resolve(repoRoot));
+
+    // `tmp` is an OS temp dir, so it shares no meaningful prefix with the repo — the build has to
+    // reach for an absolute-ish path to name the sources.
+    expect(run(tmp).exitCode).toBe(0);
+    const fromElsewhere = readFileSync(artifactPath(cold), "utf-8");
+
+    // 1. NOT idempotent across cwds — the artifact really was rewritten.
+    expect(fromElsewhere).not.toBe(fromRoot);
+    // 2. …and the rewrite embedded the repo's absolute path. Derived from `import.meta.dir`, never a
+    //    baked literal, so this asserts the leak without itself carrying an identity (D4).
+    expect(fromRoot.includes(resolve(repoRoot))).toBe(false);
+    expect(fromElsewhere.includes(resolve(repoRoot))).toBe(true);
+    // 3. The difference is the path comments only — the code is the same length either side of them.
+    expect(Math.abs(fromElsewhere.length - fromRoot.length)).toBeGreaterThan(0);
+    expect(Math.abs(fromElsewhere.length - fromRoot.length)).toBeLessThan(SIZE_DRIFT_TOLERANCE);
+    // 4. Deploying back from the repo root restores the clean bytes — the defect is cwd, not decay.
+    expect(run(repoRoot).exitCode).toBe(0);
+    expect(readFileSync(artifactPath(cold), "utf-8")).toBe(fromRoot);
   });
 });
 
