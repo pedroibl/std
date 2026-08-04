@@ -434,38 +434,51 @@ function seedFrames(paiDir: string) {
 }
 
 describe("main()", () => {
-  const savedPaiDir = process.env.PAI_DIR;
+  // HERMETIC MEANS EVERY KEY THE RESOLVER READS, NOT JUST THE ONE THIS BLOCK SETS.
+  // baseDir is `LIFEOS_DIR || PAI_DIR || resolveFrameworkDir(HOME)` (RT-2 / AD-9.3), so pinning
+  // PAI_DIR alone leaves an ambient LIFEOS_DIR winning — and this suite then ran `main()`, which
+  // WRITES, against the caller's real estate. It did: the assertions below failed because the
+  // output landed in the operator's live WISDOM tree instead of `dir`. Pin the whole precedence
+  // chain, highest key first.
+  const KEYS = ["LIFEOS_DIR", "PAI_DIR"] as const;
+  const savedEnv = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  const pinRoot = (root: string) => {
+    process.env.LIFEOS_DIR = root;
+    process.env.PAI_DIR = root;
+  };
   afterEach(() => {
-    if (savedPaiDir === undefined) delete process.env.PAI_DIR;
-    else process.env.PAI_DIR = savedPaiDir;
+    for (const k of KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
   });
 
   test("--help returns 0 and writes nothing", () => {
-    process.env.PAI_DIR = dir;
+    pinRoot(dir);
     expect(main(["--help"])).toBe(0);
     expect(existsSync(join(dir, "MEMORY"))).toBe(false);
   });
 
   test("-h short flag returns 0", () => {
-    process.env.PAI_DIR = dir;
+    pinRoot(dir);
     expect(main(["-h"])).toBe(0);
   });
 
   test("no frames directory → 0, no write", () => {
-    process.env.PAI_DIR = dir;
+    pinRoot(dir);
     expect(main([])).toBe(0);
     expect(existsSync(join(dir, "MEMORY", "WISDOM", "PRINCIPLES"))).toBe(false);
   });
 
   test("empty frames directory → 0, no write", () => {
-    process.env.PAI_DIR = dir;
+    pinRoot(dir);
     mkdirSync(join(dir, "MEMORY", "WISDOM", "FRAMES"), { recursive: true });
     expect(main([])).toBe(0);
     expect(existsSync(join(dir, "MEMORY", "WISDOM", "PRINCIPLES", "verified.md"))).toBe(false);
   });
 
   test("synthesis run writes verified.md AND frame-health.md", () => {
-    process.env.PAI_DIR = dir;
+    pinRoot(dir);
     seedFrames(dir);
     expect(main([])).toBe(0);
     const verified = join(dir, "MEMORY", "WISDOM", "PRINCIPLES", "verified.md");
@@ -486,7 +499,7 @@ describe("main()", () => {
   });
 
   test("--dry-run writes nothing", () => {
-    process.env.PAI_DIR = dir;
+    pinRoot(dir);
     seedFrames(dir);
     expect(main(["--dry-run"])).toBe(0);
     expect(existsSync(join(dir, "MEMORY", "WISDOM", "PRINCIPLES", "verified.md"))).toBe(false);
@@ -494,7 +507,7 @@ describe("main()", () => {
   });
 
   test("--health writes only frame-health.md", () => {
-    process.env.PAI_DIR = dir;
+    pinRoot(dir);
     seedFrames(dir);
     expect(main(["--health"])).toBe(0);
     expect(existsSync(join(dir, "MEMORY", "WISDOM", "META", "frame-health.md"))).toBe(true);
@@ -502,7 +515,7 @@ describe("main()", () => {
   });
 
   test("--health --dry-run writes nothing", () => {
-    process.env.PAI_DIR = dir;
+    pinRoot(dir);
     seedFrames(dir);
     expect(main(["--health", "--dry-run"])).toBe(0);
     expect(existsSync(join(dir, "MEMORY", "WISDOM", "META", "frame-health.md"))).toBe(false);

@@ -112,8 +112,12 @@ describe("loadCandidates — daysSince(injected now) + blocklist filtering", () 
 describe("--json envelope — FROZEN contract (top-5, field names, 2-space indent)", () => {
   test("emits exactly 5 candidates with the frozen field set", () => {
     const PAI_DIR = process.env.PAI_DIR;
-    // main() resolves roots via defaultRoots() → PAI_DIR/USER/TELOS. Build a matching layout so
-    // the CLI path is hermetic (never touches the real ~/.claude).
+    const LIFEOS_DIR = process.env.LIFEOS_DIR;
+    // main() resolves roots via defaultRoots() → <base>/USER/TELOS, where base is
+    // `LIFEOS_DIR || PAI_DIR || resolveFrameworkDir(HOME)` (RT-2/AD-9.3). Build a matching layout
+    // and pin BOTH keys: setting PAI_DIR alone left an ambient LIFEOS_DIR outranking it, so this
+    // test read the caller's real TELOS and got 0 candidates — the "never touches the real
+    // ~/.claude" claim this comment used to make was false.
     const paiDir = mkdtempSync(join(tmpdir(), "recommend-pai-"));
     const telos = join(paiDir, "USER", "TELOS");
     const current = join(telos, "CURRENT_STATE");
@@ -121,6 +125,7 @@ describe("--json envelope — FROZEN contract (top-5, field names, 2-space inden
     writeFileSync(join(telos, "RESTAURANTS.md"), RESTAURANTS_MD);
     writeFileSync(join(current, "CONSUMPTION.md"), CONSUMPTION_MD);
     process.env.PAI_DIR = paiDir;
+    process.env.LIFEOS_DIR = paiDir;
     try {
       const out = captureStdout(() => {
         const code = main(["--category", "restaurant", "--json"], NOW);
@@ -157,6 +162,8 @@ describe("--json envelope — FROZEN contract (top-5, field names, 2-space inden
       rmSync(paiDir, { recursive: true, force: true });
       if (PAI_DIR === undefined) delete process.env.PAI_DIR;
       else process.env.PAI_DIR = PAI_DIR;
+      if (LIFEOS_DIR === undefined) delete process.env.LIFEOS_DIR;
+      else process.env.LIFEOS_DIR = LIFEOS_DIR;
     }
   });
 });

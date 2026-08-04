@@ -256,9 +256,14 @@ describe("main() CLI", () => {
   });
 
   test("full run emits the JSON envelope (2-space, trailing newline)", () => {
-    // Point the default frames dir at the tmp dir via PAI_DIR so main() stays hermetic.
+    // Point the default frames dir at the tmp dir so main() stays hermetic. PAI_DIR ALONE DOES NOT
+    // DO THAT: the resolver is `LIFEOS_DIR || PAI_DIR || resolveFrameworkDir(HOME)` (RT-2/AD-9.3),
+    // so an ambient LIFEOS_DIR outranks it and this test — which calls main(), a WRITER — appended
+    // to the caller's real frame file instead. Pin every key in the chain, not just the low one.
     const prev = process.env.PAI_DIR;
+    const prevLifeos = process.env.LIFEOS_DIR;
     process.env.PAI_DIR = dir;
+    process.env.LIFEOS_DIR = dir;
     try {
       const code = main(["--domain", "comms", "--observation", "prefers bullets", "--type", "evolution"]);
       expect(code).toBe(0);
@@ -274,6 +279,8 @@ describe("main() CLI", () => {
     } finally {
       if (prev === undefined) delete process.env.PAI_DIR;
       else process.env.PAI_DIR = prev;
+      if (prevLifeos === undefined) delete process.env.LIFEOS_DIR;
+      else process.env.LIFEOS_DIR = prevLifeos;
     }
   });
 
