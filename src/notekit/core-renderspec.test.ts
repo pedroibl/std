@@ -129,6 +129,135 @@ test("an unexpected error is RE-THROWN, never swallowed into a Result", () => {
   expect(() => validate(exploding)).toThrow("boom");
 });
 
+// Review follow-up (CodeRabbit #77): every candidate below is otherwise COMPLETE, so the assertion
+// lands on the property under test and not on an earlier check.
+function candidate(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    version: "nk-v1",
+    kind: "card",
+    id: "nk-0001",
+    generatedAt: "2026-08-05T00:00:00.000Z",
+    title: "t",
+    fields: [],
+    ...overrides,
+  };
+}
+
+test("an inherited Object.prototype name is NOT a version branch", () => {
+  // `branches[version]` walked the prototype chain: "constructor" returned `Object`, was called with
+  // the candidate, and handed it back UNVALIDATED as {ok:true} — a partial render (AC #2). "toString"
+  // returned the string "[object Undefined]" AS a RenderSpec. "__proto__"/"valueOf" crashed outright.
+  for (const version of ["constructor", "toString", "__proto__", "valueOf", "hasOwnProperty"]) {
+    const result = validate(candidate({ version }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("nk-unknown-version");
+      expect(result.error.field).toBe("version");
+      expect(result.error.message).toContain(version);
+    }
+  }
+});
+
+test("a branch table entry that is not a function is not dispatched either", () => {
+  const notAFunction = makeValidate({ "nk-v1": 42 as unknown as typeof NK_BRANCHES["nk-v1"] });
+  const result = notAFunction(candidate({}));
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error.code).toBe("nk-unknown-version");
+});
+
+test("the known-versions list names only own, dispatchable branches", () => {
+  const result = validate(candidate({ version: "nk-v9" }));
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.error.message).toContain("known: nk-v1");
+    expect(result.error.message).not.toContain("constructor");
+  }
+});
+
+test("a sparse `fields` array is rejected — a hole would stringify to null", () => {
+  const result = validate(candidate({ fields: new Array(1) }));
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.error.code).toBe("nk-missing-field");
+    expect(result.error.field).toBe("fields[0]");
+  }
+});
+
+test("a sparse field `value` array is rejected — `every` skips holes", () => {
+  const result = validate(candidate({ fields: [{ key: "k", label: "L", value: new Array(1) }] }));
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error.field).toBe("fields[0].value");
+});
+
+test("a hole later in an otherwise valid array is caught too", () => {
+  const holed: unknown[] = ["a"];
+  holed.length = 3;
+  holed[2] = "c";
+  const result = validate(candidate({ fields: [{ key: "k", label: "L", value: holed }] }));
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error.field).toBe("fields[0].value");
+});
+
+test("every validated spec survives the JSON round trip (AC #1)", () => {
+  const result = validate(spec());
+  expect(result.ok).toBe(true);
+  if (result.ok) expect(JSON.parse(JSON.stringify(result.value))).toEqual(result.value);
+});
+
+test("a malformed row names its FULL path, not the bare property", () => {
+  const badKey = validate(candidate({ fields: [{ key: 42, label: "L", value: "v" }] }));
+  expect(badKey.ok).toBe(false);
+  if (!badKey.ok) {
+    expect(badKey.error.field).toBe("fields[0].key");
+    expect(badKey.error.message).toContain("fields[0].key");
+  }
+
+  const badLabel = validate(candidate({ fields: [{ key: "k", label: 42, value: "v" }] }));
+  expect(badLabel.ok).toBe(false);
+  if (!badLabel.ok) {
+    expect(badLabel.error.field).toBe("fields[0].label");
+    expect(badLabel.error.message).toContain("fields[0].label");
+  }
+
+  // …and the index is the row's own, not always 0
+  const second = validate(
+    candidate({
+      fields: [
+        { key: "k", label: "L", value: "v" },
+        { key: "k2", label: "", value: "v" },
+      ],
+    }),
+  );
+  expect(second.ok).toBe(false);
+  if (!second.ok) expect(second.error.field).toBe("fields[1].label");
+});
+
+test("a top-level missing field still reports the bare key, not a row path", () => {
+  const result = validate(candidate({ id: "" }));
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error.field).toBe("id");
+});
+
+test("an inherited fence key is never read as a field value", () => {
+  // A hand-built (plain-object) FenceFields: `fields["constructor"]` would resolve to `Object`, and
+  // a function in the spec is not JSON. Own properties only.
+  const inheriting: Rubric = {
+    kind: "card",
+    titleField: "title",
+    fields: [{ key: "constructor" }, { key: "toString" }],
+  };
+  const built = noteToRenderSpec({ title: "A" }, inheriting, INJECTED);
+  expect(built.fields).toEqual([]);
+  expect(JSON.parse(JSON.stringify(built))).toEqual(built);
+
+  const inheritedTitle = noteToRenderSpec(
+    {},
+    { kind: "card", titleField: "constructor", fields: [] },
+    INJECTED,
+  );
+  expect(inheritedTitle.title).toBe("");
+});
+
 // ── AC #4 — additive version branching ──────────────────────────────────────────────────────────
 
 test("validate dispatches on the version field", () => {

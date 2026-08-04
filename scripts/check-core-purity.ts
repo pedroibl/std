@@ -5,8 +5,10 @@
 // or `document`. This check is TOOLING (not part of core), so it may use Bun/node APIs freely.
 //
 // Pure scanner (`scanSource`) is unit-tested beside this file; `main()` globs the pure sources and
-// gates CI. The scanned set is `PURE_GLOBS` (`coversFile` is the same decision as a predicate, so the
-// scope itself is testable — a gate whose glob matches nothing would pass vacuously).
+// gates CI. The scanned set is `PURE_GLOBS`, and the SCOPE is guarded twice over, because a gate that
+// reads nothing passes just as green as one that reads everything: `coversFile` exposes the
+// membership decision as a testable predicate, and `scanScope`/`emptyGlobs` fail the gate outright
+// when any configured pattern matches zero files on disk.
 //
 // The import-specifier regexes + comment/string masking live in scripts/lib/specifiers.ts (the
 // Rule-of-Three home, extracted at 1.4's third caller) — imported here, no longer re-declared.
@@ -87,25 +89,64 @@ export function coversFile(file: string): boolean {
   return PURE_MATCHERS.some((glob) => glob.match(file));
 }
 
+/** What one `PURE_GLOBS` entry actually found on disk. */
+export type GlobScan = { pattern: string; files: string[] };
+
+/**
+ * The eligible files each `PURE_GLOBS` entry matches, in `PURE_GLOBS` order. Exported so the
+ * NON-VACUITY contract is testable against the real filesystem: `Glob.match` only evaluates a path
+ * string, so `coversFile` assertions alone cannot prove a pattern reaches any file that exists.
+ */
+export async function scanScope(root: string = "."): Promise<GlobScan[]> {
+  const scans: GlobScan[] = [];
+  for (const [i, glob] of PURE_MATCHERS.entries()) {
+    const files: string[] = [];
+    for await (const file of glob.scan(root)) if (coversFile(file)) files.push(file);
+    scans.push({ pattern: PURE_GLOBS[i]!, files });
+  }
+  return scans;
+}
+
+/**
+ * The patterns that matched nothing. A gate whose glob finds zero files passes without reading a
+ * line of the slice it claims to cover — the same false-green class as the story's Dev Note ⚠️-1,
+ * except reached by a typo instead of a missing pattern. Any non-empty result must FAIL the gate.
+ */
+export function emptyGlobs(scans: readonly GlobScan[]): string[] {
+  return scans.filter((s) => s.files.length === 0).map((s) => s.pattern);
+}
+
 async function main(): Promise<void> {
+  const scans = await scanScope(".");
+  const empty = emptyGlobs(scans);
+
   const findings: Array<{ file: string; v: Violation }> = [];
   const scanned = new Set<string>();
-
-  for (const glob of PURE_MATCHERS) {
-    for await (const file of glob.scan(".")) {
-      if (!coversFile(file) || scanned.has(file)) continue;
+  for (const { files } of scans) {
+    for (const file of files) {
+      if (scanned.has(file)) continue;
       scanned.add(file);
       const src = await Bun.file(file).text();
       for (const v of scanSource(src)) findings.push({ file, v });
     }
   }
 
+  if (empty.length > 0) {
+    console.error("✗ core purity scope is vacuous (D1/NFR1):");
+    for (const pattern of empty) console.error(`  ${pattern}  matched 0 files`);
+    console.error(
+      `\n${empty.length} glob(s) matched nothing — the gate would pass without reading the slice ` +
+        "it claims to cover. Fix PURE_GLOBS (typo? moved tree?) rather than the gate.",
+    );
+  }
+
   if (findings.length > 0) {
     console.error("✗ core purity violations (D1/NFR1):");
     for (const { file, v } of findings) console.error(`  ${file}:${v.line}  ${v.kind}: ${v.detail}`);
     console.error(`\n${findings.length} violation(s) — core must be runtime-neutral.`);
-    process.exit(1);
   }
+
+  if (empty.length > 0 || findings.length > 0) process.exit(1);
 
   console.log(
     `✓ core is pure across ${scanned.size} file(s) (${PURE_GLOBS.join(", ")}) — ` +

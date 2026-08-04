@@ -83,6 +83,47 @@ test("a non-canonical body normalizes once, then is stable (idempotent from the 
   expect(twice).toBe(once);
 });
 
+// Review follow-up (CodeRabbit #77) — the two key classes a plain `{}` record could not carry.
+
+test("`__proto__` is stored as a FIELD, not routed to the prototype setter", () => {
+  const fields = parseFenceBody("title: A\n__proto__: [x, y]\nstatus: draft");
+  expect(Object.keys(fields)).toEqual(["title", "__proto__", "status"]);
+  expect(fields["__proto__"]).toEqual(["x", "y"]);
+  // it is data, so it round-trips and serializes like any other key
+  expect(serializeFenceBody(fields)).toBe("title: A\n__proto__: [x, y]\nstatus: draft");
+  // NB: the expectation cannot be written as an object LITERAL — `{ __proto__: [...] }` is exactly
+  // the prototype-setter form this test exists to rule out, and would build an Array, not a record.
+  expect(JSON.stringify(fields)).toBe('{"title":"A","__proto__":["x","y"],"status":"draft"}');
+  const revived = JSON.parse(JSON.stringify(fields)) as FenceFields;
+  expect(Object.keys(revived)).toEqual(["title", "__proto__", "status"]);
+  expect(revived["__proto__"]).toEqual(["x", "y"]);
+});
+
+test("a parsed record inherits nothing — an unwritten key is undefined, not Object.prototype", () => {
+  const fields = parseFenceBody("title: A");
+  expect(Object.getPrototypeOf(fields)).toBe(null);
+  expect(fields["constructor"]).toBeUndefined();
+  expect(fields["toString"]).toBeUndefined();
+});
+
+// Declared normalization rule 8. JavaScript orders array-index keys numerically ahead of every
+// string key, so a `Record` cannot round-trip them — the codec drops them instead of claiming a
+// parity it cannot deliver.
+test("array-index keys are DROPPED rather than silently reordered", () => {
+  expect(parseFenceBody("2: two\n1: one")).toEqual({});
+  expect(serializeFenceBody(parseFenceBody("2: two\n1: one"))).toBe("");
+  expect(parseFenceBody("0: zero\ntitle: A\n4294967294: big")).toEqual({ title: "A" });
+  // …and the writer never emits one either, so parse and serialize agree on the domain
+  expect(serializeFenceBody({ "2": "two", title: "A", "1": "one" })).toBe("title: A");
+});
+
+test("keys that only LOOK numeric keep their insertion order and are kept", () => {
+  // none of these is a canonical array index, so the engine preserves insertion order for them
+  const body = "01: a\n1.5: b\n-1: c\n4294967295: d\n1e3: e";
+  expect(Object.keys(parseFenceBody(body))).toEqual(["01", "1.5", "-1", "4294967295", "1e3"]);
+  expect(serializeFenceBody(parseFenceBody(body))).toBe(body);
+});
+
 // Deterministic pseudo-fuzz (no Math.random — a failing case must be reproducible). Bodies are built
 // in canonical form from a pool that exercises the pinned grammar: colon-bearing values, quoted
 // scalars, multi-value lists, and the empty list.

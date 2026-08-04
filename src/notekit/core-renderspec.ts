@@ -60,6 +60,15 @@ function copyValue(value: string | string[]): string | string[] {
 }
 
 /**
+ * Read a fence field as DATA. `parseFenceBody` returns a null-prototype record, but a caller may
+ * hand-build a plain object — and there `fields["constructor"]` would resolve to `Object` and get
+ * copied into the spec as a function, which is not JSON. Own properties only.
+ */
+function fenceField(fields: FenceFields, key: string): string | string[] | undefined {
+  return Object.prototype.hasOwnProperty.call(fields, key) ? fields[key] : undefined;
+}
+
+/**
  * The render seam: fence fields + injected rubric + injected ids → a versioned, field-selected
  * RenderSpec. A rubric key absent from the fence yields no row (the card just omits it); a missing
  * or empty title is left for `validate` to reject, so producing and checking stay separable.
@@ -73,12 +82,12 @@ export function noteToRenderSpec(
 ): RenderSpec {
   const selected: RenderSpecField[] = [];
   for (const entry of rubric.fields) {
-    const value = fields[entry.key];
+    const value = fenceField(fields, entry.key);
     if (value === undefined) continue;
     selected.push({ key: entry.key, label: entry.label ?? entry.key, value: copyValue(value) });
   }
 
-  const rawTitle = fields[rubric.titleField];
+  const rawTitle = fenceField(fields, rubric.titleField);
   const title =
     typeof rawTitle === "string" ? rawTitle : Array.isArray(rawTitle) ? rawTitle.join(", ") : "";
 
@@ -127,12 +136,33 @@ function describe(value: unknown): string {
   return typeof value;
 }
 
-function requireNonEmptyString(candidate: Record<string, unknown>, key: string): string {
+/**
+ * `path` is what the error REPORTS; `key` is what we look up. They differ inside a field row, where
+ * the property is `key`/`label` but the offending path is `fields[n].key` / `fields[n].label`.
+ */
+function requireNonEmptyString(
+  candidate: Record<string, unknown>,
+  key: string,
+  path: string = key,
+): string {
   const value = candidate[key];
   if (typeof value !== "string" || value.length === 0) {
-    fail("nk-missing-field", key, `nk-v1 RenderSpec: "${key}" must be a non-empty string`);
+    fail("nk-missing-field", path, `nk-v1 RenderSpec: "${path}" must be a non-empty string`);
   }
   return value;
+}
+
+/**
+ * A dense array of strings. Indexed explicitly because `Array.prototype.every` SKIPS holes: a sparse
+ * `new Array(1)` would satisfy `every` vacuously, and the hole then serializes to `null` — which
+ * breaks the JSON round-trip the RenderSpec promises (NK-1 rule 1).
+ */
+function isStringArray(value: unknown): value is string[] {
+  if (!Array.isArray(value)) return false;
+  for (let i = 0; i < value.length; i++) {
+    if (!(i in value) || typeof value[i] !== "string") return false;
+  }
+  return true;
 }
 
 function requireFields(candidate: Record<string, unknown>): RenderSpecField[] {
@@ -141,27 +171,32 @@ function requireFields(candidate: Record<string, unknown>): RenderSpecField[] {
     fail("nk-missing-field", "fields", `nk-v1 RenderSpec: "fields" must be an array`);
   }
 
-  return raw.map((entry, index) => {
+  // Walked by index rather than `map` for the same reason as `isStringArray`: `map` skips holes and
+  // COPIES them into its result, so a sparse `fields` would validate and then stringify to `[null]`.
+  const rows: RenderSpecField[] = [];
+  for (let index = 0; index < raw.length; index++) {
     const at = `fields[${index}]`;
+    if (!(index in raw)) {
+      fail("nk-missing-field", at, `nk-v1 RenderSpec: ${at} is missing — "fields" must be dense`);
+    }
+    const entry = raw[index];
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
       fail("nk-missing-field", at, `nk-v1 RenderSpec: ${at} must be an object`);
     }
     const row = entry as Record<string, unknown>;
-    const key = requireNonEmptyString(row, "key");
-    const label = requireNonEmptyString(row, "label");
+    const key = requireNonEmptyString(row, "key", `${at}.key`);
+    const label = requireNonEmptyString(row, "label", `${at}.label`);
     const value = row.value;
-    const valueOk =
-      typeof value === "string" ||
-      (Array.isArray(value) && value.every((v) => typeof v === "string"));
-    if (!valueOk) {
+    if (typeof value !== "string" && !isStringArray(value)) {
       fail(
         "nk-missing-field",
         `${at}.value`,
-        `nk-v1 RenderSpec: ${at}.value must be a string or a string[]`,
+        `nk-v1 RenderSpec: ${at}.value must be a string or a dense string[]`,
       );
     }
-    return { key, label, value: copyValue(value as string | string[]) };
-  });
+    rows.push({ key, label, value: copyValue(value as string | string[]) });
+  }
+  return rows;
 }
 
 /** The `nk-v1` schema branch. Additive versioning means this arm never changes when `nk-v2` lands. */
@@ -192,6 +227,12 @@ export type VersionBranches = Readonly<Record<string, VersionBranch | undefined>
 /** The shipped branches. `nk-v2` would be a NEW key here, never an edit to `branchV1`. */
 export const NK_BRANCHES: VersionBranches = { "nk-v1": branchV1 };
 
+/** The versions a table can actually dispatch — own keys holding a function, in insertion order. */
+function knownVersions(branches: VersionBranches): string[] {
+  const table = branches as Record<string, unknown>;
+  return Object.keys(table).filter((v) => typeof table[v] === "function");
+}
+
 function dispatch(candidate: unknown, branches: VersionBranches): RenderSpec {
   if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
     fail("nk-missing-field", "version", `RenderSpec must be an object, got ${describe(candidate)}`);
@@ -201,12 +242,20 @@ function dispatch(candidate: unknown, branches: VersionBranches): RenderSpec {
   if (typeof version !== "string" || version.length === 0) {
     fail("nk-missing-field", "version", `RenderSpec is missing its "version" field`);
   }
-  const branch = branches[version];
-  if (branch === undefined) {
+  // A bare `branches[version]` lookup walks the PROTOTYPE CHAIN: `version: "constructor"` resolved
+  // to `Object`, which was then called with the candidate and handed it back UNVALIDATED as
+  // `{ok:true}` — a partial render, exactly what AC #2 forbids. `"toString"` returned the string
+  // `"[object Undefined]"` as a RenderSpec; `"__proto__"`/`"valueOf"` crashed with a raw TypeError.
+  // Require an OWN property holding a function, so every inherited name falls through to the
+  // nk-unknown-version path like any other unrecognized version.
+  const branch = Object.prototype.hasOwnProperty.call(branches, version)
+    ? branches[version]
+    : undefined;
+  if (typeof branch !== "function") {
     fail(
       "nk-unknown-version",
       "version",
-      `unrecognized RenderSpec version "${version}" — known: ${Object.keys(branches).join(", ")}`,
+      `unrecognized RenderSpec version "${version}" — known: ${knownVersions(branches).join(", ")}`,
     );
   }
   return branch(record);

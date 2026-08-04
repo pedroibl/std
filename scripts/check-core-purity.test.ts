@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { coversFile, PURE_GLOBS, scanSource } from "./check-core-purity";
+import { coversFile, emptyGlobs, PURE_GLOBS, scanScope, scanSource } from "./check-core-purity";
 
 test("flags node: imports", () => {
   const v = scanSource(`import { readFile } from "node:fs";`);
@@ -99,4 +99,48 @@ test("the scan scope excludes the notekit edge, non-core notekit files, and test
 
 test("PURE_GLOBS names both pure trees", () => {
   expect([...PURE_GLOBS]).toEqual(["src/core/**/*.ts", "src/notekit/core-*.ts"]);
+});
+
+// NON-VACUITY (review follow-up, CodeRabbit #77). The assertions above pass hard-coded strings to
+// `coversFile`, and `Glob.match` only evaluates the string it is handed — it never establishes that
+// the pattern reaches a file that EXISTS. A typo in PURE_GLOBS would leave every test above green
+// while the gate read nothing. These two hit the real filesystem instead.
+
+const REPO_ROOT = `${import.meta.dir}/..`;
+
+test("every PURE_GLOBS entry matches at least one real file on disk", async () => {
+  const scans = await scanScope(REPO_ROOT);
+  expect(scans.map((s) => s.pattern)).toEqual([...PURE_GLOBS]);
+  for (const { pattern, files } of scans) {
+    expect({ pattern, matched: files.length > 0 }).toEqual({ pattern, matched: true });
+  }
+  // and the files found really are the pure trees, not incidental matches
+  const all = scans.flatMap((s) => s.files);
+  expect(all).toContain("src/core/result.ts");
+  expect(all).toContain("src/notekit/core-fence.ts");
+  expect(all).toContain("src/notekit/core-renderspec.ts");
+  expect(all.every((f) => coversFile(f))).toBe(true);
+});
+
+test("the zero-match guard names every glob that found nothing", () => {
+  expect(emptyGlobs([{ pattern: "src/core/**/*.ts", files: ["src/core/result.ts"] }])).toEqual([]);
+  // a typo'd pattern scans zero files — the gate must go red, not print a clean result
+  expect(
+    emptyGlobs([
+      { pattern: "src/core/**/*.ts", files: ["src/core/result.ts"] },
+      { pattern: "src/notekit/core*-.ts", files: [] },
+    ]),
+  ).toEqual(["src/notekit/core*-.ts"]);
+  expect(emptyGlobs([]).length).toBe(0);
+});
+
+test("a typo'd glob really does find zero files (the guard's premise)", async () => {
+  const scans = await scanScope(REPO_ROOT);
+  const typo = "src/notekit/core*-.ts"; // the `*` and `-` transposed
+  expect([...PURE_GLOBS]).not.toContain(typo);
+  const matched: string[] = [];
+  for await (const file of new Bun.Glob(typo).scan(REPO_ROOT)) matched.push(file);
+  expect(matched).toEqual([]);
+  // …whereas the real pattern it was typo'd from does find files
+  expect(scans.find((s) => s.pattern === "src/notekit/core-*.ts")!.files.length).toBeGreaterThan(0);
 });
