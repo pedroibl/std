@@ -54,9 +54,50 @@ export type Rubric = {
 /** The values `core` must not compute for itself (D4, snapshot determinism). */
 export type Injected = { id: string; generatedAt: string };
 
-/** Copy list values so the spec never aliases the caller's array. */
+/**
+ * Is index `i` an OWN element of `values`? Every index read in this file goes through this, because
+ * `i in values` and every iterator-based read (`[...value]`, `join`, `map`) resolve an index through
+ * the PROTOTYPE CHAIN: with `Array.prototype[0]` set, the hole in a sparse array reads as a present
+ * element. That defeats the dense-array checks below, which exist precisely to keep holes out.
+ */
+function ownIndex(values: readonly unknown[], i: number): boolean {
+  return Object.prototype.hasOwnProperty.call(values, i);
+}
+
+/**
+ * Copy list values so the spec never aliases the caller's array.
+ *
+ * Indexed rather than spread: `[...value]` copies through the ITERATOR, which reads each index with
+ * Get and therefore walks the prototype chain — a sparse `new Array(1)` with `Array.prototype[0]`
+ * poisoned copied as `["POISONED"]`, putting a value the fence never carried into the spec.
+ *
+ * The copy stays DENSE, a hole becoming an explicit `undefined` — which is precisely what spread did
+ * on an unpolluted prototype, so this is that behaviour with the prototype walk removed and nothing
+ * else. Leaving the hole in place would have been worse than the bug: a hole is re-read through the
+ * prototype chain by `JSON.stringify` too, so the poison would simply reappear one step later.
+ * `undefined` then fails `isStringArray` in the ordinary way.
+ */
 function copyValue(value: string | string[]): string | string[] {
-  return Array.isArray(value) ? [...value] : value;
+  if (!Array.isArray(value)) return value;
+  const copy: string[] = [];
+  for (let i = 0; i < value.length; i++) {
+    copy.push((ownIndex(value, i) ? value[i] : undefined) as string);
+  }
+  return copy;
+}
+
+/**
+ * Join list values for the title slot, own elements only — `Array.prototype.join` reads each index
+ * through the prototype chain for the same reason `copyValue` cannot spread. A hole joins as the
+ * empty string, which is what `join` does on an unpolluted prototype.
+ */
+function joinOwn(values: readonly unknown[], separator: string): string {
+  const parts: string[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const element = ownIndex(values, i) ? values[i] : undefined;
+    parts.push(element === undefined || element === null ? "" : String(element));
+  }
+  return parts.join(separator);
 }
 
 /**
@@ -89,7 +130,7 @@ export function noteToRenderSpec(
 
   const rawTitle = fenceField(fields, rubric.titleField);
   const title =
-    typeof rawTitle === "string" ? rawTitle : Array.isArray(rawTitle) ? rawTitle.join(", ") : "";
+    typeof rawTitle === "string" ? rawTitle : Array.isArray(rawTitle) ? joinOwn(rawTitle, ", ") : "";
 
   return {
     version: "nk-v1",
@@ -156,11 +197,15 @@ function requireNonEmptyString(
  * A dense array of strings. Indexed explicitly because `Array.prototype.every` SKIPS holes: a sparse
  * `new Array(1)` would satisfy `every` vacuously, and the hole then serializes to `null` — which
  * breaks the JSON round-trip the RenderSpec promises (NK-1 rule 1).
+ *
+ * `ownIndex`, not `i in value`: `in` reads an inherited numeric property as present, so with
+ * `Array.prototype[0]` set to a string this returned TRUE for a sparse array and `validate` blessed a
+ * spec whose value still stringifies to `[null]` — the exact break this check exists to catch.
  */
 function isStringArray(value: unknown): value is string[] {
   if (!Array.isArray(value)) return false;
   for (let i = 0; i < value.length; i++) {
-    if (!(i in value) || typeof value[i] !== "string") return false;
+    if (!ownIndex(value, i) || typeof value[i] !== "string") return false;
   }
   return true;
 }
@@ -173,10 +218,13 @@ function requireFields(candidate: Record<string, unknown>): RenderSpecField[] {
 
   // Walked by index rather than `map` for the same reason as `isStringArray`: `map` skips holes and
   // COPIES them into its result, so a sparse `fields` would validate and then stringify to `[null]`.
+  // And the hole test is `ownIndex`, not `index in raw`, for the same reason again: with a
+  // row-shaped object on `Array.prototype[0]`, `in` reported the hole present and `validate` returned
+  // a spec carrying a row no caller ever supplied.
   const rows: RenderSpecField[] = [];
   for (let index = 0; index < raw.length; index++) {
     const at = `fields[${index}]`;
-    if (!(index in raw)) {
+    if (!ownIndex(raw, index)) {
       fail("nk-missing-field", at, `nk-v1 RenderSpec: ${at} is missing — "fields" must be dense`);
     }
     const entry = raw[index];

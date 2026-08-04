@@ -162,3 +162,23 @@ test("property: serialize(parse(body)) === body over generated canonical bodies"
     expect(parseFenceBody(body)).toEqual(fields);
   }
 });
+
+// ── review round 3 — an inherited index is not a list element ────────────────────────────────────
+
+test("serializeFenceBody writes OWN elements only — a hole is empty, not the inherited value", () => {
+  // `join` resolves each index through the prototype chain, so a hand-built sparse value wrote
+  // `tags: [POISONED]` — a value the record never carried.
+  const proto = Array.prototype as unknown as Record<number, unknown>;
+  proto[0] = "POISONED";
+  proto[1] = "POISONED";
+  try {
+    expect(serializeFenceBody({ tags: new Array(1) as unknown as string[] })).toBe("tags: []");
+    // The hole at index 1 is the interesting one: index 0 is shadowed by an own element either way.
+    expect(serializeFenceBody({ tags: ["a", , "c"] as unknown as string[] })).toBe("tags: [a, , c]");
+    // A dense list is written byte-identically, poisoned prototype or not.
+    expect(serializeFenceBody({ tags: ["a", "b"] })).toBe("tags: [a, b]");
+  } finally {
+    delete proto[0];
+    delete proto[1];
+  }
+});

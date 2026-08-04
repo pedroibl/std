@@ -63,6 +63,22 @@ function isArrayIndexKey(key: string): boolean {
   return CANONICAL_INTEGER.test(key) && Number(key) < 2 ** 32 - 1;
 }
 
+/**
+ * Join list elements for the written form, OWN elements only. `Array.prototype.join` resolves each
+ * index with Get, which walks the prototype chain: a hand-built sparse value with `Array.prototype[0]`
+ * poisoned wrote `tags: [POISONED]` into a fence body — a value the record never carried. A hole
+ * contributes the empty string here, exactly as `join` does on an unpolluted prototype, so a dense
+ * list (everything `parseFenceBody` produces) is written byte-identically.
+ */
+function joinOwn(values: readonly unknown[]): string {
+  const parts: string[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const element = Object.prototype.hasOwnProperty.call(values, i) ? values[i] : undefined;
+    parts.push(element === undefined || element === null ? "" : String(element));
+  }
+  return parts.join(LIST_SEPARATOR);
+}
+
 /** Parse `[a, b]` into its elements: split on the delimiter, trim, drop empties. */
 function parseList(raw: string): string[] {
   return raw
@@ -106,7 +122,7 @@ export function serializeFenceBody(fields: FenceFields): string {
   return Object.entries(fields)
     .filter(([key]) => !isArrayIndexKey(key))
     .map(([key, value]) => {
-      const written = Array.isArray(value) ? `[${value.join(LIST_SEPARATOR)}]` : value;
+      const written = Array.isArray(value) ? `[${joinOwn(value)}]` : value;
       return `${key}: ${written}`;
     })
     .join("\n");

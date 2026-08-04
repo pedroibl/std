@@ -286,3 +286,97 @@ test("adding a stub nk-v2 branch leaves the nk-v1 result byte-identical", () => 
   const { title, ...missingTitle } = fixture;
   expect(JSON.stringify(withV2(missingTitle))).toBe(JSON.stringify(validate(missingTitle)));
 });
+
+// ── review round 3 — an inherited index never reaches a validated spec ───────────────────────────
+
+function withPoisonedArrayPrototype<T>(value: unknown, body: () => T, index = 0): T {
+  const proto = Array.prototype as unknown as Record<number, unknown>;
+  proto[index] = value;
+  try {
+    return body();
+  } finally {
+    delete proto[index];
+  }
+}
+
+const POISON_BASE = {
+  version: "nk-v1",
+  kind: "card",
+  id: "nk-0001",
+  generatedAt: "2026-08-05T00:00:00.000Z",
+  title: "t",
+};
+
+test("validate REJECTS a sparse field value whose hole is covered by Array.prototype", () => {
+  // `i in value` inside `isStringArray` read the inherited index as an element, so a sparse value
+  // validated — and then stringified to `[null]`, breaking the JSON round-trip (NK-1 rule 1) that
+  // this very check exists to protect.
+  const result = withPoisonedArrayPrototype("POISONED", () =>
+    validate({ ...POISON_BASE, fields: [{ key: "k", label: "L", value: new Array(1) }] }),
+  );
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error.field).toBe("fields[0].value");
+});
+
+test("validate REJECTS a sparse `fields` whose hole is covered by a row-shaped Array.prototype", () => {
+  const result = withPoisonedArrayPrototype({ key: "k", label: "L", value: "POISONED" }, () =>
+    validate({ ...POISON_BASE, fields: new Array(1) }),
+  );
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error.field).toBe("fields[0]");
+});
+
+test("noteToRenderSpec copies list values by OWN index — a spread would inherit the hole", () => {
+  // `[...value]` copies through the iterator, which resolves each index through the prototype chain.
+  const fields = Object.create(null) as Record<string, string | string[]>;
+  fields.title = "T";
+  fields.tags = new Array(1) as unknown as string[];
+  const spec = withPoisonedArrayPrototype("POISONED", () =>
+    noteToRenderSpec(
+      fields,
+      { kind: "card", titleField: "title", fields: [{ key: "tags" }] },
+      { id: "i", generatedAt: "g" },
+    ),
+  );
+  expect(JSON.stringify(spec)).not.toContain("POISONED");
+  // The copy is DENSE with an explicit `undefined` — spread's clean-prototype behaviour, minus the
+  // prototype walk. Asserted as an own property rather than via `JSON.stringify`, because stringify
+  // resolves a HOLE through the chain as well: leaving the hole in place would have shown `null`
+  // here and `"POISONED"` under pollution, moving the leak one step downstream instead of closing it.
+  const copied = spec.fields[0]?.value as string[];
+  expect(Object.prototype.hasOwnProperty.call(copied, 0)).toBe(true);
+  expect(copied[0]).toBeUndefined();
+  expect(JSON.stringify(copied)).toBe("[null]");
+  // …and `validate` rejects it in the ordinary way.
+  const result = validate({ ...spec, version: "nk-v1", kind: "card" });
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error.field).toBe("fields[0].value");
+});
+
+test("a list title joins OWN elements — an inherited index is not part of the heading", () => {
+  // The poison must land on the HOLE (index 1), not on an own element — poisoning index 0 here proves
+  // nothing, since `"a"` shadows it either way. `join` resolves the hole through the prototype chain,
+  // so the heading read "a, POISONED, c".
+  const fields = Object.create(null) as Record<string, string | string[]>;
+  fields.title = ["a", , "c"] as unknown as string[];
+  const spec = withPoisonedArrayPrototype(
+    "POISONED",
+    () =>
+      noteToRenderSpec(
+        fields,
+        { kind: "card", titleField: "title", fields: [] },
+        { id: "i", generatedAt: "g" },
+      ),
+    1,
+  );
+  expect(spec.title).toBe("a, , c");
+});
+
+test("a dense spec is built identically under a poisoned prototype", () => {
+  const fields = Object.create(null) as Record<string, string | string[]>;
+  fields.title = "T";
+  fields.tags = ["a", "b"];
+  const rubric = { kind: "card", titleField: "title", fields: [{ key: "tags" }] } as const;
+  const build = () => noteToRenderSpec(fields, rubric, { id: "i", generatedAt: "g" });
+  expect(withPoisonedArrayPrototype("POISONED", build)).toEqual(build());
+});
