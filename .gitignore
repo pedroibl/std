@@ -14,3 +14,6 @@ scripts/std.consumers.local
 
 # local-only: agy agent rules symlinked to the planning repo project-context (not for the public repo)
 .agents/
+
+# Epic-the-Loop dispatch scratch (never committed)
+/dispatch-dir/
