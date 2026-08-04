@@ -310,6 +310,36 @@ export const SURFACE = {
       helpGroups: [{ subs: ["deploy"] }, { subs: ["verify"] }],
     },
     {
+      name: "notekit",
+      // ⚠ `deploy` ONLY, and no `verify` sibling — unlike cn and dashkit. notekit v1 ships no plugin
+      // envelope (Story 1.4 ⚠️-2: the contract + `notekit verify`/`doctor` are FR18, Epic 3), so the
+      // model must not offer a subcommand the CLI would reject. The asymmetry is the decision, not an
+      // omission. ⚠ Naming a vault in this `desc` is a RED BUILD (check:no-consumer-ids scans src/**).
+      desc: "bundle the notekit Obsidian edge",
+      subcommands: [
+        {
+          name: "deploy",
+          desc: "bundle src/notekit -> <vault>/Scripts/notekit.js (one-way; the vault is build output only)",
+          // No `--format`: NOTEKIT_SPEC declares no `formats`, so `edge-deploy` never parses one.
+          flags: [
+            {
+              name: "--vault",
+              arity: "value",
+              metavar: "<dir>",
+              value: "path",
+              desc: "the Obsidian vault to deploy into (required — std bakes in no vault path)",
+            },
+            {
+              name: "--watch",
+              arity: "bool",
+              desc: "deploy once, then stay resident and redeploy on every save under src/notekit, src/core",
+            },
+          ],
+        },
+      ],
+      helpGroups: [{ subs: ["deploy"] }],
+    },
+    {
       name: "bmad",
       desc: "manage the BMAD estate",
       subcommands: [
@@ -450,6 +480,7 @@ function groupDesc(cmd: CommandSpec, g: HelpGroup): string | undefined {
 export const HELP_OPTION_BLOCKS = [
   ["cn", "deploy"],
   ["dashkit", "deploy"],
+  ["notekit", "deploy"],
   ["cn", "verify"],
   ["dashkit", "verify"],
 ] as const;

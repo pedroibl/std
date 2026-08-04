@@ -14,6 +14,7 @@ import { type CnDeployDeps, runCnDeploy } from "./cn-deploy";
 import { runCnVerify } from "./cn-verify";
 import { runDashkitDeploy } from "./dashkit-deploy";
 import { runDashkitVerify } from "./dashkit-verify";
+import { runNotekitDeploy } from "./notekit-deploy";
 import { RepoNavError, defaultTargets, installAlias, type RepoConfig } from "./repo-nav";
 import { SURFACE, renderAliasUsage, renderHelp } from "./surface";
 
@@ -93,6 +94,23 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     });
   }
 
+  if (cmd === "notekit") {
+    // No `verify` arm, and its absence is the ⚠️-2 decision made visible: notekit's plugin contract and
+    // `notekit verify`/`doctor` are FR18 (Epic 3), so v1 registers `deploy` only. A `notekit verify`
+    // typed today falls through to runNotekitDeploy's own usage line and exits 2, which is the right
+    // answer for a subcommand that does not exist yet.
+    //
+    // SIGINT is registered HERE, at the callsite, exactly as for cn and dashkit — never inside
+    // `runWatch` (a signal handler or `process.exit` reachable from a test kills the test runner).
+    // `deps.onWatchStart` fires only when `--watch` goes resident, so the one-shot path installs no
+    // handler.
+    return await runNotekitDeploy(rest, {
+      log,
+      onWatchStart: deps.onWatchStart ?? ((stop) => process.on("SIGINT", stop)),
+      watch: deps.watch,
+    });
+  }
+
   if (cmd === "bmad") {
     // The `bmad-manager` family (BM-1). Registered HERE, beside cn/dashkit — deliberately NOT in
     // `dispatch.ts`, which is the generic engine for shelling a CONSUMER's Step[] and is off-limits to
@@ -140,7 +158,7 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     }
   }
 
-  console.error(`std: unknown command '${cmd ?? ""}'. Known: alias, cn, dashkit, bmad`);
+  console.error(`std: unknown command '${cmd ?? ""}'. Known: alias, cn, dashkit, notekit, bmad`);
   return 2;
 }
 
