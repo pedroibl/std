@@ -4,7 +4,9 @@
 // runtime-specific: no `node:*` / fs / DOM / network imports, and no reference to `process`
 // or `document`. This check is TOOLING (not part of core), so it may use Bun/node APIs freely.
 //
-// Pure scanner (`scanSource`) is unit-tested beside this file; `main()` globs core and gates CI.
+// Pure scanner (`scanSource`) is unit-tested beside this file; `main()` globs the pure sources and
+// gates CI. The scanned set is `PURE_GLOBS` (`coversFile` is the same decision as a predicate, so the
+// scope itself is testable — a gate whose glob matches nothing would pass vacuously).
 //
 // The import-specifier regexes + comment/string masking live in scripts/lib/specifiers.ts (the
 // Rule-of-Three home, extracted at 1.4's third caller) — imported here, no longer re-declared.
@@ -67,14 +69,31 @@ export function scanSource(src: string): Violation[] {
   return out;
 }
 
-async function main(): Promise<void> {
-  const glob = new Bun.Glob("src/core/**/*.ts");
-  const findings: Array<{ file: string; v: Violation }> = [];
+// Every pure source in the estate. `src/core/**` is the shared vocabulary; `src/notekit/core-*.ts`
+// is notekit's pure half (Story 1.1) — the `core-` filename prefix IS the fence there, so the
+// notekit edge (`src/notekit/edge/**`, which legitimately builds DOM) stays out of scope.
+export const PURE_GLOBS = ["src/core/**/*.ts", "src/notekit/core-*.ts"] as const;
 
-  for await (const file of glob.scan(".")) {
-    if (file.endsWith(".test.ts")) continue; // tests are not shipped; they may import bun:test
-    const src = await Bun.file(file).text();
-    for (const v of scanSource(src)) findings.push({ file, v });
+/**
+ * Does the gate actually scan this path? Same decision `main()` makes, exposed so the SCOPE is
+ * tested and not just the scanner. Tests are excluded — they are not shipped and may import bun:test.
+ */
+export function coversFile(file: string): boolean {
+  if (file.endsWith(".test.ts")) return false;
+  return PURE_GLOBS.some((pattern) => new Bun.Glob(pattern).match(file));
+}
+
+async function main(): Promise<void> {
+  const findings: Array<{ file: string; v: Violation }> = [];
+  const scanned = new Set<string>();
+
+  for (const pattern of PURE_GLOBS) {
+    for await (const file of new Bun.Glob(pattern).scan(".")) {
+      if (!coversFile(file) || scanned.has(file)) continue;
+      scanned.add(file);
+      const src = await Bun.file(file).text();
+      for (const v of scanSource(src)) findings.push({ file, v });
+    }
   }
 
   if (findings.length > 0) {
@@ -84,7 +103,10 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log("✓ core is pure — no node:*/fs/DOM/network imports, no process/document refs (D1/NFR1)");
+  console.log(
+    `✓ core is pure across ${scanned.size} file(s) (${PURE_GLOBS.join(", ")}) — ` +
+      "no node:*/fs/DOM/network imports, no process/document refs (D1/NFR1)",
+  );
 }
 
 if (import.meta.main) await main();

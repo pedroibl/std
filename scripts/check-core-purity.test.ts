@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { scanSource } from "./check-core-purity";
+import { coversFile, PURE_GLOBS, scanSource } from "./check-core-purity";
 
 test("flags node: imports", () => {
   const v = scanSource(`import { readFile } from "node:fs";`);
@@ -72,4 +72,31 @@ test("passes pure code", () => {
 test("ignores commented-out violations", () => {
   const src = `// import x from "node:fs"\n/* process.env.HOME */\nexport const x = 1;`;
   expect(scanSource(src)).toEqual([]);
+});
+
+// SCOPE (Story 1.1): the gate must actually see notekit's pure half. A glob that matched no notekit
+// file would let this gate pass vacuously — green for a slice it never read.
+test("the scan scope covers src/core and notekit's core-* files", () => {
+  expect(coversFile("src/core/parse.ts")).toBe(true);
+  expect(coversFile("src/core/nested/deep.ts")).toBe(true);
+  expect(coversFile("src/notekit/core-fence.ts")).toBe(true);
+  expect(coversFile("src/notekit/core-renderspec.ts")).toBe(true);
+});
+
+test("the scan scope excludes the notekit edge, non-core notekit files, and tests", () => {
+  // the edge builds DOM with `document` — covering it would be a false failure (AD-6)
+  expect(coversFile("src/notekit/edge/card.ts")).toBe(false);
+  expect(coversFile("src/notekit/edge/core-dispatch.ts")).toBe(false);
+  // the `core-` filename prefix is the fence: a non-prefixed notekit file is not pure surface
+  expect(coversFile("src/notekit/config.ts")).toBe(false);
+  // tests are not shipped; they may import bun:test
+  expect(coversFile("src/core/parse.test.ts")).toBe(false);
+  expect(coversFile("src/notekit/core-fence.test.ts")).toBe(false);
+  // other slices are Bun/Obsidian edges — never in scope
+  expect(coversFile("src/fsx/index.ts")).toBe(false);
+  expect(coversFile("src/dashkit/index.ts")).toBe(false);
+});
+
+test("PURE_GLOBS names both pure trees", () => {
+  expect([...PURE_GLOBS]).toEqual(["src/core/**/*.ts", "src/notekit/core-*.ts"]);
 });
