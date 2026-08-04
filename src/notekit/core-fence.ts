@@ -32,13 +32,16 @@
 /** The fields carried by an nk-fence body — the render seam's input (NK-1.8). */
 export type FenceFields = Record<string, string | string[]>;
 
-const LIST_SEPARATOR = ", ";
+// The delimiter is the single source; the written separator derives from it, so parse and serialize
+// cannot drift apart if the grammar's separator ever changes.
+const LIST_DELIMITER = ",";
+const LIST_SEPARATOR = `${LIST_DELIMITER} `;
 
-/** Parse `[a, b]` into its elements: split on `,`, trim, drop empties. */
+/** Parse `[a, b]` into its elements: split on the delimiter, trim, drop empties. */
 function parseList(raw: string): string[] {
   return raw
     .slice(1, -1)
-    .split(",")
+    .split(LIST_DELIMITER)
     .map((element) => element.trim())
     .filter((element) => element.length > 0);
 }

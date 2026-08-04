@@ -74,21 +74,25 @@ export function scanSource(src: string): Violation[] {
 // notekit edge (`src/notekit/edge/**`, which legitimately builds DOM) stays out of scope.
 export const PURE_GLOBS = ["src/core/**/*.ts", "src/notekit/core-*.ts"] as const;
 
+// Compiled once and shared by `coversFile` and `main`, so the membership test and the file walk can
+// never be driven by two separately-built sets of patterns.
+const PURE_MATCHERS = PURE_GLOBS.map((pattern) => new Bun.Glob(pattern));
+
 /**
  * Does the gate actually scan this path? Same decision `main()` makes, exposed so the SCOPE is
  * tested and not just the scanner. Tests are excluded — they are not shipped and may import bun:test.
  */
 export function coversFile(file: string): boolean {
   if (file.endsWith(".test.ts")) return false;
-  return PURE_GLOBS.some((pattern) => new Bun.Glob(pattern).match(file));
+  return PURE_MATCHERS.some((glob) => glob.match(file));
 }
 
 async function main(): Promise<void> {
   const findings: Array<{ file: string; v: Violation }> = [];
   const scanned = new Set<string>();
 
-  for (const pattern of PURE_GLOBS) {
-    for await (const file of new Bun.Glob(pattern).scan(".")) {
+  for (const glob of PURE_MATCHERS) {
+    for await (const file of glob.scan(".")) {
       if (!coversFile(file) || scanned.has(file)) continue;
       scanned.add(file);
       const src = await Bun.file(file).text();
