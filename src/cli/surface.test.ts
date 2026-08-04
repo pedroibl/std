@@ -8,6 +8,7 @@ import { defaultBmadDeps, type BmadDeps } from "../bmad/deps";
 import { DEFAULT_TOOLS } from "../bmad/manifest";
 import { CN_SPEC } from "./cn-deploy";
 import { DASHKIT_SPEC } from "./dashkit-deploy";
+import { NOTEKIT_SPEC } from "./notekit-deploy";
 import {
   BMAD_FLAG_GROUPS,
   HELP_OPTION_BLOCKS,
@@ -52,11 +53,15 @@ describe("SURFACE is validated, serializable DATA (AC1)", () => {
     expect(typeof _notAnySub).toBe("string");
   });
 
-  test("the four commands, in shipped order", () => {
-    expect(S.commands.map((c) => c.name)).toEqual(["alias", "cn", "dashkit", "bmad"]);
+  test("the five commands, in shipped order", () => {
+    expect(S.commands.map((c) => c.name)).toEqual(["alias", "cn", "dashkit", "notekit", "bmad"]);
     expect(subNames(S, "alias")).toEqual([]);
     expect(subNames(S, "cn")).toEqual(["deploy", "verify"]);
     expect(subNames(S, "dashkit")).toEqual(["deploy", "verify"]);
+    // ⚠ `deploy` ALONE — the asymmetry is Story 1.4's ⚠️-2 decision, asserted so it cannot be "fixed" by
+    // someone pattern-matching on the two edges above. notekit v1 ships no plugin envelope (FR18/Epic 3),
+    // so a `notekit verify` in the model would offer a subcommand `main.ts` does not route.
+    expect(subNames(S, "notekit")).toEqual(["deploy"]);
     expect(subNames(S, "bmad")).toEqual(["install", "update", "deploy", "verify"]);
   });
 
@@ -255,6 +260,15 @@ describe("--format is READ from EdgeSpec, never restated (AC7)", () => {
   test("dashkit deploy has no --format at all", () => {
     expect(DASHKIT_SPEC.formats).toBeUndefined();
     expect(flagNames(S, "dashkit", "deploy")).not.toContain("--format");
+  });
+
+  test("notekit deploy has no --format either — and no preflight (1.4 ⚠️-2)", () => {
+    expect(NOTEKIT_SPEC.formats).toBeUndefined();
+    expect(flagNames(S, "notekit", "deploy")).not.toContain("--format");
+    // ⚠️-2 pinned in the DATA, not only in prose: `preflight` is optional and notekit v1 omits it on
+    // purpose (FR18/Epic 3). Someone adding a `src/notekit/plugins.ts` + preflight would be leaking a
+    // later epic into this one, and this absence is what says so out loud.
+    expect(NOTEKIT_SPEC.preflight).toBeUndefined();
   });
 });
 

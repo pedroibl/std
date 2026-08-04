@@ -23,6 +23,7 @@
     "./cli": "./src/cli/index.ts",
     "./cn": "./src/cn/index.ts",
     "./dashkit": "./src/dashkit/index.ts",
+    "./notekit": "./src/notekit/index.ts",
     "./proc": "./src/proc/index.ts",
     "./git": "./src/git/index.ts",
     "./http": "./src/http/index.ts",

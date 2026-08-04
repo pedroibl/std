@@ -408,10 +408,14 @@ describe("the emitted `_std` under a real zsh (AC2/AC3/AC6/AC7)", () => {
   // D-a itself: every assertion above is about FLAGS, so an emitter that emitted `alias` and silently
   // dropped `bmad`/`cn`/`dashkit` would pass all of them. The name lists have to be read too.
   test.skipIf(!HAS_ZSH)("every command and subcommand ARRIVED in the _describe arrays (D-a)", async () => {
-    expect(await probeNames(out, "")).toEqual(["alias", "bmad", "cn", "dashkit"]);
+    expect(await probeNames(out, "")).toEqual(["alias", "bmad", "cn", "dashkit", "notekit"]);
     expect(await probeNames(out, "bmad")).toEqual(["deploy", "install", "update", "verify"]);
     expect(await probeNames(out, "cn")).toEqual(["deploy", "verify"]);
     expect(await probeNames(out, "dashkit")).toEqual(["deploy", "verify"]);
+    // `deploy` ALONE — notekit v1 has no `verify` (Story 1.4 ⚠️-2), and the completer must not offer
+    // one. That the name arrived here at all is the D-a property working: `notekit` was added to
+    // SURFACE and nothing in the generator needed touching.
+    expect(await probeNames(out, "notekit")).toEqual(["deploy"]);
   });
 });
 
