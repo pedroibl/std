@@ -67,6 +67,14 @@ export function rendererFor(id: RendererId): Renderer | null {
  * vault path or a note-type name. Tests pass a fixture; the vault passes its `notekit.config.ts`
  * (Story 1.4). Total by construction — every failure on either level is `null`, never a throw, so a
  * config typo degrades the one card instead of taking out the note render.
+ *
+ * THE CALLER RESOLVES THE TEMPLATE TOO, AND THAT SECOND WALK STAYS. A combined `resolveRoute` returning
+ * `{template, renderer}` would save it, and it is not worth taking: the two calls answer different
+ * questions — `resolveTemplate` yields the RUBRIC, which is data the post-processor feeds to `core`
+ * before any renderer is involved, while this yields the FUNCTION that draws the result. Collapsing
+ * them ties a `core-registry` lookup to a DOM-typed return, on the one seam Story 1.4 builds its
+ * exported, DOM-FREE config type over (⚠️-4). The cost avoided is a handful of own-property reads on a
+ * small record, once per note render.
  */
 export function dispatch(nkType: string, registry: NoteTypeRegistry): Renderer | null {
   const template = resolveTemplate(nkType, registry);

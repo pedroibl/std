@@ -26,6 +26,16 @@
 // propagation) trades a corrupted note for a message nobody reads. The purely functional layers below
 // keep their fail-loud contract; this shell is where it is converted into something a reader sees.
 //
+// AND THAT PROMISE IS STRUCTURAL, NOT A TALLY OF THE PATHS BELOW. It used to be the latter: every
+// designed failure returned, and the one DOM MUTATION sat outside the guarded region, where a real
+// `replaceChild` throws `NotFoundError` if the `<pre>` is no longer a child of the parent the scan
+// captured — a renderer that re-arranged the container would have escaped the contract at the single
+// point the contract was not enforced. Two changes close it: the mutation is guarded and falls back to
+// the same append every other unreplaceable `<pre>` takes, and `postProcess` is a `try` shell over the
+// whole body so a host whose DOM refuses even the notice still returns. The shell is a NET, not the
+// degrade mechanism — every failure the vault can actually produce is handled below it and returns a
+// notice; the tests assert the net is never the thing that caught it.
+//
 // NON-CORRUPTING MEANS THE NOTICE IS AN ADDITION. On any degrade the `<pre>` STAYS — the reader keeps
 // the plain-markdown fence body, which is the whole point of FR6 — and the notice is appended to the
 // container. Prose is never rewritten, moved, or removed. Only a SUCCESSFUL render replaces the
@@ -65,7 +75,14 @@ export type PostProcessResult =
       reason: "unknown-type" | "invalid-spec" | "render-error";
       detail: string;
       element: HTMLElement;
-    };
+    }
+  /**
+   * The last resort, and the one outcome that needs no DOM to report: the host's document refused
+   * even the notice. Distinct from `notice` on purpose — a notice means the reader can SEE what went
+   * wrong, and this variant is exactly the case where nothing could be shown. Unreachable for any
+   * container Obsidian hands over; if it ever appears in a vault, the host is broken, not the note.
+   */
+  | { action: "failed"; reason: "host-dom-unusable"; detail: string };
 
 /** Everything the post-processor needs. Nothing is read from a file, a path, or a clock (D4). */
 export type PostProcessInput = {
@@ -194,8 +211,21 @@ function messageOf(e: unknown): string {
  *   spec fails `validate`      → `<pre>` kept + one notice     (never a throw — AC #2)
  *   anything else throws       → `<pre>` kept + one notice     (the note still renders)
  *   otherwise                  → the `<pre>` becomes the card  (AC #1)
+ *
+ * The `try` is the structural half of "never throws" (see the header). It catches nothing the vault
+ * can produce — every designed failure returns from `run` — and exists so the contract is enforced by
+ * the shape of this function rather than by an audit of every statement inside it.
  */
 export function postProcess(input: PostProcessInput): PostProcessResult {
+  try {
+    return run(input);
+  } catch (e) {
+    return { action: "failed", reason: "host-dom-unusable", detail: `notekit: ${messageOf(e)}` };
+  }
+}
+
+/** The whole body, one level in, so the shell above can be a pure guard. */
+function run(input: PostProcessInput): PostProcessResult {
   const { container, frontmatter, registry, injected } = input;
 
   if (!hasOptIn(frontmatter)) return { action: "noop", reason: "no-opt-in" };
@@ -239,12 +269,24 @@ export function postProcess(input: PostProcessInput): PostProcessResult {
   // Replace exactly the one `<pre>`, leaving every sibling — all the note's prose — untouched. A
   // `<pre>` with no parent cannot be replaced in place; appending keeps the card visible rather than
   // dropping it, and the fence stays too, which is the same shape as every other degrade here.
+  //
+  // A REJECTED REPLACEMENT TAKES THE SAME FALLBACK, and this is the one mutation in the file, so it is
+  // also the one place the "never throws" contract could leak. Real DOM throws `NotFoundError` when
+  // `fence.pre` is no longer a child of `fence.parent` — the parent is CAPTURED by the scan and then
+  // the renderer runs, so any renderer that re-arranges the container invalidates it. v1's single
+  // renderer builds a detached element and touches nothing, so the capture holds today; the guard is
+  // what keeps that from being a property of the renderer table rather than of this function.
   const parent = fence.parent as { replaceChild?: (a: unknown, b: unknown) => unknown } | null;
+  let replaced = false;
   if (parent !== null && typeof parent.replaceChild === "function") {
-    parent.replaceChild(element, fence.pre);
-  } else {
-    container.appendChild(element);
+    try {
+      parent.replaceChild(element, fence.pre);
+      replaced = true;
+    } catch {
+      replaced = false;
+    }
   }
+  if (!replaced) container.appendChild(element);
 
   return { action: "rendered", nkType, element };
 }

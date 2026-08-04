@@ -6,6 +6,7 @@ import type { Injected, Rubric } from "../core-renderspec";
 import { asStub, installStubDoc, makeEl, makeStubDoc, makeText } from "./dom-stub.support";
 import type { StubDoc, StubEl } from "./dom-stub.support";
 import { postProcess } from "./post-processor";
+import type { PostProcessResult } from "./post-processor";
 
 let doc: StubDoc;
 let restore: () => void;
@@ -88,6 +89,21 @@ function textsWithClass(node: StubEl, cls: string, out: string[] = []): string[]
 /** Count the notice elements anywhere under a container. */
 function noticeCount(node: StubEl): number {
   return textsWithClass(node, "nk-notice").length;
+}
+
+/**
+ * Call `postProcess`, assert it RETURNED rather than threw, and hand back what it returned. The two
+ * halves of AC #2 are "no error is thrown into the note" and "the outcome is one of the named ones",
+ * and a test that only asserts `.not.toThrow()` proves the first while saying nothing about the
+ * second — which is how a swallowed failure passes for a degrade.
+ */
+function runSafely(input: Parameters<typeof postProcess>[0]): PostProcessResult {
+  const captured: { value?: PostProcessResult } = {};
+  expect(() => {
+    captured.value = postProcess(input);
+  }).not.toThrow();
+  expect(captured.value).toBeDefined();
+  return captured.value as PostProcessResult;
 }
 
 // ─────────────────────────────── AC #1 — dispatch → card → DOM ───────────────────────────────
@@ -335,16 +351,187 @@ describe("postProcess — the non-corrupting notice (AC #2)", () => {
   test("no input shape makes postProcess throw", () => {
     const junkRegistries: unknown[] = [null, undefined, 7, "r", [], {}, { noteTypes: 1 }];
     for (const registry of junkRegistries) {
-      const { container } = makeNote("language-nk-card");
-      expect(() =>
-        postProcess({
-          container: el(container),
-          frontmatter: OPT_IN,
-          registry: as(registry),
-          injected: INJECTED,
-        }),
-      ).not.toThrow();
+      const { container, pre } = makeNote("language-nk-card");
+      const result = runSafely({
+        container: el(container),
+        frontmatter: OPT_IN,
+        registry: as(registry),
+        injected: INJECTED,
+      });
+      // Not merely "did not throw": every one of these is the DESIGNED unknown-type degrade, reached
+      // through the registry's own totality. If the outer net had been what caught it the action would
+      // read `failed`, and the assertion below is what tells those two apart.
+      expect(result.action).toBe("notice");
+      if (result.action !== "notice") continue;
+      expect(result.reason).toBe("unknown-type");
+      expect(container.children.includes(pre)).toBe(true);
+      expect(noticeCount(container)).toBe(1);
     }
+  });
+});
+
+// ────────────── AC #2, per stage: force a failure at every step and watch it return ──────────────
+
+describe("postProcess — the non-corrupting promise holds at every stage", () => {
+  /** Assert the shape every degrade must have: prose intact, fence kept, at most one notice. */
+  const assertNoteIntact = (
+    container: StubEl,
+    pre: StubEl,
+    snaps: { before: unknown; after: unknown; pre: unknown },
+  ): void => {
+    const [before, , after] = container.children;
+    expect(snapshot(before!)).toEqual(snaps.before);
+    expect(snapshot(after!)).toEqual(snaps.after);
+    expect(snapshot(pre)).toEqual(snaps.pre);
+    expect(container.children.includes(pre)).toBe(true);
+    expect(noticeCount(container)).toBeLessThanOrEqual(1);
+  };
+
+  const snapsOf = (parts: { pre: StubEl; before: StubEl; after: StubEl }) => ({
+    before: snapshot(parts.before),
+    after: snapshot(parts.after),
+    pre: snapshot(parts.pre),
+  });
+
+  test("stage 1 — an unparseable fence body: no field survives, and validate names the gap", () => {
+    // `parseFenceBody` is total by design, so garbage does not throw — it yields no fields, and the
+    // failure surfaces one layer up as a named validation error rather than as an exception.
+    const parts = makeNote("language-nk-card", "%%% not a fence body %%%\n\n\t\n:::");
+    const snaps = snapsOf(parts);
+    const result = postProcess({
+      container: el(parts.container),
+      frontmatter: OPT_IN,
+      registry: REGISTRY,
+      injected: INJECTED,
+    });
+    expect(result.action).toBe("notice");
+    if (result.action !== "notice") return;
+    expect(result.reason).toBe("invalid-spec");
+    expect(noticeCount(parts.container)).toBe(1);
+    assertNoteIntact(parts.container, parts.pre, snaps);
+  });
+
+  test("stage 2 — dispatch returns null (unknown type)", () => {
+    const parts = makeNote("language-nk-timeline");
+    const snaps = snapsOf(parts);
+    const result = postProcess({
+      container: el(parts.container),
+      frontmatter: OPT_IN,
+      registry: REGISTRY,
+      injected: INJECTED,
+    });
+    expect(result.action).toBe("notice");
+    expect(noticeCount(parts.container)).toBe(1);
+    assertNoteIntact(parts.container, parts.pre, snaps);
+  });
+
+  test("stage 3 — THE RENDERER ITSELF throws part-way through building the card", () => {
+    // Not the spec builder (covered above) — the DOM walk. `nkTreeToDom` is fail-loud by design, so a
+    // document that refuses one of the card's tags makes it throw mid-build, leaving a half-built
+    // detached element behind. The note must not see it.
+    const parts = makeNote("language-nk-card");
+    const snaps = snapsOf(parts);
+    const build = doc.createElement;
+    doc.createElement = (tag: string): StubEl => {
+      if (tag === "h3") throw new Error("InvalidCharacterError: refused by the host");
+      return build(tag);
+    };
+
+    const result = postProcess({
+      container: el(parts.container),
+      frontmatter: OPT_IN,
+      registry: REGISTRY,
+      injected: INJECTED,
+    });
+    expect(result.action).toBe("notice");
+    if (result.action !== "notice") return;
+    expect(result.reason).toBe("render-error");
+    expect(result.detail).toMatch(/refused by the host/);
+    expect(noticeCount(parts.container)).toBe(1);
+    assertNoteIntact(parts.container, parts.pre, snaps);
+    expect(textsWithClass(parts.container, "nk-card").length).toBe(0);
+  });
+
+  test("stage 4 — THE DOM MUTATION IS REJECTED because a renderer moved the fence", () => {
+    // The regression for the one mutation that used to sit outside the guarded region. `findFence`
+    // CAPTURES the parent, then the renderer runs; a renderer that re-arranges the container makes
+    // `fence.pre` a stranger to that parent, and real DOM answers `replaceChild` with NotFoundError.
+    // Reproduced through the renderer, not by planting a thrower: the stub's own `replaceChild` is
+    // what rejects, exactly as the vault's would.
+    const { container, pre, before, after } = makeNote("language-nk-card");
+    const beforeSnap = snapshot(before);
+    const afterSnap = snapshot(after);
+    const build = doc.createElement;
+    let moved = false;
+    doc.createElement = (tag: string): StubEl => {
+      if (!moved) {
+        moved = true;
+        container.nodes.splice(container.nodes.indexOf(pre), 1); // the renderer detached the fence
+      }
+      return build(tag);
+    };
+
+    const result = runSafely({
+      container: el(container),
+      frontmatter: OPT_IN,
+      registry: REGISTRY,
+      injected: INJECTED,
+    });
+
+    // The card is still delivered — appended rather than dropped, the same fallback an unreplaceable
+    // `<pre>` already took — and the note's prose is byte-equal on both sides.
+    expect(result.action).toBe("rendered");
+    expect(textsWithClass(container, "nk-card").length).toBe(1);
+    expect(container.children.at(-1)!.className).toBe("nk-card");
+    expect(snapshot(before)).toEqual(beforeSnap);
+    expect(snapshot(after)).toEqual(afterSnap);
+    expect(noticeCount(container)).toBe(0);
+  });
+
+  test("stage 4 — a parent whose replaceChild throws something else takes the same fallback", () => {
+    const { container, pre } = makeNote("language-nk-card");
+    Object.defineProperty(container, "replaceChild", {
+      value: () => {
+        throw new Error("host refused the replacement");
+      },
+      configurable: true,
+    });
+    const result = postProcess({
+      container: el(container),
+      frontmatter: OPT_IN,
+      registry: REGISTRY,
+      injected: INJECTED,
+    });
+    expect(result.action).toBe("rendered");
+    expect(container.children.includes(pre)).toBe(true);
+    expect(textsWithClass(container, "nk-card").length).toBe(1);
+    expect(noticeCount(container)).toBe(0);
+  });
+
+  test("stage 5 — a host that cannot even build the notice still RETURNS", () => {
+    // The outer net, and the only case that reaches it: `document.createElement` refuses everything,
+    // so the render throws AND the degrade's own notice cannot be built. Nothing is thrown into the
+    // note and nothing is added to it — the reader keeps the plain fence body, which is FR6's floor.
+    const { container, pre } = makeNote("language-nk-card");
+    const containerSnap = snapshot(container);
+    doc.createElement = (): StubEl => {
+      throw new Error("no document");
+    };
+
+    const result = runSafely({
+      container: el(container),
+      frontmatter: OPT_IN,
+      registry: REGISTRY,
+      injected: INJECTED,
+    });
+
+    expect(result.action).toBe("failed");
+    if (result.action !== "failed") return;
+    expect(result.reason).toBe("host-dom-unusable");
+    expect(result.detail).toMatch(/no document/);
+    expect(snapshot(container)).toEqual(containerSnap);
+    expect(container.children.includes(pre)).toBe(true);
+    expect(noticeCount(container)).toBe(0);
   });
 });
 
@@ -487,8 +674,11 @@ describe("postProcess — adversarial inputs", () => {
   });
 
   test("a cyclic container terminates on the scan bound instead of hanging", () => {
+    // Built by hand rather than with `appendChild`: real DOM answers an append that would create a
+    // cycle with `HierarchyRequestError`, so a cyclic container can only arrive from a hand-built or
+    // proxied object — which is exactly the input the scan bound exists for.
     const container = makeEl("div");
-    container.appendChild(container);
+    container.nodes.push(container);
     expect(
       postProcess({
         container: el(container),
@@ -533,6 +723,37 @@ describe("postProcess — adversarial inputs", () => {
     expect(result.action).toBe("rendered");
     expect(container.children.includes(pre)).toBe(true);
     expect(textsWithClass(container, "nk-card").length).toBe(1);
+  });
+
+  test("a LIVE children collection — the one real-DOM semantic the stub cannot model", () => {
+    // `HTMLCollection` is live: it reflects mutations as the walk reads it, which is why `childrenOf`
+    // reads `length` once and indexes rather than trusting the collection to hold still. The stub's
+    // `children` is a fresh array, so that claim is pinned here instead, with a collection that empties
+    // itself the moment it is first indexed — the worst case of liveness during a scan.
+    const kids: unknown[] = [makeEl("p"), makeEl("pre"), makeEl("p")];
+    const live: Record<string, unknown> = {
+      get length(): number {
+        return kids.length;
+      },
+    };
+    for (let i = 0; i < 3; i++) {
+      Object.defineProperty(live, i, {
+        get(): unknown {
+          const at = kids[i];
+          kids.length = 0; // the host re-rendered mid-scan
+          return at;
+        },
+      });
+    }
+    const hostile = { tagName: "DIV", className: "", children: live };
+
+    const result = runSafely({
+      container: hostile as unknown as HTMLElement,
+      frontmatter: OPT_IN,
+      registry: REGISTRY,
+      injected: INJECTED,
+    });
+    expect(result).toEqual({ action: "noop", reason: "no-fence" });
   });
 
   test("text nodes between elements are never mistaken for children or disturbed", () => {

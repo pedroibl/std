@@ -23,6 +23,33 @@
 //   2. `tagName` IS UPPERCASE. Real DOM reports `PRE`, and the fence scan compares case-insensitively
 //      because of it. A lowercase stub would let a case-sensitive comparison ship green and then
 //      match nothing in Obsidian.
+//   3. `replaceChild` THROWS `NotFoundError` when the node to replace is not a child of this parent.
+//      That is real DOM's `NotFoundError` `DOMException`, and the post-processor's one DOM mutation is
+//      guarded on exactly it. A stub that returned quietly here would let that guard be deleted with
+//      every test still green — the green lie this file exists to prevent.
+//
+// WHERE IT IS DELIBERATELY LENIENT, AND WHY THAT IS SAFE. The rest of the divergence from real DOM is
+// listed here rather than left to be rediscovered; each line names the production claim that would
+// have to change before the leniency starts to matter:
+//
+//   - `appendChild` does not reject a CYCLE. Real DOM throws `HierarchyRequestError` when the new node
+//     is an inclusive ancestor of the parent. Nothing in production ever re-parents a node — it appends
+//     freshly-created, detached elements — so no claim rests on the rejection. The one fixture that
+//     needs a cyclic container therefore builds it by hand (`nodes.push`), the way a hostile or
+//     hand-built container would arrive, not by calling `appendChild`.
+//   - `appendChild` does not MOVE the node out of its previous parent. Real DOM does. Same reason: the
+//     edge only ever appends fresh elements, and `replaceChild`'s replacement is always detached.
+//   - `children` is a fresh array per read; a real `HTMLCollection` is LIVE. `childrenOf` in the
+//     post-processor snapshots for exactly that reason, and since the stub cannot express liveness the
+//     claim is pinned instead by a hand-built live collection in `post-processor.test.ts`.
+//   - `createElement` never throws. Real DOM throws `InvalidCharacterError` on an invalid tag name;
+//     `nkcard.ts` only ever passes a member of the `NK_TAGS` allowlist (all valid element names) or the
+//     literal `"div"`/`"style"`, which is what makes that unreachable rather than merely unlikely.
+//   - `getElementById` searches only under `head`. The only id-guarded element the edge owns is the
+//     injected `<style>`, which lives in head.
+//   - `className` is a plain string. Real DOM hands back an `SVGAnimatedString` on an SVG element, and
+//     `fenceTypeOf` reads it defensively because of that; the fixture for that case plants a non-string
+//     `className` directly rather than relying on the stub to model SVG.
 
 /** A text node — modelled explicitly so `textContent` can behave the way the real thing does. */
 export type StubText = { nodeType: 3; data: string };
@@ -42,6 +69,17 @@ export type StubEl = {
 
 export function isText(node: StubEl | StubText): node is StubText {
   return node.nodeType === 3;
+}
+
+/**
+ * The failure real DOM signals with a `NotFoundError` `DOMException`. Built from a plain `Error` with
+ * the `name` set rather than from the `DOMException` constructor: the stub depends on no global beyond
+ * what it installs, and `name` is the part a caller can branch on.
+ */
+export function notFoundError(message: string): Error {
+  const e = new Error(message);
+  e.name = "NotFoundError";
+  return e;
 }
 
 /** Build a stub element. `tagName` is uppercased to match what a real HTML document reports. */
@@ -72,7 +110,7 @@ export function makeEl(tag: string): StubEl {
     },
     replaceChild(next, prev) {
       const at = nodes.indexOf(prev);
-      if (at < 0) throw new Error("replaceChild: node is not a child of this parent");
+      if (at < 0) throw notFoundError("replaceChild: node is not a child of this parent");
       nodes[at] = next;
       return prev;
     },
