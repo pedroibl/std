@@ -1,0 +1,12 @@
+{
+  "extends": "../../../tsconfig.json",
+  "//": "Story 1.3 AC5 (⚠️-1) — src/notekit/edge/ is the Obsidian DOM edge of a MIXED slice, so it typechecks under its own config, not the root one. The root config is Bun-shaped (lib ESNext, types [\"bun\"]) and deliberately has NO DOM lib — that absence IS the compile-time barrier keeping DOM out of core. Adding DOM globally would tear it down. Unlike src/cn/ and src/dashkit/, only the edge/ SUBTREE is excluded from root: the sibling src/notekit/core-*.ts files stay under the root config ON PURPOSE, so a stray document/HTMLElement in the pure half is still a compile error. Excluding all of src/notekit/** is the tempting mistake and it removes exactly that barrier.",
+  "//types": "compilerOptions.types is empty ON PURPOSE — it drops the inherited [\"bun\"]. With Bun's globals gone, a stray process/Bun/node:* in this slice is a COMPILE ERROR, which matters because the edge is bundled into the vault (AD-5) where neither exists. Gate 4 (check:core-purity) scans src/core/** and src/notekit/core-*.ts only, so it will not catch edge drift — this config is the barrier that does.",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM"],
+    "types": []
+  },
+  "include": ["**/*.ts"],
+  "//exclude": "Overriding the inherited exclude is MANDATORY, not cosmetic. TypeScript resolves an inherited relative path against the config that DECLARED it, so without an own `exclude` this slice inherits root's [\"src/cn/**\", \"src/dashkit/**\", \"src/notekit/edge/**\"] (repo-rooted) — which now names THIS directory — and ends up with ZERO input files: a typecheck that cannot fail. Verify with `tsc -p src/notekit/edge/tsconfig.json --listFiles`. Test files are carved out because they are NEVER bundled and legitimately import `bun:test`, which `types: []` (correctly) makes unresolvable; they are typechecked by tsconfig.test.json instead, so nothing here goes unchecked.",
+  "exclude": ["**/*.test.ts"]
+}

@@ -78,11 +78,12 @@ test:  ## bun test
 	@bun test
 
 .PHONY: typecheck
-typecheck:  ## tsc for src/, proof/, and the src/cn/ + src/dashkit/ Obsidian edges (own scoped configs)
+typecheck:  ## tsc for src/, proof/, and the cn + dashkit + notekit-edge Obsidian edges (own scoped configs)
 	@bun run typecheck
 	@bun run typecheck:proof
 	@bun run typecheck:cn
 	@bun run typecheck:dashkit
+	@bun run typecheck:notekit
 
 .PHONY: checks
 checks:  ## the 4 fitness-function gates (core-purity, dep-root, single-source, no-consumer-ids)

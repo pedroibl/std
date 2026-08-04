@@ -64,6 +64,14 @@ jobs:
       - name: Typecheck dashkit
         run: bun run typecheck:dashkit
 
+      # Gate 3e — src/notekit/edge/ typecheck under its OWN scoped config (lib ESNext+DOM, types []),
+      # mirroring Gates 3c/3d. notekit is the estate's first MIXED slice, so the root exclude is
+      # SURGICAL: only src/notekit/edge/** is excluded, while the pure src/notekit/core-*.ts files
+      # stay under Gate 3 — that is what keeps a stray `document` in the pure half a compile error.
+      # Without this step the Obsidian edge would ship untypechecked (Story 1.3 AC5, ⚠️-1).
+      - name: Typecheck notekit
+        run: bun run typecheck:notekit
+
       # Gate 4 — core is runtime-neutral: no node:*/fs/DOM/network, no process/document (D1/NFR1/CM3).
       - name: Core purity
         run: bun run check:core-purity
