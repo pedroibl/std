@@ -1,10 +1,10 @@
 import { test, expect } from "bun:test";
 import { escapeHtml } from "../core";
 import { parseFenceBody } from "./core-fence";
-import { nkTreeToHtml, renderCardHtml } from "./core-html";
+import { NK_TAGS, nkTreeToHtml, renderCardHtml } from "./core-html";
 import { cardTree } from "./core-nknode";
 import type { NkNode } from "./core-nknode";
-import { noteToRenderSpec } from "./core-renderspec";
+import { noteToRenderSpec, validate } from "./core-renderspec";
 import type { Injected, RenderSpec, Rubric } from "./core-renderspec";
 
 const INJECTED: Injected = { id: "nk-0001", generatedAt: "2026-08-05T00:00:00.000Z" };
@@ -192,6 +192,66 @@ test("renders end to end from a fence body — the real caller path", () => {
   );
 });
 
+test("a field carried with an empty value reaches the HTML — AC #2 over the real fence path", () => {
+  // The exact path the third review broke: `bio: ` in the fence → a `{key,label,value:""}` row →
+  // `validate` ok → the row must be IN the string. Asserted as bytes, so a partial fix cannot pass.
+  const rubric: Rubric = {
+    kind: "card",
+    titleField: "name",
+    fields: [
+      { key: "name", label: "Name" },
+      { key: "bio", label: "Bio" },
+      { key: "tags", label: "Tags" },
+    ],
+  };
+  const spec = noteToRenderSpec(parseFenceBody("name: Ada\nbio: \ntags: [x, y]"), rubric, INJECTED);
+  expect(validate(spec).ok).toBe(true);
+  expect(renderCardHtml(spec)).toBe(
+    [
+      '<div class="nk-card">',
+      '<h3 class="nk-card-title">Ada</h3>',
+      '<div class="nk-card-fields">',
+      '<div class="nk-field">',
+      '<span class="nk-field-label">Name</span>',
+      '<span class="nk-field-value">Ada</span>',
+      "</div>",
+      '<div class="nk-field">',
+      '<span class="nk-field-label">Bio</span>',
+      '<span class="nk-field-value"></span>',
+      "</div>",
+      '<div class="nk-field">',
+      '<span class="nk-field-label">Tags</span>',
+      '<ul class="nk-field-values">',
+      '<li class="nk-field-value">x</li>',
+      '<li class="nk-field-value">y</li>',
+      "</ul>",
+      "</div>",
+      "</div>",
+      '<div class="nk-card-meta">',
+      '<span class="nk-card-version">nk-v1</span>',
+      '<span class="nk-card-kind">card</span>',
+      '<span class="nk-card-id">nk-0001</span>',
+      '<span class="nk-card-generated">2026-08-05T00:00:00.000Z</span>',
+      "</div>",
+      "</div>",
+    ].join(""),
+  );
+});
+
+test("an empty scalar and an empty list render the same way — an empty value node either way", () => {
+  const html = renderCardHtml({
+    ...CANONICAL,
+    title: "Consistency",
+    fields: [
+      { key: "s", label: "S", value: "" },
+      { key: "l", label: "L", value: [] },
+    ],
+  });
+  expect(html).toContain('<span class="nk-field-label">S</span><span class="nk-field-value"></span>');
+  expect(html).toContain('<span class="nk-field-label">L</span><ul class="nk-field-values"></ul>');
+  expect((html.match(/class="nk-field"/g) ?? []).length).toBe(2);
+});
+
 // ── serializer mechanics over the real type domain ──────────────────────────────────────────────
 
 test("an omitted class emits no attribute; an empty class is treated the same", () => {
@@ -219,6 +279,64 @@ test("a malformed tag throws instead of emitting broken markup", () => {
   expect(() => nkTreeToHtml({ tag: "div><script" })).toThrow(/"tag" must match/);
   expect(() => nkTreeToHtml({ tag: "" })).toThrow(/"tag" must match/);
   expect(() => nkTreeToHtml({ tag: 7 } as unknown as NkNode)).toThrow(/"tag" must match/);
+});
+
+test("a well-formed but dangerous tag is rejected — escaping cannot save a script body", () => {
+  // `escapeHtml` protects TEXT context; inside `<script>` the payload needs no metacharacters at all.
+  // So the tag is checked against `NK_TAGS`, not just against a shape.
+  for (const tag of ["script", "style", "iframe", "object", "embed", "link", "meta", "form"]) {
+    expect(() => nkTreeToHtml({ tag, text: "alert(1)" })).toThrow(
+      /is not in the nk-node tag allowlist/,
+    );
+  }
+  // A custom element passes `TAG_NAME` and is still refused: well-formed is not the same as allowed.
+  expect(() => nkTreeToHtml({ tag: "my-widget" })).toThrow(/is not in the nk-node tag allowlist/);
+});
+
+test("every tag cardTree can emit is on the allowlist — the card path is not blocked", () => {
+  // The allowlist is proven against the real producer rather than a hand-listed set, so a later
+  // renderer that reaches for a new tag fails HERE, in the review that must also cover 1.3's DOM
+  // serializer — not silently at a caller.
+  function tags(node: NkNode): string[] {
+    return [node.tag, ...(node.children ?? []).flatMap(tags)];
+  }
+  const used = new Set(tags(cardTree(CANONICAL)));
+  expect([...used].sort()).toEqual(["div", "h3", "li", "span", "ul"]);
+  for (const tag of used) expect(NK_TAGS.has(tag)).toBe(true);
+});
+
+test("a tree deeper than the bound fails with a path-named error, not a RangeError", () => {
+  function nest(levels: number): NkNode {
+    let node: NkNode = { tag: "span", text: "leaf" };
+    for (let i = 0; i < levels; i++) node = { tag: "div", children: [node] };
+    return node;
+  }
+  // 64 levels serialize; 65 is refused — and the refusal names its path like every other malformed
+  // node, instead of dying inside the engine with `Maximum call stack size exceeded`.
+  expect(nkTreeToHtml(nest(63))).toContain("leaf");
+  let thrown: unknown;
+  try {
+    nkTreeToHtml(nest(64));
+  } catch (e) {
+    thrown = e;
+  }
+  expect(thrown).toBeInstanceOf(Error);
+  expect((thrown as Error).name).toBe("Error");
+  expect((thrown as Error).message).toMatch(/^nk-node at root\.children\[0\]/);
+  expect((thrown as Error).message).toMatch(/nesting exceeds the 64-level limit/);
+});
+
+test("a cycle is caught by the same depth bound — no stack overflow", () => {
+  const cyclic: NkNode = { tag: "div", children: [] };
+  cyclic.children?.push(cyclic);
+  let thrown: unknown;
+  try {
+    nkTreeToHtml(cyclic);
+  } catch (e) {
+    thrown = e;
+  }
+  expect((thrown as Error).message).toMatch(/nesting exceeds the 64-level limit/);
+  expect((thrown as Error).message).not.toMatch(/call stack/);
 });
 
 test("a hole in children throws, naming its path — it is never silently skipped", () => {

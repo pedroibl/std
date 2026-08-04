@@ -18,6 +18,11 @@
 //     clock, no `Math.random`, no module-level counter (D4, NFR2 determinism).
 //   - A value the spec does not carry yields NO node. The tree never contains the string
 //     "undefined" — omission is the degraded form (mirrors FR5).
+//   - ABSENT AND PRESENT-BUT-EMPTY ARE DIFFERENT STATES. FR5's omit rule is about a field the spec
+//     does not carry; a field row the spec DOES carry with `value: ""` is present, and the fence
+//     codec's normalization rule 3 makes `key: ` the canonical way an author writes exactly that
+//     (`core-fence.ts`). Conflating the two dropped the whole row after `validate` had blessed it,
+//     so the HTML contradicted the spec — see `valueLeaf` below for where the line is drawn.
 //
 // TOTALITY: `cardTree` takes a *validated* spec, but its parameter type is only a compile-time
 // promise — a hand-built object, a JSON blob, or a sparse `fields` array all reach it at runtime.
@@ -73,15 +78,37 @@ function own(record: object, key: string): unknown {
     : undefined;
 }
 
-/** A string worth rendering. Empty is treated as absent: an empty node carries no information. */
+/**
+ * A string worth rendering in an IDENTITY slot — the title, a field's label, a meta value. Those
+ * slots are bare scalars with no wrapper around them to say "present, but blank", so an empty one is
+ * indistinguishable from an absent one; and `validate` already rejects empty for every one of them
+ * (`requireNonEmptyString` in `core-renderspec.ts`), so a blank can only reach here on a hand-built
+ * spec. Empty is therefore read as absent and the node is omitted (FR5). A field's VALUE is the
+ * different case — it has a key and a label attesting its presence — and goes through `valueLeaf`.
+ */
 function textOf(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-/** A leaf element carrying text, or nothing at all when the value is absent/empty/not a string. */
+/** An identity leaf carrying text, or nothing at all when the value is absent/empty/not a string. */
 function leaf(tag: string, cls: string, value: unknown): NkNode | undefined {
   const text = textOf(value);
   return text === undefined ? undefined : { tag, class: cls, text };
+}
+
+/**
+ * A VALUE leaf, where PRESENCE decides — not content. A field row reaches us as `{key, label, value}`,
+ * so `value: ""` is a value the spec carries and the author wrote on purpose (`bio: ` is the codec's
+ * canonical empty form, rule 3). Dropping it is data loss nobody asked for, and it makes the HTML
+ * disagree with the spec `validate` blessed — the AC #2 break the third review caught. So a string is
+ * always a node, `""` included, and the empty node is what the empty value looks like.
+ *
+ * A NON-string is still nothing: that value is unusable, not empty, and there is no honest node to
+ * emit for it. The "never emit the string `undefined`" guarantee is unchanged — an absent field emits
+ * no node at all, and a present one emits its own text, never a stringified placeholder.
+ */
+function valueLeaf(tag: string, cls: string, value: unknown): NkNode | undefined {
+  return typeof value === "string" ? { tag, class: cls, text: value } : undefined;
 }
 
 /** Drop the omitted children, keeping declared order. */
@@ -90,15 +117,19 @@ function present(nodes: readonly (NkNode | undefined)[]): NkNode[] {
 }
 
 /**
- * A list value → `<ul>` of `<li>`. Indexed rather than `map`ped because `map` SKIPS holes and copies
- * them into its result: a sparse `["a", , "c"]` would emit a node whose text is `undefined`, which is
- * precisely what the omit rule forbids. Non-string elements are dropped the same way.
+ * A list value → `<ul>` of `<li>`. Elements go through `valueLeaf` for the same reason the scalar does
+ * — `["a", "", "c"]` is three carried values and renders three `<li>`s — so the two shapes of an empty
+ * value cannot diverge: whatever `""` does as a scalar, it does as an element.
+ *
+ * Indexed rather than `map`ped because `map` SKIPS holes and copies them into its result: a sparse
+ * `["a", , "c"]` would emit a node whose text is `undefined`, which is precisely what the omit rule
+ * forbids. A hole is a value that ISN'T there — the absent case — and so are non-string elements.
  */
 function listNode(values: readonly unknown[]): NkNode {
   const items: NkNode[] = [];
   for (let i = 0; i < values.length; i++) {
     if (!(i in values)) continue;
-    const item = leaf("li", "nk-field-value", values[i]);
+    const item = valueLeaf("li", "nk-field-value", values[i]);
     if (item !== undefined) items.push(item);
   }
   return { tag: "ul", class: "nk-field-values", children: items };
@@ -107,13 +138,14 @@ function listNode(values: readonly unknown[]): NkNode {
 /**
  * One rubric-selected field → one `nk-field` row (label, then value). A row whose value is neither a
  * string nor an array is omitted whole: a label with nothing beside it is a worse artifact than a
- * missing row.
+ * missing row. An empty string is NOT that case — it is a carried value (see `valueLeaf`), so its row
+ * survives, exactly as an empty array's row already did.
  */
 function fieldNode(row: unknown): NkNode | undefined {
   if (typeof row !== "object" || row === null || Array.isArray(row)) return undefined;
   const value = own(row, "value");
   const isList = Array.isArray(value);
-  if (!isList && textOf(value) === undefined) return undefined;
+  if (!isList && typeof value !== "string") return undefined;
 
   // The label falls back to the key — the same default `noteToRenderSpec` applies when the rubric
   // entry omits one, so a hand-built spec degrades to the rubric's own rule rather than to blank.
@@ -121,7 +153,7 @@ function fieldNode(row: unknown): NkNode | undefined {
   // back on null/undefined, so it would keep the blank and never reach the key.
   const labelText = textOf(own(row, "label")) ?? textOf(own(row, "key"));
   const label = leaf("span", "nk-field-label", labelText);
-  const rendered = isList ? listNode(value) : leaf("span", "nk-field-value", value);
+  const rendered = isList ? listNode(value) : valueLeaf("span", "nk-field-value", value);
   return { tag: "div", class: "nk-field", children: present([label, rendered]) };
 }
 

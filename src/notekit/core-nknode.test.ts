@@ -225,6 +225,68 @@ test("a non-object field row is dropped whole, not rendered as a labelless value
   expect(rows[0]?.children?.[1]?.text).toBe("kept");
 });
 
+// ── present-but-empty is not absent (the third review's High finding) ───────────────────────────
+
+test("a field the spec carries with an empty value keeps its row — present is not absent", () => {
+  // The real author path: `bio: ` is the fence codec's canonical empty-value form (rule 3), so the
+  // spec carries `{key:"bio", label:"Bio", value:""}` and `validate` blesses it. Dropping the row
+  // there made the tree disagree with the spec — the AC #2 break.
+  const rubric: Rubric = {
+    kind: "card",
+    titleField: "name",
+    fields: [{ key: "name", label: "Name" }, { key: "bio", label: "Bio" }],
+  };
+  const withEmpty = noteToRenderSpec(parseFenceBody("name: Ada\nbio: "), rubric, INJECTED);
+  expect(withEmpty.fields).toEqual([
+    { key: "name", label: "Name", value: "Ada" },
+    { key: "bio", label: "Bio", value: "" },
+  ]);
+  const rows = cardTree(withEmpty).children?.[1]?.children ?? [];
+  expect(rows).toHaveLength(2);
+  expect(rows[1]).toEqual({
+    tag: "div",
+    class: "nk-field",
+    children: [
+      { tag: "span", class: "nk-field-label", text: "Bio" },
+      { tag: "span", class: "nk-field-value", text: "" },
+    ],
+  });
+});
+
+test("an empty scalar and an empty list behave the same — both keep the row", () => {
+  // These two diverged before: the list kept its row and rendered an empty `<ul>`, the scalar vanished.
+  const tree = cardTree({
+    ...spec(),
+    fields: [
+      { key: "s", label: "S", value: "" },
+      { key: "l", label: "L", value: [] },
+    ],
+  });
+  const rows = tree.children?.[1]?.children ?? [];
+  expect(rows.map((r) => r.children?.[0]?.text)).toEqual(["S", "L"]);
+  expect(rows.map((r) => r.children?.[1]?.class)).toEqual(["nk-field-value", "nk-field-values"]);
+});
+
+test("an empty element inside a list keeps its <li> — the same policy as the scalar", () => {
+  const tree = cardTree({
+    ...spec(),
+    fields: [{ key: "tags", label: "Tags", value: ["a", "", "c"] }],
+  });
+  const list = tree.children?.[1]?.children?.[0]?.children?.[1];
+  expect(list?.children?.map((li) => li.text)).toEqual(["a", "", "c"]);
+});
+
+test("an empty value node still never carries the string 'undefined'", () => {
+  // The omit rule is intact where it applies: an ABSENT field emits nothing, a present-but-empty one
+  // emits its own empty text. Neither ever stringifies a placeholder.
+  const tree = cardTree({
+    ...spec(),
+    fields: [{ key: "k", label: "K", value: "" }],
+  });
+  expect(JSON.stringify(tree)).not.toContain("undefined");
+  expect(texts(tree)).toContain("");
+});
+
 test("a field whose value is neither string nor array is omitted rather than half-rendered", () => {
   const junk = {
     ...spec(),
