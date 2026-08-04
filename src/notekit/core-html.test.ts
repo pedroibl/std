@@ -386,3 +386,36 @@ test("a tree round-tripped through JSON serializes identically — the 1.3 hand-
   const revived = JSON.parse(JSON.stringify(tree)) as NkNode;
   expect(nkTreeToHtml(revived)).toBe(nkTreeToHtml(tree));
 });
+
+// ── review round 3 — an inherited index is not a child ───────────────────────────────────────────
+
+function withPoisonedArrayPrototype<T>(value: unknown, body: () => T): T {
+  const proto = Array.prototype as unknown as Record<number, unknown>;
+  proto[0] = value;
+  try {
+    return body();
+  } finally {
+    delete proto[0];
+  }
+}
+
+test("a hole in `children` is a sparse-array error even when the inherited index is NODE-shaped", () => {
+  // `i in children` reported the hole present, and a node-shaped `Array.prototype[0]` was then
+  // SERIALIZED — markup emitted from a value the tree never carried. A string pollutant happened to
+  // throw ("expected an object"), which hid the leak behind the right error for the wrong reason.
+  const poison = { tag: "div", class: "nk-x", text: "POISONED" };
+  expect(() =>
+    withPoisonedArrayPrototype(poison, () =>
+      nkTreeToHtml({ tag: "div", class: "nk-card", children: new Array(1) } as unknown as NkNode),
+    ),
+  ).toThrow(/root\.children\[0\]: missing — children must be dense/);
+});
+
+test("a dense tree serializes identically under a poisoned prototype", () => {
+  const tree = cardTree(CANONICAL);
+  const poisoned = withPoisonedArrayPrototype({ tag: "div", text: "POISONED" }, () =>
+    nkTreeToHtml(tree),
+  );
+  expect(poisoned).toBe(nkTreeToHtml(tree));
+  expect(poisoned).not.toContain("POISONED");
+});

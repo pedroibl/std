@@ -171,9 +171,16 @@ function serialize(node: unknown, path: string, depth: number): string {
     if (!Array.isArray(children)) fail(path, `"children" must be an array`);
     // Indexed, not `map`ped: `map` SKIPS holes, so a sparse `children` would quietly serialize a gap
     // instead of reporting it. A hole is a malformed node, not an empty one.
+    //
+    // The hole test is `hasOwnProperty`, not `i in children`: `in` answers true for an index
+    // inherited from `Array.prototype`, so with `Array.prototype[0]` set to a node-shaped object a
+    // sparse `children` SERIALIZED IT — `<div class="nk-card"><div class="nk-x">POISONED</div></div>`
+    // — markup from a value the tree never carried. The same guard `own` applies to named keys.
     for (let i = 0; i < children.length; i++) {
       const at = `${path}.children[${i}]`;
-      if (!(i in children)) fail(at, "missing — children must be dense");
+      if (!Object.prototype.hasOwnProperty.call(children, i)) {
+        fail(at, "missing — children must be dense");
+      }
       inner += serialize(children[i], at, depth + 1);
     }
   }

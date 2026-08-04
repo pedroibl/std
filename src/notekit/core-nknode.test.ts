@@ -298,3 +298,74 @@ test("a field whose value is neither string nor array is omitted rather than hal
 test("cardTree is deterministic — the same spec builds a deep-equal tree every call", () => {
   expect(cardTree(spec())).toEqual(cardTree(spec()));
 });
+
+// ── review round 3 — an inherited index is not an element, and a non-spec is not a card ──────────
+
+/**
+ * Run `body` with `Array.prototype[0]` poisoned, restoring it whichever way `body` ends. Every test
+ * below goes through this: a leaked poison would otherwise be inherited by every array in every
+ * suite that runs after, and the failure would surface somewhere unrelated.
+ */
+function withPoisonedArrayPrototype<T>(value: unknown, body: () => T): T {
+  const proto = Array.prototype as unknown as Record<number, unknown>;
+  proto[0] = value;
+  try {
+    return body();
+  } finally {
+    delete proto[0];
+  }
+}
+
+test("a hole in a list value stays a hole — an inherited Array.prototype index is not an element", () => {
+  // `i in values` answered TRUE for the inherited index and lowered "POISONED" into an <li>. The
+  // list has one hole and no own elements, so the correct tree is an EMPTY <ul>.
+  const tree = withPoisonedArrayPrototype("POISONED", () =>
+    cardTree({
+      ...spec(),
+      fields: [{ key: "tags", label: "Tags", value: new Array(1) as unknown as string[] }],
+    }),
+  );
+  expect(JSON.stringify(tree)).not.toContain("POISONED");
+  const list = tree.children?.[1]?.children?.[0]?.children?.[1];
+  expect(list?.class).toBe("nk-field-values");
+  expect(list?.children).toEqual([]);
+});
+
+test("a hole in `fields` stays a hole even when the inherited index is ROW-SHAPED", () => {
+  // The string pollutant above was caught here by accident — `fieldNode` rejects a non-object row, so
+  // the leak was invisible until the pollutant looked like a row. Same defect, one type away.
+  const row = { key: "k", label: "Poisoned Label", value: "POISONED" };
+  const tree = withPoisonedArrayPrototype(row, () =>
+    cardTree({ ...spec(), fields: new Array(1) as unknown as RenderSpec["fields"] }),
+  );
+  const json = JSON.stringify(tree);
+  expect(json).not.toContain("POISONED");
+  expect(json).not.toContain("Poisoned Label");
+  // No row survived, so the fields wrapper is omitted entirely.
+  expect(tree.children?.map((c) => c.class)).toEqual(["nk-card-title", "nk-card-meta"]);
+});
+
+test("a dense list is unaffected by a poisoned prototype — the fix costs nothing on real input", () => {
+  const build = () =>
+    cardTree({ ...spec(), fields: [{ key: "tags", label: "Tags", value: ["a", "", "c"] }] });
+  const poisoned = withPoisonedArrayPrototype("POISONED", build);
+  expect(poisoned).toEqual(build());
+});
+
+test("a non-object spec is rejected by name, never rendered as an empty card", () => {
+  // `null`/`undefined` used to die on a raw TypeError from inside a helper; `"str"`/`7` were worse —
+  // they returned a well-formed card built from garbage. All four now fail the same way, matching
+  // `validate`'s dispatch and `nkTreeToHtml`'s serialize.
+  for (const [input, described] of [
+    [null, "null"],
+    [undefined, "undefined"],
+    ["str", "string"],
+    [7, "number"],
+    [[], "an array"],
+    [true, "boolean"],
+  ] as const) {
+    expect(() => cardTree(input as unknown as RenderSpec)).toThrow(
+      `RenderSpec at spec: expected an object, got ${described}`,
+    );
+  }
+});

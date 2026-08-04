@@ -29,6 +29,13 @@
 // Story 1.1 shipped two ACs that were false for exactly this reason (a prototype-chain version name,
 // a sparse array serializing its hole to `null`), so every read below is own-property and
 // type-checked, and anything unusable is omitted rather than lowered into a broken node.
+//
+// The line runs between the SPEC and its FIELDS. Field-level junk degrades — a non-string value, a
+// hole, a missing title all yield no node, never a broken one. A `spec` that is not an object at all
+// is not degraded input, it is a caller who skipped `validate`, and it is rejected by name (see
+// `cardTree`). "Own-property" means `hasOwnProperty`, for INDICES as well as named keys: `i in arr`
+// answers true for a numeric property inherited from `Array.prototype`, so it re-opened the very
+// sparse-array hole it was written to close (see `ownIndex`).
 
 import type { RenderSpec } from "./core-renderspec";
 
@@ -79,6 +86,26 @@ function own(record: object, key: string): unknown {
 }
 
 /**
+ * Is index `i` an OWN element of `values` — the array counterpart of `own` above.
+ *
+ * `i in values` is NOT this check, and the difference is a live bug rather than a style point: `in`
+ * accepts numeric properties inherited from `Array.prototype`, so with `Array.prototype[0]` set, the
+ * HOLE in `["", , "c"]` answers `0 in values === true` and the inherited value is lowered into the
+ * tree as if the spec carried it. The hole guard was written to keep exactly that value out, and `in`
+ * was the idiom that let it back in. Own properties only, everywhere an index is read.
+ */
+function ownIndex(values: readonly unknown[], i: number): boolean {
+  return Object.prototype.hasOwnProperty.call(values, i);
+}
+
+/** A short, safe rendering of an unusable input for an error message (mirrors `core-renderspec`). */
+function describe(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  return typeof value;
+}
+
+/**
  * A string worth rendering in an IDENTITY slot — the title, a field's label, a meta value. Those
  * slots are bare scalars with no wrapper around them to say "present, but blank", so an empty one is
  * indistinguishable from an absent one; and `validate` already rejects empty for every one of them
@@ -124,11 +151,12 @@ function present(nodes: readonly (NkNode | undefined)[]): NkNode[] {
  * Indexed rather than `map`ped because `map` SKIPS holes and copies them into its result: a sparse
  * `["a", , "c"]` would emit a node whose text is `undefined`, which is precisely what the omit rule
  * forbids. A hole is a value that ISN'T there — the absent case — and so are non-string elements.
+ * The hole test is `ownIndex`, never `in` — see `ownIndex` for the leak `in` opened here.
  */
 function listNode(values: readonly unknown[]): NkNode {
   const items: NkNode[] = [];
   for (let i = 0; i < values.length; i++) {
-    if (!(i in values)) continue;
+    if (!ownIndex(values, i)) continue;
     const item = valueLeaf("li", "nk-field-value", values[i]);
     if (item !== undefined) items.push(item);
   }
@@ -162,7 +190,7 @@ function fieldNodes(fields: unknown): NkNode[] {
   if (!Array.isArray(fields)) return [];
   const rows: NkNode[] = [];
   for (let i = 0; i < fields.length; i++) {
-    if (!(i in fields)) continue;
+    if (!ownIndex(fields, i)) continue;
     const node = fieldNode(fields[i]);
     if (node !== undefined) rows.push(node);
   }
@@ -176,10 +204,29 @@ function metaNode(spec: object): NkNode | undefined {
 }
 
 /**
- * Lower a validated nk-card RenderSpec into the `nk-node` tree. Pure and total: the same spec always
- * yields the same tree, and no input shape produces a node carrying `undefined`.
+ * Lower a validated nk-card RenderSpec into the `nk-node` tree. Pure and deterministic: the same spec
+ * always yields the same tree, and no FIELD-level input shape produces a node carrying `undefined`.
+ *
+ * A non-object `spec` is the one input that is rejected rather than degraded, and the two functions on
+ * either side of this one in the pipeline both already do exactly that: `validate`'s `dispatch`
+ * (`core-renderspec.ts`) fails with `"RenderSpec must be an object, got null"`, and `serialize`
+ * (`core-html.ts`) fails with `"expected an object, got null"`. Neither normalizes, so neither does
+ * this — a third convention in one slice is worse than either one of them.
+ *
+ * Normalizing to an empty record was the alternative, and it is the wrong trade here: `null` and
+ * `undefined` already died on `hasOwnProperty` with a raw `TypeError` naming nothing, but `"str"` and
+ * `7` sailed through and returned `<div class="nk-card"></div>` — a well-formed card built from
+ * garbage, indistinguishable from a genuinely empty one. Silently rendering an empty card for input
+ * that was never a spec is the failure mode this slice fails loud to avoid; the caller skipped
+ * `validate`, and that is a caller bug worth naming, not a value worth degrading.
  */
 export function cardTree(spec: RenderSpec): NkNode {
+  // Reachable at runtime despite the type: `RenderSpec` is erased, and this is called from the CLI
+  // (Story 2.1) and later from notewright, where a JSON blob or a hand-built object really can arrive.
+  if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
+    throw new Error(`RenderSpec at spec: expected an object, got ${describe(spec)}`);
+  }
+
   const rows = fieldNodes(own(spec, "fields"));
   const fields: NkNode | undefined =
     rows.length === 0 ? undefined : { tag: "div", class: "nk-card-fields", children: rows };
