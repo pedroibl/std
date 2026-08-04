@@ -24,7 +24,9 @@
 // `tag` like `script`, or a cycle. Silently coercing those would emit broken — potentially
 // injectable — markup, or die with a `RangeError` naming nothing, so each one throws naming the
 // offending path. Two of those guards are about a tree the CALLER built rather than `cardTree`:
-// `NK_TAGS` (which tags may be emitted at all) and `MAX_DEPTH` (how far the walk will recurse).
+// `NK_TAGS` (which tags may be emitted at all) and `NK_MAX_DEPTH` (how far the walk will recurse).
+// Both are EXPORTED because they describe the TREE, not this serializer, and Story 1.3's DOM builder
+// enforces the same two — one owner, two serializers, no drift (NK-1.3).
 // This is the estate's re-throw doctrine (src/core/result.ts): a caller that wants a Result wraps it.
 
 import { escapeHtml } from "../core";
@@ -112,8 +114,14 @@ export const NK_TAGS: ReadonlySet<string> = new Set([
  * would only improve the message for that one input class, at the cost of allocating on every
  * serialize. It goes in when a caller actually deserializes untrusted trees and needs to tell an
  * honest deep tree from a loop (D2 — not on speculation).
+ *
+ * EXPORTED (Story 1.3, additive — no behaviour change) for the same reason `NK_TAGS` is: the bound is
+ * a property of what an `nk-node` TREE may contain, not of this one serializer, and Story 1.3's
+ * `nk-node → DOM` builder needs the identical bound. Two copies of `64` in two files is precisely the
+ * drift that ends the single-owner property (NK-1.3): the DOM path would keep walking a tree the HTML
+ * path had already refused, and preview ≠ vault. One owner, both serializers import it.
  */
-const MAX_DEPTH = 64;
+export const NK_MAX_DEPTH = 64;
 
 /** Read a property as DATA — own properties only, so no inherited name can masquerade as a field. */
 function own(record: object, key: string): unknown {
@@ -139,8 +147,8 @@ function optionalString(node: object, key: string, path: string): string | undef
  * malformed node reports WHERE it is rather than just that something was wrong.
  */
 function serialize(node: unknown, path: string, depth: number): string {
-  if (depth > MAX_DEPTH) {
-    fail(path, `nesting exceeds the ${MAX_DEPTH}-level limit — a deeper tree, or a cycle`);
+  if (depth > NK_MAX_DEPTH) {
+    fail(path, `nesting exceeds the ${NK_MAX_DEPTH}-level limit — a deeper tree, or a cycle`);
   }
   if (typeof node !== "object" || node === null || Array.isArray(node)) {
     fail(path, `expected an object, got ${node === null ? "null" : typeof node}`);

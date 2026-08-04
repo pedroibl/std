@@ -1,0 +1,11 @@
+{
+  "extends": "../../../tsconfig.json",
+  "//": "The other half of the src/notekit/edge/ typecheck. tsconfig.json covers the DEPLOYED edge with types: [] so a stray Bun/node global is a compile error; that same barrier makes `bun:test` unresolvable. Test files are never bundled into the vault, so they keep Bun's types — and get DOM, because they assert against DOM-typed signatures and install a hand-rolled document stub on globalThis (⚠️-2: no happy-dom, no jsdom, devDeps stay {@types/bun, typescript, yaml}). Both configs run under `bun run typecheck:notekit`. COVERAGE, stated precisely: every .ts under src/notekit/edge/ is checked by AT LEAST ONE config, and every NON-TEST .ts is checked by the `types: []` config.",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM"],
+    "types": ["bun"]
+  },
+  "include": ["**/*.test.ts"],
+  "//exclude": "Same inherited-exclude trap as the sibling config — root's exclude list names src/notekit/edge/** and would otherwise leave zero input files.",
+  "exclude": []
+}
