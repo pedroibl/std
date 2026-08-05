@@ -177,6 +177,27 @@ function countOf(text: string, needle: string): number {
 }
 
 /**
+ * The apply body's ordered `1.` / `2.` / `3.` steps, each returned as one lowercased whitespace-collapsed
+ * string with its continuation lines folded in.
+ *
+ * ⚠ WHY THIS EXISTS RATHER THAN A WHOLE-FILE `toContain`. The two-step's claim is POSITIONAL — preview,
+ * then showing, then write — and a phrase scan over the whole body cannot see position. Measured: a
+ * mutation that deleted the showing obligation from the step list left a whole-file `/in front of the
+ * human/` assertion GREEN, matched by an unrelated closing paragraph. Continuation lines are folded
+ * because these steps wrap, and a step read as its first line only would drop half its own text.
+ */
+function orderedSteps(text: string): string[] {
+  const steps: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\d+\.\s/.test(line)) steps.push(line);
+    else if (steps.length > 0 && /^\s+\S/.test(line)) steps[steps.length - 1] += ` ${line.trim()}`;
+    else if (line.trim() === "") continue;
+    else if (steps.length > 0) break;   // the list ended; stop before unrelated prose folds in
+  }
+  return steps.map((s) => s.toLowerCase().replace(/\s+/g, " "));
+}
+
+/**
  * The gate field's value as the frontmatter parser actually returns it.
  *
  * ⚠ `parseFrontmatter` RETURNS `Record<string, string | string[]>` AND NEVER A BOOLEAN (`src/core/
@@ -902,9 +923,118 @@ describe("apply gate (d) — the split IS the gate, and the gated body handles a
     expect(shell.some((l) => l.includes(`notekit render`) && l.includes(APPLY_FLAG))).toBe(true);
   });
 
-  test("AC #5 — the apply body states that a preview must already have been seen (NK-4 rule 3)", () => {
-    expect(applyText.toLowerCase()).toContain("preview");
-    expect(applyText.toLowerCase()).toMatch(/must already have been seen|preview must/);
+  // ── the two-step (NK-4 rule 3), replacing the inherited-evidence precondition ──────────────────
+  //
+  // 🔴 WHAT THIS REPLACED, AND WHY THE OLD ASSERTION HAD TO GO. Until 2026-08-06 this position held:
+  //
+  //     test("AC #5 — the apply body states that a preview must already have been seen (NK-4 rule 3)")
+  //       expect(applyText.toLowerCase()).toContain("preview");
+  //       expect(applyText.toLowerCase()).toMatch(/must already have been seen|preview must/);
+  //
+  // It certified a body clause requiring EVIDENCE THAT A HUMAN HAD ALREADY PREVIEWED THE NOTE, and the
+  // body forbade the agent from re-deriving that preview itself. `context: fork` means the surface
+  // inherits nothing — no prior turns, no parent transcript — so that evidence can never be in hand and
+  // the precondition was unsatisfiable BY CONSTRUCTION, for the human path too. Measured end to end:
+  // three forked runs, zero write-class tool calls, and both apply runs made ZERO tool calls — they
+  // stopped on this clause every time, including one resumed onto the very session that had just
+  // displayed the preview. The headline verb had never executed. Leaving the old assertion beside the
+  // new ones would certify a body as satisfying both halves of a contradiction, which is worse than
+  // having no gate here at all — so it is DELETED, not weakened, and quoted above so its removal is
+  // legible rather than silent.
+  //
+  // ⚠ THE INTENT IS DELIBERATELY WEAKER NOW, and these assertions must never be read as the old claim.
+  // NK-4 rule 3 asks that the write be "preceded by the same preview" — which the in-run two-step
+  // satisfies exactly. What is NOT claimed is that a human read it. That trade is ruled, not accidental,
+  // and the body is asserted below to say so in those terms.
+
+  test("AC #5/#6 — the apply body renders READ-ONLY first and SHOWS the diff, before the write", () => {
+    // ⚠ ORDER IS THE CLAIM, so this is positional and not a pair of `toContain`s: a body naming both
+    // commands in the wrong order describes preview-after-write, which is not a preview at all.
+    const shell = applyText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("std "));
+    const readOnly = shell.findIndex((l) => l.includes("notekit render") && !l.includes(APPLY_FLAG));
+    const write = shell.findIndex((l) => l.includes("notekit render") && l.includes(APPLY_FLAG));
+    expect(readOnly).toBeGreaterThan(-1);   // the preview render exists at all…
+    expect(write).toBeGreaterThan(-1);      // …and so does the write…
+    expect(readOnly).toBeLessThan(write);   // …and the preview is FIRST.
+
+    // Showing it is a separate obligation from running it: a render whose diff is never put in front of
+    // the human produces evidence nobody sees, which is the old defect wearing a new command.
+    //
+    // ⚠ SCOPED TO THE ORDERED STEPS, NOT TO THE WHOLE BODY, and the reason is a mutation that did NOT
+    // bite. A first draft asserted `/show it|in front of the human/` over the entire file; deleting the
+    // showing obligation from the step list left the test GREEN, because the closing "puts four things in
+    // front of the human" paragraph satisfied the regex from a hundred lines away. A whole-file scan for
+    // a phrase cannot tell WHERE the obligation is, and here the position is the claim. So the steps are
+    // extracted and each is asserted on its own.
+    const steps = orderedSteps(applyText);
+    expect(steps.length).toBe(3);
+    expect(steps[0]!).toMatch(/read-only/);                       // step 1 is the preview…
+    expect(steps[1]!).toMatch(/show/);                            // …step 2 puts it in front of a human…
+    expect(steps[1]!).toMatch(/in front of the human/);
+    expect(steps[1]!).toMatch(/diff/);                            // …and what it shows is the DIFF…
+    expect(steps[2]!).toMatch(/write/);                           // …step 3 writes.
+    expect(steps[2]!).toMatch(/apply flag|--apply/);
+  });
+
+  test("AC #5/#6 — the body states the WEAKENED intent instead of claiming a human read it", () => {
+    // The trade is written down so the next reader does not rediscover it as a defect and "fix" it back
+    // into an unsatisfiable precondition.
+    const lower = applyText.toLowerCase().replace(/\s+/g, " ");
+    expect(lower).toMatch(/rendered and shown/);
+    expect(lower).toMatch(/deliberate trade|not an oversight/);
+    // …and the retired claim is NOT still asserted anywhere in the body.
+    expect(lower).not.toMatch(/must already have been seen/);
+  });
+
+  test("AC #5/#6 — a failed preview STOPS the run and explicitly forbids a retry", () => {
+    // 🔴 THE TRAP THIS EXISTS TO CLOSE. Research probe `E3` watched a fork rewrite a failing command and
+    // retry until the write succeeded. A two-step whose first step may be retried is a loop that ends in
+    // a write no preview ever covered — the old defect inverted. Preview → show → write, once.
+    const lower = applyText.toLowerCase().replace(/\s+/g, " ");
+    expect(lower).toMatch(/not a licence to write|failed preview/);
+    expect(lower).toMatch(/do not re-run/);
+    expect(lower).toMatch(/different flag|different path|different config/);
+    expect(lower).toMatch(/once each|one read-only render, one showing, one write/);
+    // A fenceless note is the same stop with a reason, and it must not become a creation path.
+    expect(applyText).toContain("nk-no-fence");
+    expect(lower).toMatch(/do not create a fence/);
+  });
+
+  // ── COUNTERFACTUAL 6 ──
+  test("COUNTERFACTUAL 6 — a body whose write precedes its read-only render is caught", () => {
+    // Built by SWAPPING the two live render lines rather than by hand-writing a fake body: a mutant
+    // typed from scratch can pass vacuously when it happens to equal the original. Asserted non-equal
+    // before it is used, so a future edit that made the swap a no-op reddens here instead of hiding.
+    const lines = applyText.split(/\r?\n/);
+    const ro = lines.findIndex((l) => l.trim().startsWith("std ") && l.includes("notekit render") && !l.includes(APPLY_FLAG));
+    const wr = lines.findIndex((l) => l.trim().startsWith("std ") && l.includes("notekit render") && l.includes(APPLY_FLAG));
+    expect(ro).toBeGreaterThan(-1);
+    expect(wr).toBeGreaterThan(ro);
+    const swapped = [...lines];
+    [swapped[ro], swapped[wr]] = [swapped[wr]!, swapped[ro]!];
+    const mutated = swapped.join("\n");
+    expect(mutated).not.toBe(applyText);   // the mutation is REAL, not a vacuous copy
+
+    const order = (text: string) => {
+      const shell = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("std "));
+      return [
+        shell.findIndex((l) => l.includes("notekit render") && !l.includes(APPLY_FLAG)),
+        shell.findIndex((l) => l.includes("notekit render") && l.includes(APPLY_FLAG)),
+      ];
+    };
+    const [mRo, mWr] = order(mutated);
+    expect(mRo).toBeGreaterThan(mWr!);     // the mutant fails the order claim…
+    const [lRo, lWr] = order(applyText);
+    expect(lRo).toBeLessThan(lWr!);        // …and the live file still passes it
+  });
+
+  test("COUNTERFACTUAL 6b — a body that drops the retry ban is caught", () => {
+    // Deletion, not substitution: the mutant is the live text with the ban's sentence removed, so it
+    // cannot equal the original unless the ban was never there — which the non-equality assertion says.
+    const mutated = applyText.replace(/\*\*do not re-run[^*]*\*\*/i, "");
+    expect(mutated).not.toBe(applyText);
+    expect(mutated.toLowerCase().replace(/\s+/g, " ")).not.toMatch(/do not re-run/);
+    expect(applyText.toLowerCase().replace(/\s+/g, " ")).toMatch(/do not re-run/);
   });
 
   test("AC #4 — the agent body carries a transform contract fixing all four points", () => {

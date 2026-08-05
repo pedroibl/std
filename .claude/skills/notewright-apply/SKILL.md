@@ -52,31 +52,60 @@ declares a different set of types renders the note wrongly while looking entirel
 surface that is not a wrong preview — it is a wrong write. A missing path stops the run; there is no
 fallback.
 
-## A preview must already have been seen
+## The preview is the first half of THIS run — you do not inherit one
 
-The write is the second half of a two-step the human began. They previewed this note, they read the
-proposed fenced diff, and they typed this command because that diff was what they wanted. If you have
-no evidence that preview happened — the invocation arrived with no preview behind it, or the note is
-not the one that was previewed — say so and stop. Re-deriving the preview yourself and calling that
-"seen" is not the same thing.
+You inherit nothing. This body and the two paths above are everything that reached you, so a preview
+displayed in some other window is not something you can see, and asking whether one happened has no
+answer available to you. The preview is therefore produced here, by this run, before anything is
+written.
+
+Three steps, in this order, **once each**:
+
+1. **Render read-only** — the same render, without the apply flag. That is the preview.
+2. **Show it** — put the fenced diff that run returned in front of the human as its own block, the
+   tool's bytes rather than a summary of them.
+3. **Then write** — the same render with the apply flag.
+
+**What this buys, and what it does not.** The intent this replaces was *"a human read the preview and
+typed this command because that diff was what they wanted"*. What the three steps establish is weaker
+and is stated so nobody mistakes it for the stronger claim: **the preview was rendered and shown**. A
+human's reading of it is not in this loop. Their authority came from typing the command at all, and it
+is the frontmatter gate and the committed deny rule — not this section — that keep the typing a human's.
+The weaker property is a deliberate trade, not an oversight, and it is the whole of what this section
+claims.
+
+**A failed preview is not a licence to write.** If step 1 exits non-zero, the run ends at step 1: report
+the code and the message and stop. Do not run the write "to see what happens", and — this is the
+specific failure to avoid — **do not re-run the preview with a different flag, a different path or a
+different config in the hope of one that succeeds.** One read-only render, one showing, one write. A
+step that fails ends the run; it does not open a search for a spelling that works.
+
+`nk-no-fence` on the read-only run is that same stop with a named reason: the note opted in and holds no
+fence for a write to land in, so there is no region `--apply` could legally touch. Report the gap and
+stop. Do not create a fence and do not go on to the write.
 
 ## What a finished run looks like
 
-Read the note-type catalog first, then apply. The catalog is the only authority on which types exist —
-never restate a list of type names, because the registry is generated and a copy goes stale:
+Read the note-type catalog first, then preview, then apply. The catalog is the only authority on which
+types exist — never restate a list of type names, because the registry is generated and a copy goes
+stale:
 
 ```bash
 std notekit capabilities --config $1 --json
+std notekit render $0 --config $1 --json
 std notekit render $0 --config $1 --apply --json
 ```
 
-The second command is the write. It replaces only the fenced region and leaves every other byte of the
-note identical — that is a property of the tool's code path, not of your care, which is why the write is
-safe to authorize at all. You add no other command, and you edit no file yourself.
+The second command is the read-only preview and writes nothing. The third is the write: it replaces only
+the fenced region and leaves every other byte of the note identical — that is a property of the tool's
+code path, not of your care, which is why the write is safe to authorize at all. You add no other
+command, you run no fourth attempt, and you edit no file yourself.
 
-A finished run puts three things in front of the human: the exact fenced diff the tool applied, the
-tool's own confirmation that the bytes landed, and — when the tool refused — the refusal's code and
-message quoted verbatim. A run that reports success without the tool having said so is not finished.
+A finished run puts four things in front of the human: the fenced diff the read-only run proposed, shown
+before the write went out; the exact fenced diff the tool applied; the tool's own confirmation that the
+bytes landed; and — when the tool refused — the refusal's code and message quoted verbatim. A run that
+reports success without the tool having said so is not finished, and a run that shows an applied diff
+without having first shown the proposed one skipped its own first half.
 
 ## When the tool refuses
 
