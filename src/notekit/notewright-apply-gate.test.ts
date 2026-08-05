@@ -1,12 +1,33 @@
-// The structural apply gate for Story 2.4 (FR-9, FR-10, SM-8, NK-4 rule 4).
+// The structural apply gate for Story 2.4 (FR-9, FR-10, SM-8, NK-4 rule 4 as amended, NK-10).
 //
 // WHAT THIS GATE PROVES, AND WHAT IT DOES NOT. It proves the gated apply surface is authored with the
 // field the harness reads, that the field is still spelled the way the INSTALLED harness spells it, that
-// the file is visible to the harness at all, and that the preview path leaves a fixture byte-identical
-// while the apply path does not. It does NOT prove the harness HONOURS the gate: `bun test` runs under
-// `bun`, not under Claude Code, so no test here can observe an invocation decision. That claim is the
-// manual step recorded in the story's Debug Log (Task 4). A gate that greps a markdown file and calls the
-// result "the model cannot reach this" would be the vacuity this loop exists to catch.
+// the file is visible to the harness at all, that the committed deny rule naming that surface exists and
+// still parses as a live rule, and that the preview path leaves a fixture byte-identical while the apply
+// path does not. It does NOT prove the harness HONOURS either mechanism at invocation time: `bun test`
+// runs under `bun`, not under Claude Code, so no test here can observe an invocation decision. That
+// behavioural bite was watched ONCE, on the real surface (`REAL-2` blocked the shipped surface under the
+// deny with a valid token present; `T3`, deny removed and everything else identical, executed and wrote
+// its marker) and is CITED here rather than re-run — a nested `claude -p` inside `bun test` would be
+// slow, networked and non-hermetic. A gate that greps a markdown file and calls the result "the model
+// cannot reach this" would be the vacuity this loop exists to catch.
+//
+// 🔴 THE GATE IS TWO MECHANISMS, AND THE CLAIM IS TWO LAYERS (NK-10 rule 1). AUTHORIZATION: the apply
+// surface is unreachable by the `Skill` tool from any subagent unconditionally, and unreachable from the
+// main session while the committed `permissions.deny` rule `Skill(notewright-apply)` is in force.
+// `disable-model-invocation: true` ALONE blocks every model-initiated call EXCEPT within a turn whose own
+// user-message TEXT carries the literal whitespace-delimited token `/notewright-apply`. CONTAINMENT is a
+// different property with a different owner: prose safety under an agent that holds `Bash` and types the
+// CLI command directly is NK-4 rules 1–2's fence-bounded writer, true for EVERY caller, and it was never
+// this gate's job. The phrase "structurally unreachable by the model", said of the frontmatter field
+// alone, is retired — it was the platform's own schema description, and the description overstates the
+// implementation in the UNSAFE direction.
+//
+// ⚠ WHAT NO GATE HERE WATCHES. Gates (b) and (g) watch STRINGS; the carve-out is LOGIC. A harness bump
+// that changed the `userTypedThisTurn` predicate's SHAPE — widening it to assistant text, say — would
+// leave every assertion in this file green while the claim quietly stopped holding. FR-10's assumption is
+// therefore discharged AS TO THE NAMES and merely MONITORED as to the behaviour. Re-run the `REAL-1` /
+// `REAL-2` probes on any material harness bump.
 //
 // 🔴 THE FAILURE THIS GUARDS AGAINST FAILS **OPEN**, WHICH IS WHY GATE (b) IS NOT OPTIONAL. Re-derived
 // from the installed 2.1.222 bundle: the `.strict()` frontmatter schemas have exactly ONE consumer,
@@ -53,7 +74,7 @@
 // long-term home — a shared non-test module owning the probe — needs a story whose scope allows one.
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseFrontmatter } from "../core";
@@ -106,6 +127,26 @@ const NON_CODE_TOKENS = ["nk-type", "nk-v1", "nk-cap-v1", "nk-card"];
 
 /** The apply flag, split so this file's own lists cannot trip a future whole-tree scan (2.3's idiom). */
 const APPLY_FLAG = "--" + "apply";
+
+// ── the SECOND mechanism (NK-10): the committed permission boundary ──────────────────────────────
+// The frontmatter field is HALF the gate. `disable-model-invocation: true` alone blocks every
+// model-initiated call EXCEPT within a turn whose own user-message TEXT carries the literal
+// whitespace-delimited token `/notewright-apply` — assistant text, prior turns and all tool output cannot
+// open it, but documentation prose in a human's message can, and on 2026-08-06 it did. The committed deny
+// rule closes that carve-out: it beats the token, holds under `bypassPermissions`, is NOT trust-gated, and
+// leaves the human slash path working.
+const SETTINGS = join(REPO, ".claude", "settings.json");
+
+/** The exact deny entry. ⚠ A WHOLE LITERAL, never a `notewright-apply` substring sweep — that would go
+ *  green on a comment, on an `allow` entry, or on the bare tool name, none of which is the rule. */
+const DENY_ENTRY = "Skill(notewright-apply)";
+
+/**
+ * Gate (g)'s two upstream anchors: the refusal string the harness prints when a permission rule blocks a
+ * skill, and the reason token it attributes to the frontmatter field. ⚠ PRESENCE, NEVER THE COUNTS —
+ * both stood at 3 occurrences at 2.1.222 and occurrence counts churn on every build.
+ */
+const DENY_ANCHORS = ["Skill execution blocked by permission rules", "disable_model_invocation"];
 
 // ── pure functions: every gate is one, so every gate has a watched counterfactual ────────────────
 
@@ -186,6 +227,25 @@ function fingerprint(dir: string): Fingerprint {
   return { listing, bytes, mtime };
 }
 
+/**
+ * The installed harness binary, or `null` when `claude` is not on PATH.
+ *
+ * ⚠ MODULE SCOPE ON PURPOSE. Gates (b) and (g) both need it and both hang their SKIP on it, so it has one
+ * definition. It was gate (b)'s local helper until gate (g) shipped; hoisting it moved no behaviour, and
+ * a second copy would have let the two gates' SKIP conditions drift apart — the drift being that one gate
+ * starts skipping in a situation where the other still runs, which is invisible until it matters.
+ */
+function resolveBinary(): string | null {
+  const which = Bun.spawnSync({ cmd: ["which", "claude"], stdout: "pipe", stderr: "pipe" });
+  const path = which.stdout.toString().trim();
+  if (which.exitCode !== 0 || path.length === 0) return null;
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
 /** A cold `std` subprocess through THIS checkout. */
 function runCli(args: string[]): { exitCode: number; stdout: string; stderr: string } {
   const proc = Bun.spawnSync({
@@ -199,6 +259,140 @@ function runCli(args: string[]): { exitCode: number; stdout: string; stderr: str
     stdout: proc.stdout.toString(),
     stderr: proc.stderr.toString(),
   };
+}
+
+/**
+ * Gate (g)'s liveness step, factored as a pure function so the counterfactual has a seam.
+ *
+ * ⚠ THIS IS NOT `probeKeySpelling` WEARING A HAT, and it is not a second copy of it. That probe answers a
+ * DIFFERENT question — "does this JSON schema key literal sit within 200 chars before its own prose
+ * description", a key-adjacency claim about one line of a bundled schema. These anchors are free strings
+ * scattered through a 100MB binary with no key, no adjacency and no window; forcing them through the
+ * key-adjacency regex would ask `[,{]"Skill execution blocked by permission rules"?:`, which is nonsense
+ * and would answer `false` on a perfectly healthy harness. Different claim, different probe. The rule
+ * ⚠️-1 states is "one owner per claim", not "one function per file".
+ */
+function probeAnchorsPresent(haystack: string, anchors: string[]): boolean {
+  return anchors.every((a) => haystack.includes(a));
+}
+
+/** `.claude/settings.json`, parsed. ⚠ NO `try{}catch{}`: an unparseable settings file is a DEAD deny rule,
+ *  so downgrading the throw to a soft warning is the one thing this gate must never do. */
+function readSettings(): { permissions?: { deny?: unknown; allow?: unknown } } {
+  return JSON.parse(readFileSync(SETTINGS, "utf8"));
+}
+
+/** The deny array as an array of strings, or `[]` if the shape is wrong (which the assertions then catch). */
+function denyRules(): string[] {
+  const deny = readSettings().permissions?.deny;
+  return Array.isArray(deny) ? deny.filter((r): r is string => typeof r === "string") : [];
+}
+
+/** A skill surface on disk: its directory name, its declared `name:`, and its text. */
+type Surface = { dir: string; name: string; text: string; writeClass: boolean };
+
+/**
+ * Every skill surface in the repo, each classified write-class or not.
+ *
+ * ⚠ THIS ENUMERATES RATHER THAN CHECKING ONE LITERAL, because NK-10 rule 6 binds *every* write-class
+ * surface — `render --apply` today, `--body -` (NK-8 r6) and `notekit new` (NK-9 r5) the moment either
+ * gains its own skill. A gate that asserted only `Skill(notewright-apply)` would stay green through the
+ * arrival of a second, ungated write surface, which is precisely the regression rule 6 exists to prevent.
+ * Write-class is read off the surface itself — it names the apply flag — so a new one is classified the
+ * day it is authored, with nobody remembering to add it to a list here.
+ */
+function skillSurfaces(): Surface[] {
+  const root = join(REPO, ".claude", "skills");
+  return readdirSync(root).map((dir) => {
+    const text = readFileSync(join(root, dir, "SKILL.md"), "utf8");
+    const name = parseFrontmatter(text).name;
+    return {
+      dir,
+      name: typeof name === "string" ? name : "",
+      text,
+      writeClass: countOf(text, APPLY_FLAG) > 0,
+    };
+  });
+}
+
+/** One `Invalid permission rule "<rule>" was skipped` line, as the harness's own parser reports it. */
+type DoctorVerdict = { ran: boolean; skipped: string[]; raw: string };
+
+/**
+ * Wall-clock allowance for one `claude doctor` spawn.
+ *
+ * ⚠ NOT A GUESS, AND NOT A FLAKE PATCH. `bun test`'s default per-test timeout is 5s, and when it fires it
+ * SIGTERMs the whole process group — so the spawned `doctor` came back `exit 143` with empty output and
+ * the assertion failed for a reason that had nothing to do with the rule. Measured 2026-08-06: the spawn
+ * takes ~0.7-1.5s idle and crosses 5s under full-suite load. The allowance buys wall-clock only; every
+ * assertion below is unchanged, and a doctor run that genuinely produces no output is still RED.
+ */
+const DOCTOR_TIMEOUT_MS = 60_000;
+
+/**
+ * Gate (g)'s BEHAVIOURAL step: hand a settings file to the harness's OWN permission-rule parser and read
+ * back which rules it threw away.
+ *
+ * `claude doctor` is documented as reading the settings files in the current directory without a trust
+ * prompt, and it prints an `Invalid settings` block naming each rule it skipped and why. That makes it a
+ * real behavioural probe rather than a string sighting: it answers "does THIS harness still turn OUR exact
+ * rule text into a live rule", which a `strings` scan cannot.
+ *
+ * ⚠ WHAT IT DOES **NOT** ANSWER, measured rather than assumed (2026-08-06, 2.1.222). The parser is
+ * SYNTACTIC. `Fnord(notewright-apply)` is accepted exactly as `Skill(notewright-apply)` is; only shape
+ * errors are rejected (`Skill()` → empty parentheses; `notewright-apply` → tool names must start
+ * uppercase). So this probe catches a harness that changes rule SYNTAX under us — our string silently
+ * becoming an unparseable rule that is dropped on the floor — and it does NOT catch a harness that keeps
+ * parsing `Skill(…)` while ceasing to ENFORCE it. That second failure is what the string anchors watch,
+ * and neither watches a change to the enforcement PREDICATE's shape. Stated, not blurred.
+ *
+ * ⚠ HERMETIC BY CONSTRUCTION: `CLAUDE_CONFIG_DIR` is redirected into the throwaway dir, so the run reads
+ * and writes nothing under the operator's real `~/.claude`; the auto-updater and telemetry are off. Two
+ * runs cost ~1.5s total. Verified: the only files it created were inside the redirected config dir.
+ */
+function doctorVerdict(bin: string, settingsJson: string): DoctorVerdict {
+  const dir = mkdtempSync(join(tmpdir(), "nk-doctor-"));
+  try {
+    mkdirSync(join(dir, ".claude"), { recursive: true });
+    writeFileSync(join(dir, ".claude", "settings.json"), settingsJson);
+    const proc = Bun.spawnSync({
+      cmd: [bin, "doctor"],
+      cwd: dir,
+      stdout: "pipe",
+      stderr: "pipe",
+      // ⚠ AN EXPLICIT MINIMAL ENV, NEVER `{...process.env}`. Bun runs every test file in ONE process, so
+      // a `process.env` spread inherits whatever an earlier file mutated — measured: with the spread,
+      // these three assertions passed when this file ran alone and failed under the full suite, because
+      // some earlier file's env reached the subprocess. An inherited environment is not a hermetic probe;
+      // it is a probe of whatever ran before it.
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        CLAUDE_CONFIG_DIR: join(dir, "config"),
+        DISABLE_AUTOUPDATER: "1",
+        DISABLE_TELEMETRY: "1",
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      },
+    });
+    const raw = proc.stdout.toString() + proc.stderr.toString();
+    if (!raw.includes("Claude Code doctor")) {
+      // 🔴 A PRESENT BINARY WHOSE PROBE CANNOT RUN IS RED, NOT SKIP — and it is red WITH THE OUTPUT, so
+      // the next reader diagnoses it instead of guessing. Reporting "no rules were skipped" from a
+      // command that never started is the exact green-by-construction failure this gate exists to avoid.
+      throw new Error(
+        `[apply-gate g] \`claude doctor\` produced no recognizable output (exit ${proc.exitCode}). ` +
+          `This is RED, not a skip: the harness is installed and the probe could not read it. Raw:\n` +
+          raw.slice(0, 2000),
+      );
+    }
+    return {
+      ran: true,
+      skipped: [...raw.matchAll(/Invalid permission rule "([^"]*)" was skipped/g)].map((m) => m[1]!),
+      raw,
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // ═══ GATE (a) — field presence + referential integrity ════════════════════════════════════════════
@@ -325,22 +519,105 @@ describe("apply gate (c) — neither authored path is gitignored", () => {
   });
 });
 
+// ═══ GATE (f) — the deny rule is present, well-formed, and COMMITTED ══════════════════════════════
+// The second of the two mechanisms (NK-10 rules 2 + 4). Needs no binary, so it runs unconditionally
+// beside (a) and (c). A deleted config line is a SILENT regression: every other gate in this file stays
+// green while the carve-out reopens.
+
+describe("apply gate (f) — the committed permission boundary exists and names the surface", () => {
+  const spawnGit = (args: string[]): number =>
+    Bun.spawnSync({ cmd: ["git", ...args], cwd: REPO, stdout: "pipe", stderr: "pipe" }).exitCode;
+
+  test("AC #3f — the settings file parses as JSON and its deny array carries the exact entry", () => {
+    // ⚠ NO `try{}catch{}` AROUND THE PARSE. An unparseable settings file is a dead deny rule; a gate that
+    // downgraded that to a warning would report the boundary healthy at exactly the moment it was gone.
+    const deny = readSettings().permissions?.deny;
+    expect(Array.isArray(deny)).toBe(true);
+    // ⚠ THE WHOLE LITERAL. A `rg 'notewright-apply'` sweep over the file goes green on a comment, on an
+    // `allow` entry, or on the bare tool name `Skill` — none of which is the rule.
+    expect(deny as string[]).toContain(DENY_ENTRY);
+  });
+
+  test("AC #3f — NEVER `deny: [\"Skill\"]`: the bare tool name is not the rule (NK-10 rule 3)", () => {
+    // Denying the tool outright removes the CAPABILITY, not the INTENT: probe `A4` watched the model
+    // lose the Skill tool, locate the SKILL.md with `Bash`, read it, and start running the body's command
+    // by hand. The named surface is what gets denied.
+    expect(denyRules()).not.toContain("Skill");
+    expect(denyRules().every((r) => r !== "Skill()" && r !== "Skill(*)")).toBe(true);
+  });
+
+  test("AC #3f — the file holds ONLY the deny block", () => {
+    // Project-level `allow` is trust-dialog-gated and silently ignored in an untrusted workspace, while
+    // `deny` is NOT trust-gated (`T2`/`T3`) — which is the whole reason this primitive carries into every
+    // clone with no setup step. Parking an inert list beside a load-bearing one invites the reader to
+    // assume both are live.
+    const settings = readSettings();
+    expect(Object.keys(settings)).toEqual(["permissions"]);
+    expect(Object.keys(settings.permissions ?? {})).toEqual(["deny"]);
+    expect(Object.hasOwn(settings.permissions ?? {}, "allow")).toBe(false);
+  });
+
+  test("AC #3f — it is NOT gitignored, and the file `.gitignore` DOES name is a different file", () => {
+    // `.gitignore` ignores `.claude/settings.local.json`. Writing the rule THERE would be gitignored,
+    // uncommitted and invisible to every clone — an ignored permission boundary is no boundary at all.
+    expect(spawnGit(["check-ignore", "-v", ".claude/settings.json"])).not.toBe(0);
+    expect(spawnGit(["check-ignore", "-v", ".claude/settings.local.json"])).toBe(0);
+  });
+
+  test("AC #3f — it is git-TRACKED: present-on-disk is not the claim, committed is", () => {
+    // 🔴 A surface whose deny entry lands in a later commit is an incomplete surface for the length of
+    // that gap (NK-10 rule 6), and a file that is never `git add`ed reaches no clone at all. This
+    // assertion is RED until the file is committed, and that is the correct reading of an uncommitted
+    // boundary — not a reason to relax it to "exists on disk".
+    //
+    // The probe is not a constant, asserted first so a red below reads as "this file is untracked" and
+    // never as "`ls-files` always fails here": a path the repo genuinely tracks comes back 0.
+    expect(spawnGit(["ls-files", "--error-unmatch", ".claude/skills/notewright-apply/SKILL.md"])).toBe(0);
+    expect(spawnGit(["ls-files", "--error-unmatch", ".claude/settings.json"])).toBe(0);
+  });
+
+  test("NK-10 rule 6 — EVERY write-class skill surface carries BOTH mechanisms", () => {
+    // ⚠ AN ENUMERATION, NOT A SINGLE LITERAL. Rule 6 binds the surfaces that do not exist yet — `--body -`
+    // (NK-8 r6) and `notekit new` (NK-9 r5) each acquire the frontmatter field AND a matching deny entry
+    // the moment they gain a skill. A gate checking only today's one entry would stay green through the
+    // arrival of a second, ungated write surface.
+    const surfaces = skillSurfaces();
+    const writeClass = surfaces.filter((s) => s.writeClass);
+    expect(writeClass.length).toBeGreaterThanOrEqual(1);   // never zero: that would mean nothing to gate
+    for (const s of writeClass) {
+      expect(isGated(s.text)).toBe(true);                       // mechanism 1: the frontmatter field
+      expect(denyRules()).toContain(`Skill(${s.name})`);        // mechanism 2: the committed deny entry
+      expect(s.name).toBe(s.dir);   // …and the entry names the surface the harness will resolve
+    }
+    // …and the read-only preview surface is deliberately NOT denied: FR-10 keeps it model-invocable.
+    for (const s of surfaces.filter((x) => !x.writeClass)) {
+      expect(denyRules()).not.toContain(`Skill(${s.name})`);
+    }
+    // Today that partition is 1 write-class + 1 preview. Pinned so a surface appearing without a
+    // classification is visible rather than absorbed.
+    expect(surfaces.length).toBe(2);
+    expect(writeClass.map((s) => s.name)).toEqual(["notewright-apply"]);
+  });
+
+  // ── COUNTERFACTUAL 6 (in-test half; the file-level plant is in the Debug Log) ──
+  test("COUNTERFACTUAL 6 — an emptied or misspelled deny array is caught", () => {
+    // ⚠ The load-bearing half of this counterfactual is planted BY EDITING THE FILE, because the claim is
+    // about a committed config line being deleted and a mocked reader would prove the mock works. This
+    // in-test half pins the predicate itself so the plant has something to be a plant OF.
+    const pristine = readFileSync(SETTINGS, "utf8");
+    for (const mutant of ['{"permissions":{"deny":[]}}', '{"permissions":{"deny":["Skill(notewright-aply)"]}}']) {
+      expect(mutant).not.toBe(pristine);
+      const deny = (JSON.parse(mutant) as { permissions: { deny: string[] } }).permissions.deny;
+      expect(deny).not.toContain(DENY_ENTRY);
+    }
+    expect(denyRules()).toContain(DENY_ENTRY);   // …and the live file still passes
+  });
+});
+
 // ═══ GATE (b) — spelling liveness ═════════════════════════════════════════════════════════════════
 // The ONLY gate that consults an external binary, and the only one that may SKIP.
 
 describe("apply gate (b) — the gate key is still spelled the way the INSTALLED harness spells it", () => {
-  /** The installed binary, or `null` when `claude` is not on PATH. */
-  function resolveBinary(): string | null {
-    const which = Bun.spawnSync({ cmd: ["which", "claude"], stdout: "pipe", stderr: "pipe" });
-    const path = which.stdout.toString().trim();
-    if (which.exitCode !== 0 || path.length === 0) return null;
-    try {
-      return realpathSync(path);
-    } catch {
-      return null;
-    }
-  }
-
   /**
    * The one schema line satisfying BOTH anchors.
    *
@@ -405,6 +682,119 @@ describe("apply gate (b) — the gate key is still spelled the way the INSTALLED
     expect(probeKeySpelling("nothing here at all", GATE_KEY, GATE_ANCHOR)).toBe(false);
     expect(probeKeySpelling(`{"${GATE_KEY}":x} ${GATE_ANCHOR}`, GATE_KEY, GATE_ANCHOR)).toBe(true);
   });
+});
+
+// ═══ GATE (g) — deny-form liveness ════════════════════════════════════════════════════════════════
+// The `Skill(<name>)` deny form is NOT DOCUMENTED anywhere upstream — the settings docs illustrate only
+// `Bash(…)`/`Read(…)` — and it works. It therefore carries no compatibility promise, which is the same
+// hazard gate (b) covers for the frontmatter key, one layer over. The primitive disappearing SILENTLY is
+// the whole risk: nothing in this repo would notice.
+//
+// 🔴 SAME SKIP DISCIPLINE AS (b), AND IT MUST NOT BE WIDENED. An absent binary is the ONLY skip
+// condition. A binary that RESOLVES but whose anchor the probe cannot find is RED — that state IS the
+// regression. A skip that also covered "inconclusive" is how a SKIP = 0 gate becomes green by
+// construction and stops being a gate.
+
+describe("apply gate (g) — the harness still HAS the machinery the deny rule relies on", () => {
+  test("AC #3g — both upstream anchors are present in the installed binary", () => {
+    const bin = resolveBinary();
+    if (bin === null) {
+      console.warn("[apply-gate g] SKIP: `claude` is not on PATH — deny-form liveness unverified");
+      expect(true).toBe(true);
+      return;
+    }
+    // ⚠ FIXED-STRING SEARCH, NOT A REGEX: neither anchor carries a metacharacter today, and reading them
+    // as patterns is a needless way to go red on an escaping change rather than on the regression.
+    const strings = Bun.spawnSync({ cmd: ["strings", "-a", bin], stdout: "pipe", stderr: "pipe" })
+      .stdout.toString();
+    expect(strings.length).toBeGreaterThan(1000);   // the probe read SOMETHING; an empty haystack is red
+    // ⚠ PRESENCE, NEVER THE COUNTS. Both stood at 3 occurrences at 2.1.222; counts churn per build.
+    expect(probeAnchorsPresent(strings, DENY_ANCHORS)).toBe(true);
+  });
+
+  // ── COUNTERFACTUAL 7: the lexical half's seam ──
+  test("COUNTERFACTUAL 7 — a withdrawn or renamed anchor is DETECTED", () => {
+    // You cannot mutate the installed harness, so the mutation is fed to the pure function — the same
+    // seam gate (b) uses, and for the same reason: without it the probe can only ever be observed green,
+    // which is indistinguishable from a probe that always returns true.
+    const bin = resolveBinary();
+    if (bin === null) {
+      console.warn("[apply-gate g/CF7] SKIP: `claude` is not on PATH");
+      expect(true).toBe(true);
+      return;
+    }
+    const real = Bun.spawnSync({ cmd: ["strings", "-a", bin], stdout: "pipe", stderr: "pipe" })
+      .stdout.toString();
+    const renamed = real.replaceAll(DENY_ANCHORS[0]!, "Skill execution blocked by policy");
+    expect(renamed).not.toBe(real);                              // the mutant is not the original
+    expect(probeAnchorsPresent(real, DENY_ANCHORS)).toBe(true);   // live: found
+    expect(probeAnchorsPresent(renamed, DENY_ANCHORS)).toBe(false); // withdrawn: caught
+    // …and the OTHER anchor vanishing is caught too, so this is not a one-string gate wearing a plural.
+    expect(probeAnchorsPresent(real.replaceAll(DENY_ANCHORS[1]!, "dmi"), DENY_ANCHORS)).toBe(false);
+  });
+
+  test("COUNTERFACTUAL 7b — the probe is not a constant: it answers true and false on pure input", () => {
+    // Runs with or without the binary. `every` on an empty anchor list would be vacuously true, which is
+    // the way this predicate could rot into a tautology; pinned here.
+    expect(probeAnchorsPresent("a b", ["a", "b"])).toBe(true);
+    expect(probeAnchorsPresent("a b", ["a", "c"])).toBe(false);
+    expect(DENY_ANCHORS.length).toBe(2);
+  });
+
+  // ── The BEHAVIOURAL half: the harness's own parser, on our own file ──
+  test("AC #3g — the harness's OWN rule parser still accepts the repo's exact deny entry", () => {
+    // This is the one assertion in either gate that is not lexical. `claude doctor` reads the settings
+    // files in the current directory and prints every permission rule it SKIPPED and why, so handing it
+    // our real file answers "does this harness still turn our exact rule text into a live rule" —
+    // a question no `strings` scan can reach.
+    const bin = resolveBinary();
+    if (bin === null) {
+      console.warn("[apply-gate g] SKIP: `claude` is not on PATH — rule-parser acceptance unverified");
+      expect(true).toBe(true);
+      return;
+    }
+    const verdict = doctorVerdict(bin, readFileSync(SETTINGS, "utf8"));
+    // A present binary whose probe cannot run is RED, never SKIP — same discipline as (b).
+    expect(verdict.ran).toBe(true);
+    expect(verdict.skipped).toEqual([]);
+  }, DOCTOR_TIMEOUT_MS);
+
+  test("NON-VACUITY — the same probe REJECTS a malformed rule, so an empty skip list means something", () => {
+    // 🔴 WITHOUT THIS, THE ASSERTION ABOVE IS DECORATION. "No rules were skipped" is also what a harness
+    // that stopped reporting skipped rules would print, and what a probe pointed at the wrong directory
+    // would print. The mutant proves the channel is live in the same run.
+    const bin = resolveBinary();
+    if (bin === null) {
+      console.warn("[apply-gate g/non-vacuity] SKIP: `claude` is not on PATH");
+      expect(true).toBe(true);
+      return;
+    }
+    const pristine = readFileSync(SETTINGS, "utf8");
+    const mutated = pristine.replace(DENY_ENTRY, "Skill(notewright-apply");   // closing paren dropped
+    expect(mutated).not.toBe(pristine);
+    const verdict = doctorVerdict(bin, mutated);
+    expect(verdict.ran).toBe(true);
+    expect(verdict.skipped).toEqual(["Skill(notewright-apply"]);
+  }, DOCTOR_TIMEOUT_MS);
+
+  test("what gate (g) does NOT detect, asserted rather than only commented", () => {
+    // ⚠ THE BLIND SPOT, PINNED SO IT CANNOT BE QUIETLY OVERSTATED LATER. Measured 2026-08-06 at 2.1.222:
+    // the rule parser is SYNTACTIC, so an unknown tool name is accepted exactly as `Skill` is. Gate (g)
+    // therefore proves the rule PARSES, never that the permission layer still consults it for skill
+    // invocations — and neither half watches the `userTypedThisTurn` predicate's SHAPE. A harness bump
+    // that widened that carve-out to assistant text would leave every assertion in this file green while
+    // the claim quietly stopped holding. Re-run the `REAL-1`/`REAL-2` probes on any material bump; there
+    // is no test here that catches it, and saying otherwise would be the vacuity this loop exists to find.
+    const bin = resolveBinary();
+    if (bin === null) {
+      console.warn("[apply-gate g/blind-spot] SKIP: `claude` is not on PATH");
+      expect(true).toBe(true);
+      return;
+    }
+    const bogus = doctorVerdict(bin, '{"permissions":{"deny":["Fnord(notewright-apply)"]}}');
+    expect(bogus.ran).toBe(true);
+    expect(bogus.skipped).toEqual([]);   // an unknown TOOL is accepted; only bad SHAPE is rejected
+  }, DOCTOR_TIMEOUT_MS);
 });
 
 // ═══ GATE (d) — content assertions (AC #2, AC #5) ═════════════════════════════════════════════════
