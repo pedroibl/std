@@ -109,7 +109,11 @@ function strayKeys(text: string, allowed: string[]): string[] {
  * occurrence and return true for a key that had in fact been renamed — a false PASS, which is worse than
  * the false fail it was widening to avoid.
  */
-function probeKeySpelling(schemaLine: string, key: string, anchor: string): boolean {
+// ⚠ AMENDMENT 2, Story 2.4 (declared in its ⚠️-1). The `export` token below is the ONLY change: Story
+// 2.4's apply gate needs this same probe for `disable-model-invocation`, and a COPY would give the
+// estate's only frontmatter-expiry guard two sources of truth — the day one is corrected the other rots
+// silently. One token, one owner. Nothing about the function's behaviour or its 200-char window moved.
+export function probeKeySpelling(schemaLine: string, key: string, anchor: string): boolean {
   const at = schemaLine.indexOf(anchor);
   if (at < 0) return false; // the prose itself is gone: the feature moved, which is also a red
   const window = schemaLine.slice(Math.max(0, at - 200), at);
@@ -891,7 +895,15 @@ describe("notewright dispatch — AC #4c: nothing under src/ or scripts/ moved",
    * 2.5, 2.6 and 2.7 each append their own file here (the Epic-2 ruling §7 makes that explicit). A
    * prefix like `src/notekit/` would silently permit every future file in the slice.
    */
-  const WORKING_TREE_ALLOWLIST = ["src/notekit/notewright-dispatch.test.ts"];
+  // ⚠ AMENDMENT 1, Story 2.4 (declared in its ⚠️-1). ONE exact path appended — 2.4's apply gate lives at
+  // `src/notekit/notewright-apply-gate.test.ts` (beside the slice it governs, D6), so it lands inside this
+  // scan the moment it exists. This EXTENDS the enumeration and does not relax it: an unlisted dirty path
+  // under `src/` or `scripts/` still reddens. It is deliberately NOT a prefix like `src/notekit/notewright-*`
+  // — a permissive pattern is how this assertion would stop being a gate.
+  const WORKING_TREE_ALLOWLIST = [
+    "src/notekit/notewright-dispatch.test.ts",
+    "src/notekit/notewright-apply-gate.test.ts",
+  ];
 
   test("COUNTERFACTUAL 12 — a rename parses to BOTH its paths, not to `old -> new`", () => {
     // Constructed from REAL `-z` output (probed 2026-08-06 against a scratch repo), so the shape is

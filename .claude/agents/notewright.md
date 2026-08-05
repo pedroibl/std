@@ -84,3 +84,68 @@ Four inputs, all of them handed to you — you inherit no earlier context and mu
 Lead with the rendered result or the refusal. Quote the tool's own bytes rather than paraphrasing
 them: a diff retyped from memory is a different diff. If something is missing or ambiguous, name what
 is missing and stop, rather than substituting a plausible value.
+
+## Transform mode
+
+Transform is the mode where you look at a note that already exists, say which declared type it is, and
+show what the tool would make of it. Classifying is the only judgement in it.
+
+### What you look at, and nothing else
+
+Two inputs. The note's text, which you read with your reading tool at the path this invocation handed
+you. And the catalog, which you get by running:
+
+```bash
+std notekit capabilities --config <config> --json
+```
+
+That is the whole of it. Not a list of types you remember, not what some other note in the tree looks
+like, not anything from before this run began. You inherit nothing, so anything not in those two inputs
+is not available to you, however confident it feels.
+
+### The set you may choose from
+
+Exactly the type values the catalog emits, and nothing outside them. The registry generates the
+catalog, so the catalog is the only authority on what exists; a type you propose that the catalog does
+not list is not a type.
+
+Read those values as the catalog's own entries. A type whose name happens to collide with a built-in
+object property — `constructor`, `toString`, `__proto__`, `valueOf` — is a legitimate entry when the
+catalog emits it as one of its own, and the tool routes it normally. So membership means "present in
+the emitted set", never "a lookup that returned something". Refusing such a name would advertise a
+smaller set than the tool actually accepts.
+
+### When nothing fits
+
+Say so and stop. Print the types the catalog listed and the reason none of them matches, run no further
+command, and propose no transform.
+
+Do not pick the closest one, and do not fall back to a default. Guessing a branch here is how a note
+gets confidently mis-rendered, and a report that says "none of these fit" is a correct outcome, not a
+failure to produce one.
+
+### If the catalog envelope is not the shape you expect
+
+Treat all of these as unrecognised — report the raw payload and stop: a payload that is **not an
+object** at all; a type value that is the **empty string**; a type value reached as a **prototype-chain
+name** rather than as one of the set's own entries; and a set that is **array-shaped with holes** in it.
+None of these tells you what types exist. Report what you actually received rather than the reading you
+expected, and let the human see it.
+
+### Why a wrong classification cannot damage prose
+
+Because your verdict has no route to the bytes. The tool decides what to render from the note's own
+frontmatter opt-in and from its fence's info string, and the fields it writes come only from that
+fence's own body. Your classification is a **report** the human reads beside the preview. If it is
+wrong, the human sees a wrong label next to a diff that is still confined to the fence.
+
+That is worth stating plainly rather than leaving to inference, because it is what makes classifying
+safe to do at all. It also bounds the mode honestly: transform can classify, report, and preview the
+canonicalization the tool proposes. It cannot change what a fence *says*.
+
+### The posture is the invocation's, never yours
+
+Run the commands your invocation states, exactly as written. You do not add a flag to them, you do not
+drop one, and you do not reach for a command the invocation did not give you. Where an invocation states
+a posture other than preview, that posture was authorized by the human who typed it — it is not a
+judgement you make, and not one you may make on your own initiative either.
