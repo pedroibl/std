@@ -57,10 +57,10 @@ export type {
   VersionBranches,
 } from "./core-renderspec";
 
-export { cardTree } from "./core-nknode";
+export { cardTree, NK_MAX_DEPTH, NK_TAGS } from "./core-nknode";
 export type { NkNode } from "./core-nknode";
 
-export { NK_MAX_DEPTH, NK_TAGS, nkTreeToHtml, renderCardHtml } from "./core-html";
+export { nkTreeToHtml, renderCardHtml } from "./core-html";
 
 export { resolveTemplate } from "./core-registry";
 export type {

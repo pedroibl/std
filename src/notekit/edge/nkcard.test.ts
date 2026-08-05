@@ -1,7 +1,10 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 
 import { escapeHtml } from "../../core";
-import { nkTreeToHtml, NK_MAX_DEPTH } from "../core-html";
+import { nkTreeToHtml } from "../core-html";
+// `NK_MAX_DEPTH` moved to `core-nknode.ts` (E1-A2). This file asserts the DOM builder and the HTML
+// builder agree on the bound, so it deliberately keeps importing the HTML serializer alongside it.
+import { NK_MAX_DEPTH } from "../core-nknode";
 import { cardTree } from "../core-nknode";
 import type { NkNode } from "../core-nknode";
 import { noteToRenderSpec, validate } from "../core-renderspec";

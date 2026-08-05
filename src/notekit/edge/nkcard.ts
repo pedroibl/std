@@ -33,8 +33,7 @@
 // would leave both callers — the post-processor AND the CLI (Story 2.1) — unable to tell a rendered
 // card from a silently-empty one.
 
-import { NK_TAGS, NK_MAX_DEPTH } from "../core-html";
-import { cardTree } from "../core-nknode";
+import { cardTree, NK_TAGS, NK_MAX_DEPTH } from "../core-nknode";
 import type { NkNode } from "../core-nknode";
 import type { RenderSpec } from "../core-renderspec";
 
