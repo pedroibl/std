@@ -217,9 +217,45 @@ function plain(text: string): string {
   return text.replace(/\*\*/g, "").toLowerCase();
 }
 
-/** Every `nk-`-prefixed token in the text. Strict by design: any non-member is a finding. */
+/**
+ * Every `nk-`-prefixed token in the text. Strict by design: any non-member is a finding.
+ * ⚠ CASE-INSENSITIVE ON PURPOSE, AND NORMALISED DOWN. A lowercase-only scan lets `nk-Card` and
+ * `NK-CARD` walk straight past a gate whose whole point is that ANY non-member token is a finding —
+ * the caller compares against `ERROR_CODES`, which is lowercase, so the match is lowered here rather
+ * than at each call site.
+ */
 function nkTokens(text: string): string[] {
-  return [...text.matchAll(/nk-[a-z][a-z0-9-]*/g)].map((m) => m[0]);
+  return [...text.matchAll(/nk-[a-z][a-z0-9-]*/gi)].map((m) => m[0].toLowerCase());
+}
+
+/**
+ * Every path in the raw stdout of `git status --porcelain -z`.
+ *
+ * ⚠ `-z` IS LOAD-BEARING, TWICE, AND PORCELAIN v1's DEFAULT SHAPE CANNOT BE PARSED BY `slice(3)`.
+ * Measured against a scratch repo 2026-08-06: a modification of `src/needs quoting$.ts` prints
+ * ` M "src/needs quoting$.ts"` — C-quoted, quotes and all — and a rename prints as the single record
+ * `R  src/original.ts -> src/renamed.ts`. Neither string can ever equal an allowlist entry, so a
+ * `slice(3)` parse waves both files through while the gate reports green: the worst failure a scope
+ * gate has, because it looks like a pass.
+ *
+ * ⚠ AND `-z` DOES NOT MAKE A RENAME ONE RECORD — it makes it TWO. The `R ` record carries the NEW path;
+ * the record IMMEDIATELY AFTER it is the OLD path and carries NO status prefix, so slicing 3 off it
+ * would mangle it into `/original.ts`. It is consumed explicitly here. Both halves are returned: a
+ * rename touches the path it left as much as the path it landed on, and AC #4c is about files touched.
+ */
+function porcelainPaths(stdout: string): string[] {
+  const records = stdout.split("\0").filter((r) => r.length > 0);
+  const out: string[] = [];
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i]!;
+    const status = record.slice(0, 2);
+    out.push(record.slice(3).trim());
+    if (status.includes("R") || status.includes("C")) {
+      const origin = records[++i];
+      if (origin !== undefined) out.push(origin.trim());
+    }
+  }
+  return out;
 }
 
 /** Lines naming `threshold` or more of `names` — the shape a hardcoded list always has. */
@@ -244,11 +280,25 @@ function bannedToolsIn(raw: string): string[] {
  * binary rather than a symlink", it is that `strings` reads THROUGH the link either way.
  */
 function schemaLine(): string | null {
-  const which = Bun.spawnSync({ cmd: ["which", "claude"], stdout: "pipe", stderr: "pipe" });
+  // ⚠ BOTH SPAWNS ARE GUARDED, AND THE REASON IS MEASURED. `Bun.spawnSync` does NOT report an
+  // unresolvable command as a non-zero `exitCode` — it THROWS (`Error: Executable not found in $PATH`,
+  // probed 2026-08-06 at bun 1.x). This function is called in a `describe` BODY, so an escaping throw
+  // fails COLLECTION and takes the whole file down rather than one test. `strings` ships with binutils
+  // and is absent from slim CI images — exactly the host that has `claude` but not the probe. Returning
+  // `null` routes a missing tool into the same warned-skip posture a missing `claude` already gets.
+  const run = (cmd: string[]) => {
+    try {
+      return Bun.spawnSync({ cmd, stdout: "pipe", stderr: "pipe" });
+    } catch {
+      return null;
+    }
+  };
+  const which = run(["which", "claude"]);
+  if (which === null || which.exitCode !== 0) return null;
   const bin = which.stdout.toString().trim();
-  if (which.exitCode !== 0 || bin.length === 0) return null;
-  const strings = Bun.spawnSync({ cmd: ["strings", bin], stdout: "pipe", stderr: "pipe" });
-  if (strings.exitCode !== 0) return null;
+  if (bin.length === 0) return null;
+  const strings = run(["strings", bin]);
+  if (strings === null || strings.exitCode !== 0) return null;
   // ⚠ SELECT BY CONTENT, NEVER BY POSITION. `Agent type to spawn when` matches TWO lines at 2.1.222 —
   // a 41-byte bare description string and the 28,873-byte line holding both schemas. Taking `lines[0]`
   // would window into the short line and return false forever: a gate that cannot reach its pass state.
@@ -371,10 +421,29 @@ describe("notewright dispatch — gate (b) check (i): the closed 11-key set", ()
   test("COUNTERFACTUAL 2b — a prototype-chain key name cannot hide in the allowed set", () => {
     // E1-A3: `key in {name:1}` is TRUE for "constructor", "toString", "valueOf" and "__proto__". A
     // membership test written with `in` would wave every one of them through. `strayKeys` uses a Set.
+    //
+    // ⚠ THE FOURTH NAME, `__proto__`, IS DELIBERATELY NOT IN THIS LOOP — a stated ceiling, not an
+    // oversight, and not a `strayKeys` defect. `parseFrontmatter` builds a plain object literal and
+    // assigns with `result[key] = …` (`src/core/parse.ts:66`), so a `__proto__:` line hits the
+    // prototype SETTER instead of creating an own property. `Object.keys` therefore never lists it and
+    // `strayKeys` returns `[]`. Adding `__proto__` to the loop above would go red on that `[]` and read
+    // as a hole in `strayKeys`. The assertion below pins the real behaviour so the next author sees it.
     for (const evil of ["constructor", "toString", "valueOf"]) {
       const mutated = agentText.replace("tools:", `${evil}: x\ntools:`);
       expect(strayKeys(mutated, AGENT_KEYS)).toEqual([evil]);
     }
+  });
+
+  test("COUNTERFACTUAL 2c — `__proto__` is the one name this gate CANNOT catch, and why", () => {
+    // The ceiling above, asserted rather than asserted-about. A string value makes the setter a no-op,
+    // so nothing is polluted either — the key simply vanishes, invisibly to any own-key scan.
+    const mutated = agentText.replace("tools:", "__proto__: x\ntools:");
+    const parsed = parseFrontmatter(mutated);
+    expect(Object.prototype.hasOwnProperty.call(parsed, "__proto__")).toBe(false);
+    expect(Object.getOwnPropertyNames(parsed)).not.toContain("__proto__");
+    expect(strayKeys(mutated, AGENT_KEYS)).toEqual([]);
+    // And the prototype is untouched, so the smuggled key corrupts nothing downstream either.
+    expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
   });
 });
 
@@ -824,6 +893,37 @@ describe("notewright dispatch — AC #4c: nothing under src/ or scripts/ moved",
    */
   const WORKING_TREE_ALLOWLIST = ["src/notekit/notewright-dispatch.test.ts"];
 
+  test("COUNTERFACTUAL 12 — a rename parses to BOTH its paths, not to `old -> new`", () => {
+    // Constructed from REAL `-z` output (probed 2026-08-06 against a scratch repo), so the shape is
+    // measured rather than assumed. Tested on the parser rather than by renaming a file in the live
+    // tree: a gate that has to dirty the repo to prove itself is not one anybody will run twice.
+    expect(porcelainPaths("R  src/renamed.ts\0src/original.ts\0")).toEqual([
+      "src/renamed.ts",
+      "src/original.ts",
+    ]);
+    // The v1 default shape this replaced. `slice(3)` on it yields one unmatched pseudo-path.
+    expect("R  src/original.ts -> src/renamed.ts".slice(3).trim()).toBe(
+      "src/original.ts -> src/renamed.ts",
+    );
+    expect(WORKING_TREE_ALLOWLIST).not.toContain("src/original.ts -> src/renamed.ts");
+  });
+
+  test("COUNTERFACTUAL 12b — a special-character path arrives unquoted under `-z`", () => {
+    // Porcelain v1 WITHOUT `-z` C-quotes this path, and `"src/needs quoting$.ts"` — quotes included —
+    // can never match an allowlist entry, so the gate would wave the file through while looking green.
+    expect(porcelainPaths(" M src/needs quoting$.ts\0")).toEqual(["src/needs quoting$.ts"]);
+    expect(' M "src/needs quoting$.ts"'.slice(3).trim()).toBe('"src/needs quoting$.ts"');
+  });
+
+  test("COUNTERFACTUAL 12c — an ordinary modification and an untracked file still parse", () => {
+    expect(porcelainPaths(" M src/a.ts\0?? src/b.ts\0M  src/c.ts\0")).toEqual([
+      "src/a.ts",
+      "src/b.ts",
+      "src/c.ts",
+    ]);
+    expect(porcelainPaths("")).toEqual([]);
+  });
+
   test("the only changed path is this test file itself", () => {
     // ⚠ ASSERTED ON THE WORKING TREE, NOT `git diff <base>..HEAD`, which compares committed history and
     // returns empty pre-commit whatever the tree holds — vacuous exactly when it matters.
@@ -831,18 +931,20 @@ describe("notewright dispatch — AC #4c: nothing under src/ or scripts/ moved",
     // ⚠ AND THE ALLOWLIST IS WHAT LETS THIS GATE REACH ITS PASS STATE. Without it the gate is red by
     // construction from the moment this file exists, and a gate that is always red is neither a pass nor
     // a fail.
+    //
+    // ⚠ IT STAYS HERE, AND THE RECOMMENDATION TO MOVE IT TO A CI-ONLY SCRIPT IS DECLINED. AC #4c asserts
+    // the property ON THE WORKING TREE, and the Epic-2 ruling §7 makes the allowlist an object Stories
+    // 2.4 → 2.7 EXTEND, never replace. A CI-only gate decouples the assertion from the story that owns
+    // it and drops the extend-never-replace protocol with it. The two parsing defects raised underneath
+    // that recommendation were real, and are fixed in `porcelainPaths` above.
     const proc = Bun.spawnSync({
-      cmd: ["git", "status", "--porcelain", "--", "src/", "scripts/"],
+      cmd: ["git", "status", "--porcelain", "-z", "--", "src/", "scripts/"],
       cwd: REPO,
       stdout: "pipe",
       stderr: "pipe",
     });
     expect(proc.exitCode).toBe(0);
-    const paths = proc.stdout
-      .toString()
-      .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .map((l) => l.slice(3).trim());
+    const paths = porcelainPaths(proc.stdout.toString());
     expect(paths.filter((p) => !WORKING_TREE_ALLOWLIST.includes(p))).toEqual([]);
   });
 });
@@ -857,7 +959,11 @@ describe("notewright dispatch — hostile frontmatter inputs (E1-A3)", () => {
   });
 
   test("a BOM before `---` defeats the block entirely — which is why gate (a) asserts non-empty", () => {
-    const bom = "﻿---\nname: notewright\n---\n";
+    // ⚠ WRITTEN AS AN ESCAPE, NEVER AS A LITERAL U+FEFF. A literal zero-width BOM in source is invisible
+    // in every editor and survives only as long as every formatter, editor and diff tool on the path
+    // preserves the byte — the day one strips it this test silently becomes a test of `"---"`.
+    const bom = "\uFEFF---\nname: notewright\n---\n";
+    expect(bom.charCodeAt(0)).toBe(0xfeff); // the input is what it claims to be
     expect(parseFrontmatter(bom)).toEqual({});
     // Without gate (a)'s explicit non-empty assertion this would surface as a confusing `undefined`
     // equality failure rather than "this file has no frontmatter".
