@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -245,6 +245,95 @@ describe("notekit dispatch (Story 1.4 Task 3)", () => {
     expect(deployErrs.join("\n")).toContain("--vault");
   });
 
+  // ── Story 2.2 — `--apply` routing, through the REAL bin path ──────────────────────────────────
+  //
+  // ⚠ ASSERTED ON THE EFFECT, NEVER ON THE EXIT CODE. Both orderings return 0 on a valid note: if 2.2's
+  // write branch were added AFTER 2.1's three-verb pre-dispatch, every `--apply` would be swallowed by
+  // the read path — preview printed, nothing written, exit 0 — and an exit-code-only assertion would be
+  // green over a writer that is unreachable. The note's BYTES are what distinguishes the two.
+  //
+  // These also drive `runNotekitApply`'s DEFAULT writer (no `writeNote` injection reaches it from
+  // main.ts), so the one permitted `atomicWrite` call site is genuinely executed by the suite rather
+  // than guarded as dead code.
+  function applyFixture(): { dir: string; note: string; config: string } {
+    const dir = mkdtempSync(join(tmpdir(), "std-apply-"));
+    const note = join(dir, "note.md");
+    const config = join(dir, "cfg.ts");
+    // NON-canonical on purpose (a doubled key, ragged spacing), so an apply has something to change.
+    writeFileSync(
+      note,
+      ["---", "nk-type: card", "---", "", "```nk-card", "title:   Primer  ", "title: Primer", "```", "", "prose"].join("\n"),
+    );
+    writeFileSync(
+      config,
+      `const config = { noteTypes: { card: "t" }, templates: { t: { renderer: "nk-card", rubric: { kind: "card", titleField: "title", fields: [] } } } };\nexport default config;\n`,
+    );
+    return { dir, note, config };
+  }
+
+  test("`notekit render <note> --apply` REACHES the writer — the note's bytes change", async () => {
+    const { dir, note, config } = applyFixture();
+    try {
+      const before = readFileSync(note, "utf-8");
+      expect(await runMain(["notekit", "render", note, "--config", config, "--apply"], { log: () => {} })).toBe(0);
+      const after = readFileSync(note, "utf-8");
+      expect(after).not.toBe(before); // the ONE assertion the swallowed ordering cannot satisfy
+      expect(after).toBe(
+        ["---", "nk-type: card", "---", "", "```nk-card", "title: Primer", "```", "", "prose"].join("\n"),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("…and WITHOUT --apply the same command leaves the note byte-identical", async () => {
+    const { dir, note, config } = applyFixture();
+    try {
+      const before = readFileSync(note, "utf-8");
+      expect(await runMain(["notekit", "render", note, "--config", config], { log: () => {} })).toBe(0);
+      expect(readFileSync(note, "utf-8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("`--apply` on a verb that is not render is a usage 2, never a silent no-op", async () => {
+    const errs: string[] = [];
+    const realError = console.error;
+    console.error = (l: unknown) => errs.push(String(l));
+    try {
+      expect(await runMain(["notekit", "validate", "--apply"], { log: () => {} })).toBe(2);
+      expect(await runMain(["notekit", "capabilities", "--apply"], { log: () => {} })).toBe(2);
+      // `deploy --apply` returned 0 before this guard: runEdgeDeploy has no unknown-flag rejection, so
+      // it deployed and ignored the flag entirely.
+      expect(await runMain(["notekit", "deploy", "--apply", "--vault", "/no/such/vault"], { log: () => {} })).toBe(2);
+      expect(await runMain(["notekit", "bogus", "--apply"], { log: () => {} })).toBe(2);
+    } finally {
+      console.error = realError;
+    }
+    expect(errs.filter((l) => l.includes("--apply is only valid on"))).toHaveLength(4);
+  });
+
+  test("the guard's `apply &&` half is load-bearing — the deploy fall-through still works", async () => {
+    // Simplified to `rest[0] !== "render"` the guard would exit 2 for EVERY non-render verb and kill
+    // the deploy delegate. Without --apply, deploy must still reach the deploy runner's own usage.
+    const errs: string[] = [];
+    const realError = console.error;
+    console.error = (l: unknown) => errs.push(String(l));
+    try {
+      expect(await runMain(["notekit", "deploy"], { log: () => {} })).toBe(2);
+    } finally {
+      console.error = realError;
+    }
+    expect(errs.join("\n")).toContain("--vault");
+    expect(errs.join("\n")).not.toContain("--apply is only valid on");
+  });
+
+  test("HELP declares --apply under `notekit render options:`, and NK-4 rule 3's sentence with it", () => {
+    expect(HELP).toContain("notekit render options:");
+    expect(HELP).toContain("--apply           actually execute the plan. WITHOUT IT NOTHING MUTATES");
+  });
+
   test("the unknown-command line names notekit — a registered command must be discoverable", async () => {
     const errs: string[] = [];
     const realError = console.error;
@@ -387,6 +476,7 @@ notekit deploy options:
 notekit render options:
   --config <path>   the caller-local note-type registry to read (required — std bakes in no registry)
   --at <iso>        stamp the card with this timestamp instead of the clock, making the output byte-reproducible
+  --apply           actually execute the plan. WITHOUT IT NOTHING MUTATES (dry-run is the default)
   --json            emit the machine-readable ledger; it is then the only thing on stdout
 
 notekit validate options:
@@ -414,9 +504,9 @@ describe("HELP — byte-identity oracle (3.1 AC2)", () => {
   // HELP carries (the title's em dash, one per `--vault` row, and Story 2.1's two `--config` rows), so
   // Buffer.byteLength runs ahead of `.length`. All three re-measured on the shipped constant at 2.1.
   test("the frozen literal is the one that was measured", () => {
-    expect(FROZEN_HELP.length).toBe(2949);
-    expect(Buffer.byteLength(FROZEN_HELP)).toBe(2961);
-    expect(FROZEN_HELP.split("\n").length).toBe(53);
+    expect(FROZEN_HELP.length).toBe(3048);
+    expect(Buffer.byteLength(FROZEN_HELP)).toBe(3060);
+    expect(FROZEN_HELP.split("\n").length).toBe(54);
   });
 
   test("HELP is byte-identical to the frozen text", () => {
@@ -473,5 +563,37 @@ describe("HELP — byte-identity oracle (3.1 AC2)", () => {
       "notekit capabilities options:",
     ]);
     expect(removed.length + baseline.length).toBe(lines.length); // nothing fell between the two sets
+  });
+
+  // Story 2.2's own delta. The test above anchors to 3.1's PRE-NOTEKIT baseline and therefore cannot
+  // see a change made INSIDE a notekit options block — it strips those blocks wholesale. 2.2's change
+  // is exactly such a change (one flag row inside `notekit render options:`), so without this
+  // assertion the re-freeze above would be blind precisely where 2.2 moved the bytes.
+  //
+  // It is stated as a REMOVAL back to 2.1's measured text rather than as a second frozen literal:
+  // deleting the one `--apply` line must reproduce 2949/2961/53 exactly, which is only true if that
+  // line is the whole delta.
+  test("the delta from the post-2.1 freeze is EXACTLY the one --apply row", () => {
+    const APPLY_ROW =
+      "  --apply           actually execute the plan. WITHOUT IT NOTHING MUTATES (dry-run is the default)";
+
+    const lines = FROZEN_HELP.split("\n");
+    expect(lines.filter((l) => l === APPLY_ROW)).toHaveLength(1); // one row, not two
+
+    // …and it sits inside `notekit render options:`, not somewhere that merely counts the same.
+    const header = lines.indexOf("notekit render options:");
+    expect(header).toBeGreaterThan(-1);
+    const block = lines.slice(header + 1, lines.indexOf("", header));
+    expect(block.map((l) => l.trim().split(/\s{2,}/)[0])).toEqual([
+      "--config <path>",
+      "--at <iso>",
+      "--apply",
+      "--json",
+    ]);
+
+    const post21 = lines.filter((l) => l !== APPLY_ROW).join("\n");
+    expect(post21.length).toBe(2949);
+    expect(Buffer.byteLength(post21)).toBe(2961);
+    expect(post21.split("\n").length).toBe(53);
   });
 });

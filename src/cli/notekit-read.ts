@@ -6,6 +6,12 @@
 // no fence-mutating helper "ready for 2.2", and no write API imported at all. The test file scans this
 // module's source for sixteen fs tokens, so the claim is checkable rather than asserted.
 //
+// ⚠ STORY 2.2 CHANGED NOTHING ABOUT THAT. It extracted `renderPlan` (the rows-1–6 computation) and
+// exported `emit`, so `src/cli/notekit-write.ts` previews and writes from the SAME plan and prints
+// through the SAME printer — NK-4 rule 3 is a shared computation here, not a promise. The dependency
+// runs ONE WAY, `notekit-write.ts` → `notekit-read.ts`: this file gained two exports and still contains
+// zero write tokens and zero knowledge that a writer exists (both asserted).
+//
 // IT IMPORTS ONLY THE PURE HALF of the notekit slice (`../notekit/index`), NEVER `../notekit/edge/**`.
 // This file is root-typechecked, and the root tsconfig has no DOM lib by design — a single edge import
 // drags `HTMLElement` in and fails `bun run typecheck` with TS2304 (Story 1.4 ⚠️-1, proven there).
@@ -38,7 +44,10 @@ import {
   serializeFenceBody,
   renderCardHtml,
   validate,
+  type FenceFields,
+  type LocatedFence,
   type NoteTypeRegistry,
+  type RenderSpec,
   type RenderSpecErrorCode,
 } from "../notekit/index";
 import { readStdinJson } from "../stdio/index";
@@ -77,7 +86,7 @@ export interface NotekitReadDeps {
 }
 
 /** The one envelope shape every verb and every exit point emits. */
-type Envelope = { ok: true; value: unknown } | { ok: false; error: unknown };
+export type Envelope = { ok: true; value: unknown } | { ok: false; error: unknown };
 
 const USAGE = [
   "usage: std notekit <render|validate|capabilities>",
@@ -96,8 +105,12 @@ const USAGE = [
  * not satisfy the `validate`/`capabilities` ACs, and a `const emit = () => …` would be in its temporal
  * dead zone for any module-scope reference above it — compiling clean and dying at runtime with
  * `ReferenceError: Cannot access 'emit' before initialization`.
+ *
+ * EXPORTED at Story 2.2 so the write surface emits through this one printer rather than a second
+ * near-identical copy. Two emitters is exactly how a preview and the write that follows it drift, and
+ * NK-4 rule 3 is the rule that forbids the drift.
  */
-function emit(
+export function emit(
   env: Envelope,
   json: boolean,
   out: (line: string) => void,
@@ -244,39 +257,73 @@ function defaultReadNote(path: string): string | null {
 }
 
 /**
- * `render <note>` — preview a note as an nk-card and report the round-trip diff. Writes nothing.
+ * Everything `render` computes before it prints anything — the note's text, its fence, its fields, the
+ * validated spec, the HTML, and the FR-16 parity diff.
  *
- * Seven returns, and every one goes through `emit`: one usage path (`2`), five failure rows (`1`, each
- * carrying a typed `code`), one success (`0`). No row falls out of the envelope.
+ * ⚠ ONE PLAN COMPUTATION, TWO CALLERS (Story 2.2). `render` previews it and `render --apply` writes
+ * from it, and they must be the same bytes: NK-4 rule 3 requires the write to be preceded by *the same*
+ * preview, and two computations is precisely how a preview and a write drift apart. `noteText` is the
+ * exact string the fence offsets index into, so the writer's splice runs against the string its fence
+ * was located in — which is what makes `spliceFence`'s stale-offset throw unreachable from the CLI.
  */
-async function runRender(argv: string[], deps: NotekitReadDeps): Promise<number> {
-  const log = deps.log ?? ((l: string) => console.log(l));
-  const err = deps.err ?? ((l: string) => console.error(l));
-  const json = hasFlag(argv, "json");
+export type RenderPlan = {
+  notePath: string;
+  noteText: string;
+  fence: LocatedFence;
+  fields: FenceFields;
+  spec: RenderSpec;
+  html: string;
+  /** `serializeFenceBody(fields)` — the diff's proposed side, WITHOUT a trailing newline. */
+  proposedBody: string;
+  /** Empty when the body is already canonical; that emptiness is the FR-16 parity signal. */
+  diff: string;
+};
 
+/**
+ * A plan, a usage exit, or a modeled failure.
+ *
+ * `usage` carries no message because the usage line has ALREADY been written to `err` by the time it is
+ * returned — the three usage conditions each phrase their own line, and re-deriving them here would be
+ * a second statement of text the caller already printed.
+ */
+export type PlanOutcome =
+  | { kind: "plan"; plan: RenderPlan }
+  | { kind: "usage" }
+  | { kind: "error"; error: unknown };
+
+/**
+ * Compute the render plan: rows 1–6 of the exit table, in order, without printing a single result.
+ *
+ * Extracted from `runRender` at Story 2.2 with NO behaviour change — the usage lines, the codes, the
+ * messages and the ORDER of the checks are 2.1's, byte for byte, and 2.1's tests staying green
+ * UNEDITED is the proof of that.
+ */
+export async function renderPlan(
+  argv: string[],
+  deps: NotekitReadDeps,
+  err: (line: string) => void,
+): Promise<PlanOutcome> {
   const notePath = notePositional(argv.slice(1));
 
   const at = valueFlag(argv, "at");
   if (at.present && at.value === undefined) {
     err(`std notekit render: --at needs an ISO timestamp\n\n${USAGE}`); // row 1
-    return 2;
+    return { kind: "usage" };
   }
   if (notePath === "") {
     err(`std notekit render: a <note> path is required\n\n${USAGE}`); // row 1
-    return 2;
+    return { kind: "usage" };
   }
   const registry = await resolveRegistry(argv, deps, err);
-  if (registry === null) return 2; // row 1
+  if (registry === null) return { kind: "usage" }; // row 1
 
   const source = (deps.readNote ?? defaultReadNote)(notePath);
   if (source === null) {
-    emit(
-      { ok: false, error: { code: "nk-note-unreadable", message: `cannot read note '${notePath}'` } },
-      json,
-      log,
-      err,
-    );
-    return 1; // row 2
+    // row 2
+    return {
+      kind: "error",
+      error: { code: "nk-note-unreadable", message: `cannot read note '${notePath}'` },
+    };
   }
 
   // PRESENCE of a non-empty `nk-type` string, nothing more — the routing type comes from the fence, so
@@ -286,35 +333,26 @@ async function runRender(argv: string[], deps: NotekitReadDeps): Promise<number>
     ? frontmatter[OPT_IN_KEY]
     : undefined;
   if (typeof optIn !== "string" || optIn.length === 0) {
-    emit(
-      { ok: false, error: { code: "nk-no-opt-in", message: `note has no '${OPT_IN_KEY}:' frontmatter opt-in` } },
-      json,
-      log,
-      err,
-    );
-    return 1; // row 3
+    // row 3
+    return {
+      kind: "error",
+      error: { code: "nk-no-opt-in", message: `note has no '${OPT_IN_KEY}:' frontmatter opt-in` },
+    };
   }
 
   const fence = locateFence(source);
   if (fence === null) {
-    emit(
-      { ok: false, error: { code: "nk-no-fence", message: "note has no nk-fence" } },
-      json,
-      log,
-      err,
-    );
-    return 1; // row 4
+    // row 4
+    return { kind: "error", error: { code: "nk-no-fence", message: "note has no nk-fence" } };
   }
 
   const template = resolveTemplate(fence.type, registry);
   if (template === null) {
-    emit(
-      { ok: false, error: { code: "nk-unknown-type", message: `no template registered for '${fence.type}'` } },
-      json,
-      log,
-      err,
-    );
-    return 1; // row 5
+    // row 5
+    return {
+      kind: "error",
+      error: { code: "nk-unknown-type", message: `no template registered for '${fence.type}'` },
+    };
   }
 
   const fields = parseFenceBody(fence.body);
@@ -326,21 +364,51 @@ async function runRender(argv: string[], deps: NotekitReadDeps): Promise<number>
 
   const checked = validate(spec);
   if (!checked.ok) {
-    emit({ ok: false, error: checked.error }, json, log, err); // the RenderSpecError VERBATIM
-    return 1; // row 6
+    return { kind: "error", error: checked.error }; // row 6 — the RenderSpecError VERBATIM
   }
 
   // The FR-16 parity signal: the note's own fence body against its canonical form. EMPTY when they are
   // equal. Reported, never enforced — `notekit lint` (3.1) is what fails a build on drift.
-  const proposed = serializeFenceBody(parseFenceBody(fence.body));
+  const proposed = serializeFenceBody(fields);
   const diff = diffFenceBody(fence.body, proposed);
 
-  emit(
-    { ok: true, value: { html: renderCardHtml(checked.value), diff, spec: checked.value } },
-    json,
-    log,
-    err,
-  );
+  return {
+    kind: "plan",
+    plan: {
+      notePath,
+      noteText: source,
+      fence,
+      fields,
+      spec: checked.value,
+      html: renderCardHtml(checked.value),
+      proposedBody: proposed,
+      diff,
+    },
+  };
+}
+
+/**
+ * `render <note>` — preview a note as an nk-card and report the round-trip diff. Writes nothing.
+ *
+ * Seven returns, and every one goes through `emit`: one usage path (`2`), five failure rows (`1`, each
+ * carrying a typed `code`), one success (`0`). No row falls out of the envelope. The rows themselves
+ * are computed by `renderPlan`, which `render --apply` (Story 2.2) calls too — one computation, so the
+ * preview and the write cannot disagree.
+ */
+async function runRender(argv: string[], deps: NotekitReadDeps): Promise<number> {
+  const log = deps.log ?? ((l: string) => console.log(l));
+  const err = deps.err ?? ((l: string) => console.error(l));
+  const json = hasFlag(argv, "json");
+
+  const outcome = await renderPlan(argv, deps, err);
+  if (outcome.kind === "usage") return 2; // row 1 — the line is already on stderr
+  if (outcome.kind === "error") {
+    emit({ ok: false, error: outcome.error }, json, log, err);
+    return 1; // rows 2–6
+  }
+
+  const { html, diff, spec } = outcome.plan;
+  emit({ ok: true, value: { html, diff, spec } }, json, log, err);
   return 0; // row 7
 }
 

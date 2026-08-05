@@ -243,3 +243,39 @@ export function locateFence(markdown: string): LocatedFence | null {
   }
   return null;
 }
+
+// ── spliceFence ─────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Replace an nk-fence's BODY and nothing else — the pure counterpart of {@link locateFence}, and the
+ * ONLY thing in the write path (Story 2.2) that composes note text. One three-slice concat, the
+ * `insertInSection` shape (`src/core/markdown.ts`), so "every byte outside the fence is identical" is
+ * true BY CONSTRUCTION rather than by a test that happened to pass (NK-4 rule 2).
+ *
+ * The invariant is on the fence REGION, not on byte offsets: a grown or shrunk body shifts every later
+ * offset, and that shift is not a change — the prose AFTER the fence is the same bytes, at a new index.
+ *
+ * ⚠ THE NEWLINE IS THE CALLER'S. `body` is spliced verbatim over `[bodyStart, bodyEnd)`, and a located
+ * body CARRIES its trailing newline whenever it is non-empty while `serializeFenceBody` emits none — so
+ * a caller handing raw codec output straight to this function glues the closing delimiter onto the last
+ * `key: value` line and the fence stops being a fence. The edge re-attaches it (`composeBody` in
+ * `src/cli/notekit-write.ts`); this function does not, because a codec-shaped fixup inside a pure splice
+ * would make it impossible to write an empty body (`bodyStart === bodyEnd`) at all.
+ *
+ * ⚠ PURE (D1) BUT NOT TOTAL. `parseFenceBody`, `serializeFenceBody`, `resolveTemplate` and `locateFence`
+ * are all deliberately total — `| null` for every modeled outcome, never a throw (`core-registry.ts`
+ * states the rule). This one THROWS, and the difference is the kind of fault: "this note has no fence"
+ * is an outcome the CLI reports to an author, while "these offsets do not belong to this string" is a
+ * CALLER BUG, which is the class `cardTree` already answers with a throw (`core-nknode.ts`).
+ *
+ * The throw is UNREACHABLE FROM THE CLI, and for one specific reason: the write path splices against the
+ * very string its fence was located in. It is NOT the write path's re-read that makes it unreachable —
+ * that happens after the splice and guards a different thing (the file changing under us) — so the guard
+ * is exercised directly at unit level rather than left as an untested arm.
+ */
+export function spliceFence(markdown: string, fence: LocatedFence, body: string): string {
+  if (markdown.slice(fence.bodyStart, fence.bodyEnd) !== fence.body) {
+    throw new Error("nk-fence splice: the fence does not match this markdown (stale offsets)");
+  }
+  return markdown.slice(0, fence.bodyStart) + body + markdown.slice(fence.bodyEnd);
+}

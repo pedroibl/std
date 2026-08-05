@@ -9,6 +9,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { hasFlag } from "../core/index";
 import { runBmad } from "../bmad/cli";
 import { type CnDeployDeps, runCnDeploy } from "./cn-deploy";
 import { runCnVerify } from "./cn-verify";
@@ -16,6 +17,7 @@ import { runDashkitDeploy } from "./dashkit-deploy";
 import { runDashkitVerify } from "./dashkit-verify";
 import { runNotekitDeploy } from "./notekit-deploy";
 import { runNotekitRead } from "./notekit-read";
+import { runNotekitApply } from "./notekit-write";
 import { RepoNavError, defaultTargets, installAlias, type RepoConfig } from "./repo-nav";
 import { SURFACE, renderAliasUsage, renderHelp } from "./surface";
 
@@ -96,6 +98,33 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
   }
 
   if (cmd === "notekit") {
+    // THE SINGLE READ SITE for `--apply` across the whole notekit surface (Story 2.2 AC #4). Both the
+    // guard below and the `render` routing under it consume THIS const — never a second `hasFlag` call.
+    // The flag gets no default that turns it on: no env var, no config key, no `--apply=false`, no
+    // "apply when stdout is a TTY". A future convenience of that shape is a widening of the write
+    // surface and belongs in a story whose ACs test it (NK-4).
+    const apply = hasFlag(rest, "apply");
+
+    // `--apply` on a verb that is not `render` is a usage 2, never a silent no-op. It must precede
+    // EVERY other branch, including the deploy fall-through: `runEdgeDeploy` has no unknown-flag
+    // rejection, so `notekit deploy --apply --vault <dir>` would otherwise deploy and return 0 on a
+    // flag the user believed did something.
+    // ⚠ The `apply &&` half is load-bearing. Simplified to `rest[0] !== "render"` this would exit 2 for
+    // every non-render verb and kill the deploy fall-through entirely.
+    if (apply && rest[0] !== "render") {
+      console.error("usage: --apply is only valid on `std notekit render <note>`");
+      return 2;
+    }
+
+    // 🔴 ORDER IS LOAD-BEARING: the WRITE branch precedes the read pre-dispatch below, because
+    // `render --apply` matches that branch too. Added after it, every `--apply` would be swallowed by
+    // the read path: the CLI would preview, write nothing, and exit 0 — `runNotekitApply` unreachable,
+    // and green under any test that asserts only the exit code. `main.test.ts` pins the routing with an
+    // injected double that RECORDS the call, for exactly that reason.
+    if (rest[0] === "render" && apply) {
+      return await runNotekitApply(rest, { log });
+    }
+
     // The READ surface (Story 2.1) — one-shot, writes nothing, and pre-dispatched here for the same
     // reason `cn verify` is: it shares nothing with the deploy path, whose own usage line owns
     // `deploy`. Everything else, `deploy` included, still falls through to runNotekitDeploy.

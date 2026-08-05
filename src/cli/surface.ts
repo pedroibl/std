@@ -368,7 +368,15 @@ export const SURFACE = {
         {
           name: "render",
           desc: "preview a note as an nk-card; writes nothing (the sole-writer path is a later story)",
-          flags: [NOTEKIT_CONFIG, NOTEKIT_AT, JSON_FLAG],
+          // `APPLY` is the bmad family's const, REUSED rather than re-authored (Story 2.2): its text
+          // ("WITHOUT IT NOTHING MUTATES (dry-run is the default)") IS NK-4 rule 3's contract, and the
+          // JSON_FLAG / DEPLOY_VAULT / VERIFY_VAULT hoists are the precedent. Stated consequence:
+          // `bmad`'s and `notekit render`'s --apply rows render identical help text, and an edit to
+          // that desc moves both. That is the point of the hoist.
+          // ⚠ Declaring it is a CORRECTNESS requirement, not a gate catch: check:surface-drift's union
+          // is global and name-level, and `apply` is already in it via bmad — so a read of that flag
+          // passes that gate whether or not this row exists. The gate that bites is FROZEN_HELP.
+          flags: [NOTEKIT_CONFIG, NOTEKIT_AT, APPLY, JSON_FLAG],
         },
         {
           name: "validate",
