@@ -75,6 +75,96 @@ const META_CLASSES: Record<(typeof META_KEYS)[number], string> = {
 };
 
 /**
+ * The tags an `nk-node` tree may use. Well-formed is not the same as safe: a tag-shape regex alone
+ * accepted `script`, and `nkTreeToHtml({tag:"script", text:"alert(1)"})` emitted
+ * `<script>alert(1)</script>`. Escaping does not help — `text` is escaped for TEXT context, and a
+ * script body needs no metacharacters at all. `cardTree` emits only `div|h3|span|ul|li` today, but
+ * that is a property of ONE producer, not of the tree type: `NkNode` is public, its declared input is
+ * plain JSON, and plain JSON is exactly the shape that later arrives deserialized from somewhere less
+ * trusted (an agent's output, a file, the wire). So the tag is checked against a list, not a shape.
+ *
+ * The set is what the card family plausibly needs, and nothing that executes, loads, embeds, or
+ * navigates. Deliberately out:
+ *   - `script`/`style`/`iframe`/`object`/`embed`/`link`/`meta`/`svg`/`math`/`form`/`input`/`button` —
+ *     executable, resource-loading, or interactive.
+ *   - VOID elements (`br`, `hr`, `img`, …) — the HTML serializer emits `<t>…</t>` for every node, and
+ *     `<br></br>` parses as TWO `<br>`s. A tag a serializer cannot emit correctly does not belong on
+ *     the list; admitting them is a serializer change, not a list edit.
+ *   - `a`/`img` — inert without an attribute map, and the moment one lands they become the `href`/
+ *     `src` injection surface. They join in the SAME review that adds attributes, never ahead of it.
+ *
+ * ADDING A TAG IS AN ADDITIVE CHANGE REVIEWED AGAINST BOTH SERIALIZERS — the headless HTML string
+ * builder (`core-html.ts`) and the edge DOM builder (`edge/nkcard.ts`) — exactly as an additive change
+ * to `NkNode` itself is. The two must never disagree about what a tree may contain, or the
+ * single-owner property (NK-1.3) is gone and preview ≠ vault.
+ *
+ * IT LIVES HERE because it describes the TREE, not either serializer (retro action E1-A2). It was
+ * first written in `core-html.ts` because that serializer needed it first, and the DOM builder then
+ * imported it from there — an edge→html import that made the DOM path depend on the HTML path for a
+ * rule neither one owns. Both now import it from the tree, which is the file whose invariants it
+ * states.
+ */
+export const NK_TAGS: ReadonlySet<string> = new Set([
+  "article",
+  "blockquote",
+  "code",
+  "dd",
+  "div",
+  "dl",
+  "dt",
+  "em",
+  "figcaption",
+  "figure",
+  "footer",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "header",
+  "li",
+  "mark",
+  "ol",
+  "p",
+  "pre",
+  "section",
+  "small",
+  "span",
+  "strong",
+  "sub",
+  "sup",
+  "table",
+  "tbody",
+  "td",
+  "tfoot",
+  "th",
+  "thead",
+  "time",
+  "tr",
+  "ul",
+]);
+
+/**
+ * How deep a tree may nest. `cardTree` produces five levels (card → fields → field → ul → li), so
+ * this is ample headroom for any later renderer while still failing long before the JS stack does.
+ * Without it, a cyclic or pathological hand-built tree died with `RangeError: Maximum call stack size
+ * exceeded` — an engine error naming nothing, where every other malformed-node case names its path.
+ *
+ * A depth bound alone also terminates a CYCLE, because a cycle is just unbounded depth; a visited-set
+ * would only improve the message for that one input class, at the cost of allocating on every
+ * serialize. It goes in when a caller actually deserializes untrusted trees and needs to tell an
+ * honest deep tree from a loop (D2 — not on speculation).
+ *
+ * SAME HOME, SAME REASON as `NK_TAGS` (E1-A2): the bound is a property of what an `nk-node` TREE may
+ * contain, not of one serializer, and both serializers need the identical bound. Two copies of `64`
+ * in two files is precisely the drift that ends the single-owner property (NK-1.3): one path would
+ * keep walking a tree the other had already refused, and preview ≠ vault. One owner, both serializers
+ * import it.
+ */
+export const NK_MAX_DEPTH = 64;
+
+/**
  * Read a property as DATA. A bare `record[key]` walks the prototype chain, so on a plain object
  * `spec["constructor"]` is `Object` — a function, which is not JSON and must never reach a node.
  * Own properties only (the same guard Story 1.1 put on the fence record).

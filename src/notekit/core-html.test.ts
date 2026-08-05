@@ -1,7 +1,10 @@
 import { test, expect } from "bun:test";
 import { escapeHtml } from "../core";
 import { parseFenceBody } from "./core-fence";
-import { NK_TAGS, nkTreeToHtml, renderCardHtml } from "./core-html";
+import { nkTreeToHtml, renderCardHtml } from "./core-html";
+// `NK_TAGS` moved to `core-nknode.ts` (E1-A2) — it describes the TREE, not this serializer. The
+// serializer's enforcement of it is still tested here; its definition is tested at its new owner.
+import { NK_TAGS } from "./core-nknode";
 import { cardTree } from "./core-nknode";
 import type { NkNode } from "./core-nknode";
 import { noteToRenderSpec, validate } from "./core-renderspec";
