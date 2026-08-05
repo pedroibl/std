@@ -1,8 +1,9 @@
-import { test, expect } from "bun:test";
+import { test, expect, describe } from "bun:test";
 import {
   locateFence,
   parseFenceBody,
   serializeFenceBody,
+  spliceFence,
   type FenceFields,
   type LocatedFence,
 } from "./core-fence";
@@ -298,4 +299,212 @@ test("a fence at EOF with no trailing newline still closes, blockEnd at the stri
   expect(f.body).toBe("a: 1\n");
   expect(f.blockEnd).toBe(md.length);
   expectOffsetsFaithful(md, f);
+});
+
+// ── Story 2.2 — spliceFence, and the three oracles that can actually go red ──────────────────────
+
+/**
+ * ⚠ THE ORACLE THIS FILE DOES NOT USE, named so nobody adds it back believing it proves something.
+ *
+ * `spliceFence(md, f, f.body) === md` reduces to `s.slice(0,a) + s.slice(a,b) + s.slice(b) === s`,
+ * which holds for ANY `a ≤ b` — and the stale-fence guard FORCES `f.body === md.slice(a,b)`, so a
+ * self-consistent-but-wrong offset pair sails through. A prefix/suffix compare of the concat's output
+ * against its own inputs is the same tautology restated. NEITHER CAN CATCH AN OFF-BY-ONE.
+ *
+ * The three below each read something the splice arithmetic never touches:
+ *   (b) delimiter framing — reads the NOTE, so a boundary that swallows or clips a delimiter line
+ *       goes red without the splice being involved at all;
+ *   (c) round-trip through the LOCATOR — an off-by-one leaves a stray delimiter byte inside the
+ *       re-located body, or loses one off its end, and the equality fails;
+ *   (d) hand-written golden notes — bytes written by a human who was not looking at the offsets, so
+ *       no self-consistent bug can satisfy them.
+ */
+
+/** Oracle (b): the prefix ends with the opening fence LINE and its newline; the suffix opens on the run. */
+function expectDelimiterFraming(markdown: string, f: LocatedFence): void {
+  const prefix = markdown.slice(0, f.bodyStart);
+  // …its own newline, and NOT one byte less: an opening line whose terminator leaked into the body
+  // would leave the prefix ending on the info string.
+  expect(/(\r\n|\r|\n)$/.test(prefix)).toBe(true);
+  const openLine = prefix.split(/\r\n|\r|\n/).at(-2)!;
+  expect(/^[ \t]*`{3,}nk-[a-z]+[ \t]*$/.test(openLine)).toBe(true);
+
+  const suffix = markdown.slice(f.bodyEnd);
+  expect(/^[ \t]*`{3,}[ \t]*(\r\n|\r|\n|$)/.test(suffix)).toBe(true);
+}
+
+/** Oracle (c): a CHANGED body re-locates byte-for-byte out of the spliced note. */
+function expectRoundTrip(markdown: string, f: LocatedFence, newBody: string): string {
+  expect(newBody).not.toBe(f.body); // an identity splice would make this vacuous
+  const after = spliceFence(markdown, f, newBody);
+  const relocated = locateFence(after);
+  expect(relocated).not.toBeNull();
+  expect(relocated!.body).toBe(newBody);
+  expect(relocated!.type).toBe(f.type);
+  return after;
+}
+
+// Every AC #1 fixture, run through (b) and — where an apply is possible — (c).
+const SPLICE_FIXTURES: Array<{ name: string; md: string; newBody?: string }> = [
+  { name: "a plain nk-fence", md: "# Note\n\n```nk-card\ntitle: Primer\n```\n\nprose after\n", newBody: "title: Primer\nstatus: live\n" },
+  {
+    name: "TWO nk-fences — the first is the one spliced",
+    md: "```nk-card\nfirst: 1\n```\n\ntext between\n\n```nk-card\nsecond: 2\n```\n",
+    newBody: "first: 1\nextra: yes\n",
+  },
+  { name: "a fence at EOF with no trailing newline", md: "```nk-card\na: 1\n```", newBody: "a: 2\n" },
+  {
+    name: "a CRLF note throughout",
+    md: "---\r\nnk-type: card\r\n---\r\n\r\n```nk-card\r\ntitle: Primer\r\n```\r\n\r\nprose\r\n",
+    // The declared consequence: prose keeps CRLF, the codec's body is LF-only.
+    newBody: "title: Primer\n",
+  },
+  {
+    name: "a body line that itself reads ```",
+    md: "````nk-card\na: 1\n```\nstill body\n````\n",
+    newBody: "a: 2\n```\nstill body\n",
+  },
+  { name: "a body line that reads ~~~ (never a delimiter here)", md: "```nk-card\na: 1\n~~~\n```\n", newBody: "b: 2\n~~~\n" },
+  {
+    name: "a non-matching js-engine fence ADJACENT to the nk-fence",
+    md: "```js-engine\nconst x = 1;\n```\n\n```nk-card\na: 1\n```\n",
+    newBody: "a: 1\nb: 2\n",
+  },
+  { name: "an EMPTY fence body", md: "```nk-card\n```\n", newBody: "a: 1\n" },
+  { name: "an indented fence", md: "  ```nk-card\ntitle: x\n  ```\n", newBody: "title: y\n" },
+];
+
+describe("spliceFence — oracle (b): delimiter framing, read off the note", () => {
+  for (const fx of SPLICE_FIXTURES) {
+    test(fx.name, () => {
+      const f = locateFence(fx.md)!;
+      expect(f).not.toBeNull();
+      expectDelimiterFraming(fx.md, f);
+    });
+  }
+
+  test("the fixtures with NO locatable fence stay null — no splice is possible", () => {
+    expect(locateFence("# just prose\n")).toBeNull(); // no fence
+    expect(locateFence("```nk-card\na: 1\n")).toBeNull(); // unterminated
+    expect(locateFence("```nk-Card\na: 1\n```\n")).toBeNull(); // uppercase — the grammar is [a-z]+
+  });
+});
+
+describe("spliceFence — oracle (c): the changed body re-locates byte-for-byte", () => {
+  for (const fx of SPLICE_FIXTURES) {
+    test(fx.name, () => {
+      const f = locateFence(fx.md)!;
+      const after = expectRoundTrip(fx.md, f, fx.newBody!);
+      // …and oracle (b) again on the RESULT: both delimiter lines survived the write.
+      expectDelimiterFraming(after, locateFence(after)!);
+    });
+  }
+
+  test("an empty new body splices back to bodyStart === bodyEnd and still re-locates", () => {
+    const md = "```nk-card\na: 1\nb: 2\n```\n";
+    const after = spliceFence(md, locateFence(md)!, "");
+    const f = locateFence(after)!;
+    expect(f).not.toBeNull();
+    expect(f.body).toBe("");
+    expect(f.bodyStart).toBe(f.bodyEnd);
+    expect(after).toBe("```nk-card\n```\n"); // both delimiter lines survived
+  });
+
+  test("the CRLF consequence is DECLARED, not discovered: prose keeps CRLF, the body is LF", () => {
+    const md = "---\r\nnk-type: card\r\n---\r\n\r\n```nk-card\r\ntitle: Old\r\n```\r\n\r\nprose\r\n";
+    const after = spliceFence(md, locateFence(md)!, serializeFenceBody({ title: "New" }) + "\n");
+    expect(after).toBe("---\r\nnk-type: card\r\n---\r\n\r\n```nk-card\r\ntitle: New\n```\r\n\r\nprose\r\n");
+    expect(locateFence(after)!.body).toBe("title: New\n");
+  });
+});
+
+describe("spliceFence — oracle (d): hand-written golden notes, byte for byte", () => {
+  test("a plain fence grows", () => {
+    const md = "---\nnk-type: card\n---\n\n# Primer\n\n```nk-card\ntitle: Primer\n```\n\ntrailing prose\n";
+    expect(spliceFence(md, locateFence(md)!, "title: Primer\nstatus: live\n")).toBe(
+      "---\nnk-type: card\n---\n\n# Primer\n\n```nk-card\ntitle: Primer\nstatus: live\n```\n\ntrailing prose\n",
+    );
+  });
+
+  test("a fence at EOF with no trailing newline", () => {
+    const md = "prose\n\n```nk-card\na: 1\n```";
+    expect(spliceFence(md, locateFence(md)!, "a: 2\nb: 3\n")).toBe("prose\n\n```nk-card\na: 2\nb: 3\n```");
+  });
+
+  test("an empty body is filled", () => {
+    const md = "```nk-card\n```\n\nafter\n";
+    expect(spliceFence(md, locateFence(md)!, "a: 1\n")).toBe("```nk-card\na: 1\n```\n\nafter\n");
+  });
+});
+
+describe("spliceFence — a later fence is never false-flagged (NK-4 rule 2)", () => {
+  const TWO = "```nk-card\nfirst: 1\n```\n\ntext between\n\n```nk-card\nsecond: 2\nmore: 3\n```\n\ntail\n";
+
+  /** The SECOND fence's text, found by CONTENT rather than by an offset that the splice just moved. */
+  function secondFenceText(markdown: string): string {
+    const first = locateFence(markdown)!;
+    const rest = markdown.slice(first.blockEnd);
+    const second = locateFence(rest)!;
+    return rest.slice(second.blockStart, second.blockEnd);
+  }
+
+  const ORIGINAL_SECOND = "```nk-card\nsecond: 2\nmore: 3\n```\n";
+
+  test("the second fence is byte-identical when the first GROWS", () => {
+    const after = spliceFence(TWO, locateFence(TWO)!, "first: 1\nadded: yes\nand: more\n");
+    expect(secondFenceText(TWO)).toBe(ORIGINAL_SECOND);
+    expect(secondFenceText(after)).toBe(ORIGINAL_SECOND);
+    expect(after.endsWith("\n\ntail\n")).toBe(true);
+  });
+
+  test("…and when the first SHRINKS", () => {
+    const after = spliceFence(TWO, locateFence(TWO)!, "");
+    expect(secondFenceText(after)).toBe(ORIGINAL_SECOND);
+    expect(after).toBe("```nk-card\n```\n\ntext between\n\n```nk-card\nsecond: 2\nmore: 3\n```\n\ntail\n");
+  });
+});
+
+describe("spliceFence — the stale-fence throw", () => {
+  test("offsets from ANOTHER string are a caller bug and throw, not a silent corruption", () => {
+    const a = "```nk-card\na: 1\n```\n";
+    const b = "# different note\n\n```nk-card\nb: 2\n```\n";
+    expect(() => spliceFence(b, locateFence(a)!, "c: 3\n")).toThrow(/stale offsets/);
+  });
+
+  test("a hand-mutated offset pair throws even though it is self-consistent about nothing", () => {
+    const md = "```nk-card\na: 1\n```\n";
+    const f = locateFence(md)!;
+    expect(() => spliceFence(md, { ...f, bodyEnd: f.bodyEnd - 1 }, "x: 1\n")).toThrow(/stale offsets/);
+    expect(() => spliceFence(md, { ...f, bodyStart: f.bodyStart - 1 }, "x: 1\n")).toThrow(/stale offsets/);
+  });
+
+  test("it is unreachable from the write path — the splice runs on the located string", () => {
+    const md = "```nk-card\na: 1\n```\n";
+    expect(() => spliceFence(md, locateFence(md)!, "a: 2\n")).not.toThrow();
+  });
+});
+
+describe("the newline contract — 2.1 owns it, the codec does not", () => {
+  test("a located body carries its trailing newline; serializeFenceBody emits none", () => {
+    expect(locateFence("```nk-card\na: 1\n```\n")!.body).toBe("a: 1\n");
+    expect(locateFence("```nk-card\n```\n")!.body).toBe(""); // empty ⇒ bodyStart === bodyEnd
+    expect(serializeFenceBody({ a: "1" })).toBe("a: 1");
+    expect(serializeFenceBody({})).toBe("");
+  });
+
+  test("THE NEGATIVE CASE: splicing raw codec output DESTROYS the fence", () => {
+    // This is why `composeBody` exists (Story 2.2 AC #2) and why deleting it as a "simplification"
+    // must fail a test rather than a review.
+    const md = "```nk-card\na: 1\n```\n";
+    const broken = spliceFence(md, locateFence(md)!, serializeFenceBody({ a: "2" }));
+    expect(broken).toBe("```nk-card\na: 2```\n"); // the closing delimiter glued onto the last field
+    expect(locateFence(broken)).toBeNull(); // …and it is no longer a fence at all
+  });
+
+  test("…while the composed form survives the same round trip", () => {
+    const md = "```nk-card\na: 1\n```\n";
+    const fixed = spliceFence(md, locateFence(md)!, serializeFenceBody({ a: "2" }) + "\n");
+    expect(fixed).toBe("```nk-card\na: 2\n```\n");
+    expect(locateFence(fixed)!.body).toBe("a: 2\n");
+  });
 });
