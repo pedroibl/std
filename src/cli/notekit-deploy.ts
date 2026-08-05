@@ -100,8 +100,20 @@ export const NOTEKIT_SPEC: EdgeSpec = {
   watchDirs: watchDirs(),
   bannerPrefix: BANNER_PREFIX,
   banner: BANNER,
-  usage:
-    "usage: std notekit deploy --vault <dir> [--watch]   # bundle src/notekit -> <vault>/Scripts/notekit.js",
+  // ⚠ NAMES ALL FOUR VERBS, not just `deploy`. This string is what `runEdgeDeploy` prints verbatim on
+  // an unknown subcommand — and after Story 2.1 only the three read verbs are intercepted in `main.ts`,
+  // so `notekit bogus` / `notekit verify` / bare `notekit` all land here. A `deploy`-only usage line
+  // would therefore be the CLI telling a user it has one verb when it has four. No test forced this
+  // widening (main.test.ts's `toContain` would have stayed green on the old literal, and the deploy
+  // suite asserts nothing about `usage` at all) — it is a correctness fix, pinned at its new bytes in
+  // main.test.ts so it cannot silently narrow again.
+  usage: [
+    "usage: std notekit <deploy|render|validate|capabilities>",
+    "  deploy --vault <dir> [--watch]                 # bundle src/notekit -> <vault>/Scripts/notekit.js",
+    "  render <note> --config <path> [--at <iso>]     # preview a note as an nk-card; writes nothing",
+    "  validate --spec -                              # check a RenderSpec read from stdin",
+    "  capabilities --config <path>                   # list the declared note types",
+  ].join("\n"),
 };
 
 /** Where the bundle lands inside a vault. Pure — no fs touched. */

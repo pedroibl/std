@@ -412,10 +412,17 @@ describe("the emitted `_std` under a real zsh (AC2/AC3/AC6/AC7)", () => {
     expect(await probeNames(out, "bmad")).toEqual(["deploy", "install", "update", "verify"]);
     expect(await probeNames(out, "cn")).toEqual(["deploy", "verify"]);
     expect(await probeNames(out, "dashkit")).toEqual(["deploy", "verify"]);
-    // `deploy` ALONE — notekit v1 has no `verify` (Story 1.4 ⚠️-2), and the completer must not offer
-    // one. That the name arrived here at all is the D-a property working: `notekit` was added to
-    // SURFACE and nothing in the generator needed touching.
-    expect(await probeNames(out, "notekit")).toEqual(["deploy"]);
+    // NO `verify` — notekit v1 has none (Story 1.4 ⚠️-2), and the completer must not offer one. Story
+    // 2.1's three read verbs arrived here with NO generator change, which is the D-a property working:
+    // they were added to SURFACE and the completer followed. (The invariant is the absent `verify`, not
+    // the arity — this read "deploy ALONE" until 2.1, and prose outliving its property is a defect.)
+    expect(await probeNames(out, "notekit")).toEqual([
+      "capabilities",
+      "deploy",
+      "render",
+      "validate",
+    ]);
+    expect(await probeNames(out, "notekit")).not.toContain("verify");
   });
 });
 

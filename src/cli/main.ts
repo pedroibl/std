@@ -15,6 +15,7 @@ import { runCnVerify } from "./cn-verify";
 import { runDashkitDeploy } from "./dashkit-deploy";
 import { runDashkitVerify } from "./dashkit-verify";
 import { runNotekitDeploy } from "./notekit-deploy";
+import { runNotekitRead } from "./notekit-read";
 import { RepoNavError, defaultTargets, installAlias, type RepoConfig } from "./repo-nav";
 import { SURFACE, renderAliasUsage, renderHelp } from "./surface";
 
@@ -95,10 +96,17 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
   }
 
   if (cmd === "notekit") {
-    // No `verify` arm, and its absence is the ⚠️-2 decision made visible: notekit's plugin contract and
-    // `notekit verify`/`doctor` are FR18 (Epic 3), so v1 registers `deploy` only. A `notekit verify`
-    // typed today falls through to runNotekitDeploy's own usage line and exits 2, which is the right
-    // answer for a subcommand that does not exist yet.
+    // The READ surface (Story 2.1) — one-shot, writes nothing, and pre-dispatched here for the same
+    // reason `cn verify` is: it shares nothing with the deploy path, whose own usage line owns
+    // `deploy`. Everything else, `deploy` included, still falls through to runNotekitDeploy.
+    if (rest[0] === "render" || rest[0] === "validate" || rest[0] === "capabilities") {
+      return await runNotekitRead(rest, { log });
+    }
+    // Still no `verify` arm, and its absence is the ⚠️-2 decision made visible: notekit's plugin
+    // contract and `notekit verify`/`doctor` are FR18 (Epic 3). A `notekit verify` typed today falls
+    // through to runNotekitDeploy's own usage line and exits 2, which is the right answer for a
+    // subcommand that does not exist yet. 2.1 added three verbs beside `deploy` and did NOT fold
+    // `verify`/`doctor` forward — the invariant is "no `verify`", not "deploy alone".
     //
     // SIGINT is registered HERE, at the callsite, exactly as for cn and dashkit — never inside
     // `runWatch` (a signal handler or `process.exit` reachable from a test kills the test runner).
