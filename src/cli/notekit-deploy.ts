@@ -110,7 +110,8 @@ export const NOTEKIT_SPEC: EdgeSpec = {
   usage: [
     "usage: std notekit <deploy|render|validate|capabilities>",
     "  deploy --vault <dir> [--watch]                 # bundle src/notekit -> <vault>/Scripts/notekit.js",
-    "  render <note> --config <path> [--at <iso>]     # preview a note as an nk-card; writes nothing",
+    // Same correction as `surface.ts` and `notekit-read.ts`: 2.2's `--apply` falsified "writes nothing".
+    "  render <note> --config <path> [--at <iso>]     # preview a note as an nk-card; writes only with --apply",
     "  validate --spec -                              # check a RenderSpec read from stdin",
     "  capabilities --config <path>                   # list the declared note types",
   ].join("\n"),

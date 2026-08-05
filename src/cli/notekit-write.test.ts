@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { composeBody, runNotekitApply, type NotekitApplyDeps } from "./notekit-write";
-import { runNotekitRead } from "./notekit-read";
+import { errorText, runNotekitRead } from "./notekit-read";
 import { locateFence, parseFenceBody, serializeFenceBody, type FenceFields } from "../notekit/index";
 import { statMtime } from "../fsx";
 import { stripStringsAndComments } from "../../scripts/lib/specifiers";
@@ -211,6 +211,117 @@ describe("AC #5 row 8 — the write threw", () => {
       chmodSync(dir, 0o755);
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── the NON-`Error` THROW — CodeRabbit, PR #83 ─────────────────────────────────────────────────────
+//
+// `catch (e)` binds `unknown`, and JavaScript lets a `throw` carry ANY value. The shipped code read
+// `(e as Error).message ?? String(e)`, which is not a fallback: the property read runs BEFORE `??` can
+// apply, so a thrown `null`/`undefined` made the FORMATTING throw. Measured on `1ef02fb` before the fix:
+//
+//   writeNote throws null      → exit 1, but stderr read "std notekit: null is not an object
+//                                (evaluating 'e.message')" — the `nk-write-failed` envelope was LOST,
+//                                so a `--json` caller got NOTHING on stdout to branch on
+//   the re-read throws undefined → the TypeError ESCAPED `runNotekitApply` entirely, so `main.ts`
+//                                surfaced an unhandled rejection instead of the exit 1 that the outer
+//                                catch's own comment promises
+//
+// ⚠ THE SECOND ROW IS THE REAL DEFECT, and it is NOT the one the review described. The review's model
+// was that the inner catch's TypeError reaches the outer catch and escapes from there — measured, it
+// does reach the outer catch, and the outer catch formats a TypeError just fine (a TypeError IS an
+// Error), so exit 1 survives with a corrupted message. What actually escapes is a raw non-Error throw
+// landing in the OUTER catch with no inner catch between. Both are fixed by `errorText`; only the
+// second was a crash.
+describe("a thrown non-Error is still an exit code, never a crash", () => {
+  /** A reader that serves `MESSY`, then THROWS the given value on the nth call (1-based). */
+  function throwOnRead(n: number, thrown: unknown): () => string {
+    let calls = 0;
+    return () => {
+      calls += 1;
+      if (calls === n) throw thrown;
+      return MESSY;
+    };
+  }
+
+  test("INNER catch: a writer that throws `null` still emits nk-write-failed at exit 1", async () => {
+    const h = harness({
+      readNote: scriptedReads(MESSY, MESSY),
+      writeNote: () => {
+        throw null;
+      },
+    });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json"], h.deps)).toBe(1);
+    const env = envelope(h.out);
+    expect(env.error!.code).toBe("nk-write-failed"); // the envelope survives — it did not before
+    expect(String(env.error!.message)).toContain("null");
+    // …and it is NOT the TypeError text the old expression produced.
+    expect(String(env.error!.message)).not.toContain("e.message");
+  });
+
+  test("OUTER catch: a re-read that throws `undefined` RETURNS 1 — it used to escape the function", async () => {
+    // The load-bearing assertion is that `runNotekitApply` RESOLVES at all. `expect(...).toBe(1)` alone
+    // would report the old behaviour as a rejected promise rather than as a wrong exit code, so the
+    // resolution is captured explicitly first.
+    const h = harness({ readNote: throwOnRead(2, undefined), writeNote: () => {} });
+    let settled: number | string;
+    try {
+      settled = await runNotekitApply(["render", "n.md", ...CONFIG, "--json"], h.deps);
+    } catch (e) {
+      settled = `ESCAPED: ${e instanceof Error ? e.name : String(e)}`;
+    }
+    expect(settled).toBe(1);
+    expect(h.writes).toEqual([]); // it threw at step 4, before any write
+    expect(h.err.join("\n")).toContain("std notekit: undefined");
+    expect(h.err.join("\n")).not.toContain("e.message");
+  });
+
+  // ⚠ A REGISTRY LOADER THAT THROWS `null` IS A USAGE `2`, AND THAT IS A BEHAVIOUR CHANGE THE FIX
+  // CAUSED — recorded here rather than left for someone to trip over. `resolveRegistry` catches a
+  // failing `--config` and returns `null`, which is the usage `2` its own docblock prescribes. Before
+  // the fix that catch could not FORMAT a `null`: it raised a TypeError, which sailed past
+  // `resolveRegistry`'s return, landed in `runNotekitApply`'s outer catch, and came out as a fail-loud
+  // `1`. So the old code reported "the CLI crashed internally" for what is really "your --config is
+  // broken". The exit code moving 1 → 2 is the defect being removed, not a regression.
+  test("a registry loader that throws `null` is the usage 2, not a fail-loud 1", async () => {
+    const h = harness({
+      loadRegistry: async () => {
+        throw null;
+      },
+    });
+    let settled: number | string;
+    try {
+      settled = await runNotekitApply(["render", "n.md", ...CONFIG, "--json"], h.deps);
+    } catch (e) {
+      settled = `ESCAPED: ${e instanceof Error ? e.name : String(e)}`;
+    }
+    expect(settled).toBe(2);
+    expect(h.writes).toEqual([]);
+    expect(h.err.join("\n")).toContain("cannot load the note-type registry — null");
+    expect(h.out).toEqual([]); // usage puts nothing on stdout, `--json` or not
+  });
+
+  test("errorText itself: Error → message, everything else → String(e)", () => {
+    expect(errorText(new Error("boom"))).toBe("boom");
+    expect(errorText(new TypeError("wrong shape"))).toBe("wrong shape"); // subclasses narrow too
+    expect(errorText(null)).toBe("null");
+    expect(errorText(undefined)).toBe("undefined");
+    expect(errorText("a bare string")).toBe("a bare string");
+    expect(errorText(42)).toBe("42");
+    // ⚠ THE CASE `??` COULD NEVER HAVE COVERED, even if the property read had been safe: a non-Error
+    // object HAS no `message`, so `undefined ?? String(e)` fell through to "[object Object]" — the
+    // fallback fired and said nothing. `errorText` reaches the same text by the same route, so this
+    // pins the limit rather than claiming an improvement that is not there.
+    expect(errorText({ code: "x" })).toBe("[object Object]");
+  });
+
+  test("COUNTERFACTUAL: the expression that was replaced really does throw on these values", () => {
+    // The premise, executed rather than asserted in prose. If this ever stops throwing, the fix above
+    // is guarding nothing and this test says so.
+    const old = (e: unknown) => (e as Error).message ?? String(e);
+    expect(() => old(null)).toThrow(TypeError);
+    expect(() => old(undefined)).toThrow(TypeError);
+    expect(old(new Error("fine"))).toBe("fine"); // …and it was correct for the Error case all along
   });
 });
 

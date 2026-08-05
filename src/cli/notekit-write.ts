@@ -28,7 +28,7 @@
 import { hasFlag } from "../core/index";
 import { atomicWrite, readIfExists } from "../fsx";
 import { serializeFenceBody, spliceFence, type FenceFields } from "../notekit/index";
-import { emit, renderPlan, type NotekitReadDeps } from "./notekit-read";
+import { emit, errorText, renderPlan, type NotekitReadDeps } from "./notekit-read";
 
 /**
  * The write-path failure codes, new to this story. EDGE-level, never in `core`: "the file changed under
@@ -195,7 +195,10 @@ export async function runNotekitApply(
       if (deps.writeNote) deps.writeNote(plan.notePath, next);
       else atomicWrite(plan.notePath, next);
     } catch (e) {
-      return failWrite("nk-write-failed", plan.notePath, (e as Error).message ?? String(e), json, log, err);
+      // `errorText`, NEVER `(e as Error).message ?? String(e)`: the property read precedes the `??`, so
+      // a `writeNote` that threw `null` raised a TypeError out of THIS catch — the envelope was lost and
+      // the caller read the TypeError's text where `nk-write-failed` should have been. See `errorText`.
+      return failWrite("nk-write-failed", plan.notePath, errorText(e), json, log, err);
     }
 
     // ── 7. read back: never claim a write we did not confirm landed ───────────────────────────────
@@ -212,7 +215,13 @@ export async function runNotekitApply(
     // an exit code, because `main.ts` would otherwise surface it as an unhandled rejection rather than a
     // code. This path deliberately does NOT re-classify anything the plan already modelled — those
     // returned through the envelope above.
-    err(`std notekit: ${(e as Error).message ?? String(e)}`);
+    //
+    // ⚠ AND IT FORMATS THROUGH `errorText`. This is the LAST catch on the path, so the old
+    // `(e as Error).message ?? String(e)` failed exactly where it mattered most: a thrown `null` or
+    // `undefined` reaching here — `readIfExists` re-throwing a non-ENOENT fault, a caller `--config`
+    // raising a non-Error — made the property read itself throw, and the TypeError left
+    // `runNotekitApply` entirely. The fail-loud `1` this block promises was never returned.
+    err(`std notekit: ${errorText(e)}`);
     return 1;
   }
 }

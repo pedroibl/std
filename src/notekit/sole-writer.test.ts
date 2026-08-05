@@ -8,8 +8,32 @@
 // hard here without growing the shared gate set for one slice. Same call Story 2.1 made, same reason.
 //
 // ⚠ IT IS NOT NAMED `core-*`, deliberately: `check:core-purity` globs `src/notekit/core-*.ts`, and this
-// file reads the filesystem. It is also the one `*.test.ts` in the slice with no module beside it — it
-// covers a PROPERTY OF THE SLICE, not a unit. Both are recorded so neither reads as an oversight.
+// file reads the filesystem.
+//
+// ⚠ AND IT STAYS HERE — the #83 review asked for it to be folded into `src/cli/notekit-write.test.ts`
+// on the colocation rule (tests beside code as `*.test.ts`, NFR5/D6). DECLINED, on a census the review
+// did not run. `src/**` holds FOUR `*.test.ts` with no adjacent module, and all four are the same
+// shape — a slice-wide acceptance or fitness suite sitting at the ROOT of what it covers:
+//
+//   src/bmad/cli-dryrun.test.ts          the `std bmad` surface + the dry-run safety contract
+//   src/bmad/dual-surface-proof.test.ts  the Epic-0 dual-Surface render proof (shells the real binary)
+//   src/notekit/notewright-dispatch.test.ts  Story 2.3's dispatch-determinism gate
+//   this file                            Story 2.2's sole-writer gate
+//
+// So this is the fourth instance of a settled convention, not a lone exception with an excuse attached
+// — and `notewright-dispatch.test.ts` landed AFTER the review was written, which is why the review
+// could not see the pattern. The convention is asserted below rather than claimed here.
+//
+// The move would also cost what the rule exists to buy. Colocation is for DISCOVERABILITY: put the test
+// where a reader looks for it. A reader looking for "what stops a second writer appearing in this
+// slice" looks at the slice root, not four hundred lines into the unit-test file of the one module the
+// gate EXEMPTS. Folding it in would also relabel a slice property as a property of `notekit-write.ts`,
+// which is the one file whose behaviour it is NOT about.
+//
+// The third option — promoting it to a seventh `check:*` gate (`scripts/check-sole-writer.ts` + a
+// `package.json` entry + a CI step) — was reconsidered and re-declined for Story 2.2's original reason,
+// now checkable: all six shipped gates scan `src/**` or the whole tree, and this one is scoped to a
+// single slice. A shared gate set that grows a script per slice stops being a set of repo invariants.
 //
 // ⚠ THE SCAN NEVER INCLUDES THIS FILE. It necessarily carries all thirty banned names as its own list,
 // so a self-scan would be permanently red — or, if the list were moved into a string to dodge that,
@@ -207,6 +231,47 @@ describe("the banned set is the union, and it is closed", () => {
     expect(text).toContain("export function truncate");
     // …while `truncateSync`, the one that does touch a disk, IS banned.
     expect(BANNED).toContain("truncateSync");
+  });
+});
+
+describe("this suite's own location is a convention, not an exception (#83 review, declined)", () => {
+  /** Every `*.test.ts` under `src/` with no `<name>.ts` beside it. */
+  async function orphanSuites(): Promise<string[]> {
+    const found: string[] = [];
+    for await (const file of new Bun.Glob("src/**/*.test.ts").scan({ cwd: ROOT })) {
+      const path = file.split("\\").join("/");
+      const module = `${path.slice(0, -".test.ts".length)}.ts`;
+      if (!(await Bun.file(join(ROOT, module)).exists())) found.push(path);
+    }
+    return found.sort();
+  }
+
+  test("this file is NOT the only slice-property suite — the review's premise was that it was", async () => {
+    const orphans = await orphanSuites();
+    expect(orphans).toContain("src/notekit/sole-writer.test.ts");
+    // ⚠ ASSERTED AS "MORE THAN ONE", NOT AS THE EXACT LIST. The claim being defended is that the shape
+    // is a convention; pinning the exact four would go red the day an unrelated slice adds or retires
+    // one, and someone would then "fix" it by editing this line rather than by re-reading the argument.
+    expect(orphans.length).toBeGreaterThan(1);
+  });
+
+  test("the siblings named in the header still exist, so the census is not stale prose", async () => {
+    const orphans = await orphanSuites();
+    // If one of these genuinely moves, this goes red and the header above must be re-censused — which
+    // is the point. A comment that cannot go stale silently is worth more than a longer comment.
+    for (const sibling of [
+      "src/bmad/cli-dryrun.test.ts",
+      "src/bmad/dual-surface-proof.test.ts",
+      "src/notekit/notewright-dispatch.test.ts",
+    ]) {
+      expect(orphans).toContain(sibling);
+    }
+  });
+
+  test("…and the module it was asked to move into is a real file with its own adjacent module", async () => {
+    // The alternative home is not imaginary — the decline is a judgement between two real options.
+    expect(await Bun.file(join(ROOT, "src", "cli", "notekit-write.test.ts")).exists()).toBe(true);
+    expect(await Bun.file(join(ROOT, PERMITTED)).exists()).toBe(true);
   });
 });
 

@@ -272,9 +272,31 @@ export function locateFence(markdown: string): LocatedFence | null {
  * very string its fence was located in. It is NOT the write path's re-read that makes it unreachable —
  * that happens after the splice and guards a different thing (the file changing under us) — so the guard
  * is exercised directly at unit level rather than left as an untested arm.
+ *
+ * ⚠ THE GUARD CHECKS THE OFFSETS THEMSELVES, NOT ONLY THE BYTES THEY SELECT, and the byte compare alone
+ * was NOT enough. `String.prototype.slice` clamps and REORDERS silently, so a degenerate offset pair
+ * whose slice happens to equal `fence.body` walked straight through and then corrupted the note.
+ * Measured 2026-08-06 against `markdown = "abcdef"`, splicing `"X"`:
+ *
+ *   `{body:"", bodyStart:4, bodyEnd:2}`  → `slice(4,2)` is `""`, matches → `"abcdXcdef"` — `"cd"` DUPLICATED
+ *   `{body:"", bodyStart:-1, bodyEnd:2}` → `slice(-1,2)` is `""`, matches → `"abcdeXcdef"` — same shape
+ *   `{body:"ef", bodyStart:4, bodyEnd:99}` → matches → `"abcdX"` — the tail SILENTLY DROPPED
+ *   `{body:"ef", bodyStart:4.7, bodyEnd:6}` → matches → a nonsense fence accepted
+ *
+ * `locateFence` produces none of these, so the CLI write path was never at risk. But `spliceFence` is
+ * exported from `src/notekit/index.ts`, so a later story can hand it a fence LITERAL — and a guard that
+ * only holds for the shapes one well-behaved producer emits is not the guard this docblock claims. Five
+ * ordering/range clauses make "these offsets do not belong to this string" true for those cases too.
  */
 export function spliceFence(markdown: string, fence: LocatedFence, body: string): string {
-  if (markdown.slice(fence.bodyStart, fence.bodyEnd) !== fence.body) {
+  if (
+    !Number.isInteger(fence.bodyStart) ||
+    !Number.isInteger(fence.bodyEnd) ||
+    fence.bodyStart < 0 ||
+    fence.bodyEnd < fence.bodyStart ||
+    fence.bodyEnd > markdown.length ||
+    markdown.slice(fence.bodyStart, fence.bodyEnd) !== fence.body
+  ) {
     throw new Error("nk-fence splice: the fence does not match this markdown (stale offsets)");
   }
   return markdown.slice(0, fence.bodyStart) + body + markdown.slice(fence.bodyEnd);
