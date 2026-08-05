@@ -17,6 +17,21 @@
 // ONLY, never itself — a self-scan would be permanently red, and hiding the lists behind an indirection
 // to dodge that would make it permanently green. Vacuous either way, so the scope is fixed and stated.
 //
+// ⚠ ONE DEFECT HERE WAS FOUND BY THE BEHAVIOURAL PROOF, NOT BY THIS FILE — and the gate was extended
+// afterwards so it cannot come back. The skill named `--config` in prose and handed over no path, so
+// the subagent `find`-swept the tree for a registry. Every file-reading check was green throughout,
+// because they all asked whether the flag was MENTIONED. The added assertions ask what the flag
+// CARRIES (`configArgs` below). Any future gate over these files should ask the same kind of question.
+//
+// ⚠ A SECOND DEFECT WAS ALSO FOUND BEHAVIOURALLY, NOT BY THIS FILE — and gate (d) below was added so it
+// cannot come back. The skill body asserted that "an absent positional arrives as the empty string … not
+// some 'unset' state that never occurs". The second fork proof read the prompt the subagent ACTUALLY
+// received at Claude Code 2.1.222: `$0` and `$1` substituted, `$2` left in place as the two-character
+// literal `$2`. So the emptiness check the file described never ran on the one input that was missing.
+// The guard held — on the model recognising an unfilled placeholder, which is judgment, not a test. Gate
+// (d) asserts the condition covers BOTH arrival forms for every positional, and pins the false sentence
+// out: a reassurance that is wrong is a defect in a body an agent reads, not merely untidy prose.
+//
 // ⚠ THE SIX ERROR CODES ARE HARDCODED HERE. Story 2.1 exports `NotekitReadErrorCode` and
 // `NotekitErrorCode` as TYPES ONLY (`src/cli/notekit-read.ts:62,74`) — a TS union erases at runtime, and
 // 2.1 shipped no `as const` runtime mirror beside it (`core-renderspec.ts:157`'s `KNOWN_CODES` is not
@@ -59,6 +74,9 @@ const TYPE_LITERALS = ["nk-card", "nk-primer", "nk-protocol", "nk-pattern"];
 /** AC #5 — caller-state phrases. ALL MULTI-WORD ON PURPOSE: a single-word list ("earlier", "above")
  *  reddens on correct prose, and the first dev to hit that deletes the gate. */
 const CALLER_STATE = ["as discussed", "you mentioned", "the note we", "earlier in this conversation"];
+
+/** Gate (d) — every positional the skill body reads. `$0` mode, `$1` note path, `$2` config path. */
+const POSITIONALS = ["$0", "$1", "$2"];
 
 // ── pure functions: every gate is one, so every gate has a watched counterfactual ────────────────
 // Declared as hoisted `function`s at module scope. Both the real assertions and their counterfactuals
@@ -115,6 +133,88 @@ function shellLines(text: string): string[] {
     if (inBlock && t.length > 0 && !t.startsWith("#")) out.push(t);
   }
   return out;
+}
+
+/**
+ * Gate (c) — the config handoff. For every `--config` occurrence inside a ```bash / ```sh fence, the
+ * token that IMMEDIATELY FOLLOWS the flag. A trailing `--config` with nothing after it yields `""`,
+ * which fails the substitution assertion instead of passing vacuously.
+ *
+ * ⚠ THIS IS WHY THE ASSERTION IS NOT `text.includes("--config")`. The behavioural fork proof (AC #3m)
+ * caught the skill mentioning `--config` in prose while handing over no path, and the subagent then
+ * `find`-swept the tree for a registry — the exact behaviour its own body forbids. A gate that greps
+ * for the flag would have been GREEN throughout that defect. What has to be true is that the flag
+ * carries a SUBSTITUTED POSITIONAL, so this reads the argument rather than the mention.
+ */
+function configArgs(text: string): string[] {
+  const out: string[] = [];
+  for (const line of shellLines(text)) {
+    const parts = line.split(/\s+/);
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i] === "--config") out.push(parts[i + 1] ?? "");
+    }
+  }
+  return out;
+}
+
+/**
+ * Gate (d) — the body as LOGICAL lines: a markdown source line joined with every wrapped continuation
+ * of it, whitespace-collapsed. A rule whose sentence wraps across three source lines is ONE entry here.
+ *
+ * ⚠ WHY NOT `text.split("\n")`. Every rule gate (d) checks is a long sentence, and long sentences wrap.
+ * A raw line scan asking "does the line naming `$2` also name the placeholder form?" would answer no on
+ * a correct file purely because the clause landed on the next source line — a false-positive machine,
+ * and the first dev to hit it deletes the gate. Joining first is what lets the assertions be about the
+ * RULE rather than about where the author happened to wrap.
+ *
+ * Fenced blocks are passed through line-by-line, never joined: their lines are commands, not prose, and
+ * `shellLines` above is the function that reads them.
+ */
+function logicalLines(text: string): string[] {
+  const out: string[] = [];
+  let inFence = false;
+  for (const raw of text.split(/\r?\n/)) {
+    const t = raw.trim();
+    if (t.startsWith("```")) { inFence = !inFence; out.push(t); continue; }
+    if (t.length === 0 || inFence) { out.push(t); continue; }
+    const prev = out[out.length - 1];
+    const continues =
+      prev !== undefined && prev.length > 0 && !prev.startsWith("```") && !prev.startsWith("#") &&
+      !/^([-*+]\s|#{1,6}\s|\d+[.)]\s|>|\|)/.test(t);
+    if (continues) out[out.length - 1] = `${prev} ${t}`;
+    else out.push(t);
+  }
+  return out.filter((l) => l.length > 0);
+}
+
+/**
+ * Gate (d) — the body's ONE definition of an unfilled input: the rule naming BOTH arrival forms.
+ *
+ * ⚠ BOTH FORMS IN THE SAME RULE, deliberately. Two mentions in two unrelated places would satisfy a
+ * pair of `toContain` checks while leaving the actual condition written on emptiness alone — which is
+ * precisely the state the second fork proof found, where the file's reassuring prose and its operative
+ * check disagreed. Requiring one rule to carry both is what makes them impossible to drift apart.
+ */
+function unfilledRule(text: string): string[] {
+  return logicalLines(text).filter((l) => {
+    const lower = l.toLowerCase();
+    return lower.includes("empty string") && lower.includes("dollar sign");
+  });
+}
+
+/** Gate (d) — the fail-loud stop condition: the rule that governs both stoppable positionals. */
+function stopGuard(text: string): string[] {
+  return logicalLines(text).filter((l) => l.includes("`$1` is empty") && l.includes("`$2` is empty"));
+}
+
+/** Gate (d) — the rule stating the mode default. */
+function modeDefault(text: string): string[] {
+  return logicalLines(text).filter((l) => l.includes("`$0`") && l.includes("`transform`"));
+}
+
+/** Markdown emphasis stripped and lowercased, so an assertion is about words, not about `**`. */
+function plain(text: string): string {
+  return text.replace(/\*\*/g, "").toLowerCase();
 }
 
 /** Every `nk-`-prefixed token in the text. Strict by design: any non-member is a finding. */
@@ -459,9 +559,13 @@ describe("notewright dispatch — gate (c): content assertions", () => {
     expect(skillText).not.toMatch(/!`/);
   });
 
-  test("AC #5 — the skill body fails loud on an EMPTY note path, not an unset one", () => {
-    // An absent positional substitutes to the empty string, so a body branching on "unset" would describe
-    // a state that never occurs — the same silent-default trap 2.1 bans at the flag level, one layer up.
+  test("AC #5 — the skill body fails loud on a note path that never arrived", () => {
+    // ⚠ THIS COMMENT SAID THE OPPOSITE AND WAS WRONG. It read: "an absent positional substitutes to the
+    // empty string, so a body branching on 'unset' would describe a state that never occurs". The second
+    // fork proof read the DELIVERED prompt at 2.1.222 and found the unfilled positional arriving as the
+    // literal `$N` — the state that "never occurs" is the one that occurred. Gate (d) carries the
+    // corrected condition. This assertion keeps only its narrower claim: the body branches on the note
+    // path and prints a usage line. Emptiness is still one real arrival form, so `empty` stays required.
     expect(skillText).toContain("$1");
     expect(skillText.toLowerCase()).toContain("empty");
     expect(skillText.toLowerCase()).toContain("usage:");
@@ -470,6 +574,92 @@ describe("notewright dispatch — gate (c): content assertions", () => {
   test("AC #5 — the catalog is reached by calling `capabilities`, never restated", () => {
     expect(agentText).toContain("std notekit capabilities --config");
     expect(skillText).toContain("std notekit capabilities --config");
+  });
+
+  test("AC #5 — the skill HANDS the config over as `$2`; it does not leave the agent to find one", () => {
+    // FOUND BY THE BEHAVIOURAL FORK PROOF (AC #3m), not by any file-reading gate: the skill named
+    // `--config` in prose and supplied no path, while the agent body says "`<note>` and `<config>` are
+    // the paths handed to you. You do not discover them." Nothing handed one over, so the subagent
+    // spent its first two `Bash` calls `find`-sweeping for a registry and landed on the right file only
+    // because the fixture config happened to sit beside the fixture note. Against a tree holding more
+    // than one registry that is a wrong render delivered confidently.
+    //
+    // ⚠ THIS ASSERTS SUBSTITUTION, NOT PRESENCE. `skillText.includes("--config")` was TRUE throughout
+    // the defect. What must be true is that every `--config` inside a shell fence is followed by the
+    // substituted positional, so the assertion reads the ARGUMENT the flag carries.
+    const args = configArgs(skillText);
+    expect(args.length).toBeGreaterThan(0);
+    for (const arg of args) expect(arg).toBe("$2");
+
+    // Both verbs the skill runs must carry it — a config on `capabilities` but not on `render` would
+    // read the catalog from one registry and render against a discovered other.
+    const configured = shellLines(skillText).filter((l) => l.includes("--config"));
+    expect(configured.some((l) => l.includes("notekit capabilities"))).toBe(true);
+    expect(configured.some((l) => l.includes("notekit render"))).toBe(true);
+
+    // The unsubstituted placeholder belongs to the AGENT's generic body, never to the skill's rendered
+    // one: the skill is the surface the harness substitutes into, so a placeholder surviving here means
+    // the handover did not happen.
+    expect(skillText).not.toContain("--config <config>");
+
+    // And the positional is declared as an input, not only used in a command.
+    expect(skillText).toContain("`$2`");
+  });
+
+  test("AC #5 — the skill body fails loud on an EMPTY config path and offers NO discovery fallback", () => {
+    // Same shape as the note-path guard above, because it is the same failure. ⚠ The reason stated here
+    // used to be "an absent positional arrives as the empty string, so the branch is on emptiness, never
+    // on 'unset'" — false at 2.1.222, corrected in gate (d). Emptiness is still a REQUIRED clause (an
+    // explicitly-empty argument is a real arrival form); it is simply no longer a SUFFICIENT one.
+    const lower = skillText.toLowerCase();
+    expect(skillText).toContain("`$2` is empty");
+    expect(lower).toContain("usage:");
+
+    // The guard must STOP. A warning that lets the run continue is worse than no guard: it reads as
+    // handled while the sweep still happens. `--apply` arrives on this same surface in Story 2.4, so a
+    // discovered-registry run stops being a wrong preview and becomes a wrong write.
+    expect(lower).toContain("no fallback");
+    expect(lower).toMatch(/do not search the tree|do not fall back/);
+
+    // The usage line the human reads must name the real arity, and `argument-hint` must agree with it —
+    // a hint that lags the body is how a caller learns the wrong invocation.
+    const hint = parseFrontmatter(skillText)["argument-hint"];
+    expect(typeof hint).toBe("string");
+    expect(hint as string).toContain("<config-path>");
+    expect(skillText).toContain(`usage: /notewright ${hint as string}`);
+  });
+
+  // ── counterfactual 6: the defect itself, replanted ──
+  test("COUNTERFACTUAL 6 — a `--config` with no substituted positional is caught", () => {
+    // This is the shipped-and-reviewed state of the file before this fix: the flag present, the path
+    // absent. `includes("--config")` stays true; `configArgs` reports the placeholder.
+    const mutated = skillText.replaceAll("--config $2", "--config <config>");
+    expect(mutated).toContain("--config");                 // the grep-style check still passes…
+    expect(configArgs(mutated)).not.toEqual(["$2", "$2"]); // …and the substitution check does not
+    expect(configArgs(mutated).every((a) => a === "$2")).toBe(false);
+
+    // A flag dangling at end-of-line yields "" rather than reading past the array end.
+    expect(configArgs("```bash\nstd notekit render $1 --config\n```")).toEqual([""]);
+  });
+
+  test("COUNTERFACTUAL 6b — dropping the config from ONE of the two verbs is caught", () => {
+    const mutated = skillText.replace("std notekit render $1 --config $2 --json", "std notekit render $1 --json");
+    const configured = shellLines(mutated).filter((l) => l.includes("--config"));
+    expect(configured.some((l) => l.includes("notekit render"))).toBe(false);
+    expect(configured.some((l) => l.includes("notekit capabilities"))).toBe(true); // the other half still there
+  });
+
+  // ── counterfactual 7: the guard deleted ──
+  test("COUNTERFACTUAL 7 — deleting the absent-config guard reddens the guard assertion", () => {
+    const mutated = skillText.replace("If `$1` is empty, or if `$2` is empty,", "If `$1` is empty,");
+    expect(mutated).not.toContain("`$2` is empty");
+    expect(skillText).toContain("`$2` is empty"); // and the real file still has it
+  });
+
+  test("COUNTERFACTUAL 7b — a guard that permits a fallback is caught", () => {
+    const mutated = skillText.replace("there is no fallback", "otherwise search for one");
+    expect(mutated.toLowerCase()).not.toContain("no fallback");
+    expect(skillText.toLowerCase()).toContain("no fallback");
   });
 
   test("AC #6 — the branch field is `code`; `error.kind` appears zero times", () => {
@@ -511,6 +701,118 @@ describe("notewright dispatch — gate (c): content assertions", () => {
       expect(text).not.toContain("/Users/");
       expect(text).not.toContain("Documents/");
     }
+  });
+});
+
+describe("notewright dispatch — gate (d): an unfilled positional is DETECTED, never assumed empty", () => {
+  // FR-20 requires a missing input to fail loud. Before this gate the body's condition was emptiness
+  // alone, and the transcript shows the missing input arriving NOT empty. What follows asserts the
+  // condition the body actually instructs, for every positional it reads — never the presence of a word.
+
+  test("the body defines an unfilled input as EMPTY OR the placeholder literal, in ONE rule", () => {
+    const defs = unfilledRule(skillText);
+    expect(defs.length).toBe(1);
+    expect(defs[0]!.toLowerCase()).toContain("unfilled");
+    // The rule governs every positional the body reads, each named by its digit — so a fourth positional
+    // added later cannot inherit the rule silently while sitting outside it.
+    for (const p of POSITIONALS) expect(defs[0]!).toContain("`" + p.slice(1) + "`");
+  });
+
+  test("COUNTERFACTUAL 8 — a rule naming only emptiness is caught", () => {
+    // ⚠ DERIVED FROM THE LIVE FILE, like counterfactuals 6, 7 and 9–11. That is deliberate — a mutant
+    // frozen into a literal stops tracking the file it guards, and goes green the day the file changes
+    // out from under it. The cost is that these break their own precondition while the live file is
+    // itself mutated during a watched counterfactual run, which is expected and reported, not patched.
+    const mutated = skillText.replace("a dollar sign followed by that input's digit", "the empty string");
+    expect(unfilledRule(mutated)).toEqual([]);
+    expect(unfilledRule(skillText).length).toBe(1);
+  });
+
+  test("the fail-loud stop fires on BOTH arrival forms of `$1` and `$2`", () => {
+    const guard = stopGuard(skillText);
+    expect(guard.length).toBe(1);
+    const lower = guard[0]!.toLowerCase();
+    expect(lower).toContain("unfilled");     // absent from the emptiness-only version this replaced
+    expect(lower).toContain("placeholder");  // and it names WHICH other form, not just "or otherwise"
+    expect(lower).toContain("run nothing");  // and it still stops rather than warning and continuing
+  });
+
+  test("COUNTERFACTUAL 9 — an emptiness-only stop condition is caught", () => {
+    const mutated = skillText.replace(", or if either arrives unfilled in the placeholder form", "");
+    const guard = stopGuard(mutated);
+    expect(guard.length).toBe(1);                                // the guard sentence survives…
+    expect(guard[0]!.toLowerCase()).not.toContain("unfilled");   // …covering one arrival form only
+    expect(stopGuard(skillText)[0]!.toLowerCase()).toContain("unfilled");
+  });
+
+  test("the `transform` default fires on an unfilled `$0`, not only an empty one", () => {
+    // The second fork proof supplied `$0` explicitly in both runs, so the default path is UNVERIFIED
+    // behaviourally. Given what `$2` did, an omitted `$0` plausibly arrives as the literal `$0` too —
+    // so the default is written to cover both forms rather than waiting for a proof that it must be.
+    const mode = modeDefault(skillText);
+    expect(mode.length).toBe(1);
+    expect(mode[0]!.toLowerCase()).toContain("unfilled");
+  });
+
+  test("COUNTERFACTUAL 10 — a mode default written on emptiness alone is caught", () => {
+    const mutated = skillText.replace("when that arrives unfilled, the mode is", "when that is empty, the mode is");
+    expect(modeDefault(mutated).length).toBe(1);
+    expect(modeDefault(mutated)[0]!.toLowerCase()).not.toContain("unfilled");
+  });
+
+  test("no positional's guard rests on emptiness alone", () => {
+    // The universal form of the three assertions above: whatever rule governs a positional, if it talks
+    // about emptiness at all it must also cover the placeholder form. A fourth positional added with an
+    // emptiness-only guard reddens here even if nobody thinks to add a named test for it.
+    for (const p of POSITIONALS) {
+      const governing = logicalLines(skillText).filter((l) => l.includes("`" + p + "`") && /empty|unfilled/i.test(l));
+      expect(governing.length).toBeGreaterThan(0);
+      for (const l of governing) expect(l.toLowerCase()).toContain("unfilled");
+    }
+    expect(POSITIONALS.length).toBe(3);
+  });
+
+  test("COUNTERFACTUAL 10b — reverting ANY ONE positional to emptiness alone is caught", () => {
+    const governed = (text: string, p: string) =>
+      logicalLines(text).filter((l) => l.includes("`" + p + "`") && /empty|unfilled/i.test(l));
+    for (const [from, to] of [
+      ["when that arrives unfilled, the mode is", "when that is empty, the mode is"],
+      [", or if either arrives unfilled in the placeholder form", ""],
+    ] as Array<[string, string]>) {
+      const mutated = skillText.replace(from, to);
+      const slipped = POSITIONALS.flatMap((p) => governed(mutated, p)).filter((l) => !l.toLowerCase().includes("unfilled"));
+      expect(slipped.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("the body no longer claims an absent positional arrives as the empty string", () => {
+    // A false reassurance in a body an agent reads is a defect, not untidy prose: it tells a reader the
+    // guard is deterministic when it is not, and it invites the next author to write the emptiness-only
+    // check again. So the wrong sentence is pinned OUT and the right one is pinned IN.
+    expect(plain(skillText)).not.toContain("an absent positional arrives as the empty string");
+    expect(plain(skillText)).not.toContain("state that never occurs");
+    expect(plain(skillText)).not.toContain("checks on emptiness");
+    // Stated positively and sourced to the version it was measured at, so the claim can be re-checked
+    // rather than believed — the same reason gate (b) reads the installed binary instead of a doc.
+    expect(plain(skillText)).toContain("an absent positional does not reliably arrive as the empty string");
+    expect(skillText).toContain("2.1.222");
+  });
+
+  test("COUNTERFACTUAL 11 — the false reassurance is caught if it returns verbatim", () => {
+    const mutated = skillText.replace(
+      /An absent positional does \*\*not\*\* reliably arrive[\s\S]*?actually missing\./,
+      'An absent positional arrives as the empty string, so both of these are checks on emptiness — not on\nsome "unset" state that never occurs.',
+    );
+    expect(plain(mutated)).toContain("an absent positional arrives as the empty string");
+    expect(plain(mutated)).toContain("state that never occurs");
+    expect(plain(mutated)).toContain("checks on emptiness");
+    expect(plain(skillText)).not.toContain("an absent positional arrives as the empty string");
+  });
+
+  test("the body reads no positional beyond the three it declares", () => {
+    for (const p of POSITIONALS) expect(skillText).toContain(p);
+    expect(skillText).not.toContain("$3");
+    expect(skillText).not.toContain("$4");
   });
 });
 
