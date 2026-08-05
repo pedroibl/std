@@ -1,5 +1,11 @@
 import { test, expect } from "bun:test";
-import { parseFenceBody, serializeFenceBody, type FenceFields } from "./core-fence";
+import {
+  locateFence,
+  parseFenceBody,
+  serializeFenceBody,
+  type FenceFields,
+  type LocatedFence,
+} from "./core-fence";
 
 test("parses `key: value` lines", () => {
   expect(parseFenceBody("title: Primer\nstatus: draft")).toEqual({
@@ -181,4 +187,115 @@ test("serializeFenceBody writes OWN elements only — a hole is empty, not the i
     delete proto[0];
     delete proto[1];
   }
+});
+
+// ── locateFence — the container half of the grammar (Story 2.1) ──────────────────────────────────
+
+/**
+ * The four offsets have no consumer in this story (`render` reads `type` and `body`), so they are
+ * asserted as ROUND-TRIP PROPERTIES rather than as pinned numbers that would drift. Every matching
+ * case runs through here, including the ones where an off-by-one hides: CRLF and an empty body.
+ */
+function expectOffsetsFaithful(markdown: string, f: LocatedFence): void {
+  expect(markdown.slice(f.bodyStart, f.bodyEnd)).toBe(f.body);
+  expect(f.blockStart).toBeLessThanOrEqual(f.bodyStart);
+  expect(f.bodyStart).toBeLessThanOrEqual(f.bodyEnd);
+  expect(f.bodyEnd).toBeLessThanOrEqual(f.blockEnd);
+  const block = markdown.slice(f.blockStart, f.blockEnd);
+  expect(block.startsWith("```")).toBe(true);
+  // Ends past the closing run's terminator: either at EOF, or with the terminator included.
+  expect(/```[ \t]*(\r\n|\r|\n)?$/.test(block)).toBe(true);
+}
+
+test("locateFence finds an nk-fence and returns the CAPTURED type, not the info string", () => {
+  const md = "# Note\n\n```nk-card\ntitle: Primer\n```\n";
+  const f = locateFence(md)!;
+  expect(f).not.toBeNull();
+  expect(f.type).toBe("card"); // `card`, what resolveTemplate routes on — never `nk-card`
+  expectOffsetsFaithful(md, f);
+});
+
+test("the body INCLUDES its trailing newline — the one fact Story 2.2's splice depends on", () => {
+  expect(locateFence("```nk-card\na: 1\n```\n")!.body).toBe("a: 1\n");
+});
+
+test("locateFence returns null when there is no fence at all", () => {
+  expect(locateFence("# Just prose\n\nnothing fenced here.\n")).toBeNull();
+});
+
+test("a js-engine fence is not an nk-fence", () => {
+  expect(locateFence("```js-engine\nconst x = 1;\n```\n")).toBeNull();
+});
+
+test("the grammar is `[a-z]+` — an uppercase info string does not match", () => {
+  expect(locateFence("```nk-Card\ntitle: x\n```\n")).toBeNull();
+});
+
+test("an empty body yields bodyStart === bodyEnd and an empty string", () => {
+  const md = "```nk-card\n```\n";
+  const f = locateFence(md)!;
+  expect(f.body).toBe("");
+  expect(f.bodyStart).toBe(f.bodyEnd);
+  expectOffsetsFaithful(md, f);
+});
+
+test("CRLF line endings are located byte-faithfully — the body keeps its \\r\\n", () => {
+  const md = "# Note\r\n\r\n```nk-card\r\ntitle: Primer\r\n```\r\n";
+  const f = locateFence(md)!;
+  expect(f.type).toBe("card");
+  expect(f.body).toBe("title: Primer\r\n");
+  expectOffsetsFaithful(md, f);
+  // The codec normalizes what the locator preserves — the two halves stay separable.
+  expect(parseFenceBody(f.body)).toEqual({ title: "Primer" });
+});
+
+test("an unterminated nk-fence is null, never a fence running to EOF", () => {
+  expect(locateFence("```nk-card\ntitle: Primer\n")).toBeNull();
+});
+
+test("the FIRST nk-fence wins — Story 2.2 splices on that", () => {
+  const md = "```nk-card\nfirst: 1\n```\n\ntext\n\n```nk-card\nsecond: 2\n```\n";
+  const f = locateFence(md)!;
+  expect(f.body).toBe("first: 1\n");
+  expectOffsetsFaithful(md, f);
+});
+
+test("a non-nk fence is walked THROUGH, so a code sample cannot masquerade as a fence", () => {
+  // Without block-skipping, the ```nk-card line inside the js block would match and a code sample
+  // could rewrite the note.
+  const md = "```js\n// ```nk-card\n// evil: yes\n```\n\n```nk-card\nreal: yes\n```\n";
+  const f = locateFence(md)!;
+  expect(f.body).toBe("real: yes\n");
+  expectOffsetsFaithful(md, f);
+});
+
+test("a non-nk fence with no nk-fence after it is null", () => {
+  expect(locateFence("```\nplain code\n```\n")).toBeNull();
+});
+
+test("a longer closing run closes the block; a shorter one does not", () => {
+  const md = "````nk-card\na: 1\n```\nstill body\n````\n";
+  const f = locateFence(md)!;
+  expect(f.body).toBe("a: 1\n```\nstill body\n");
+  expectOffsetsFaithful(md, f);
+});
+
+test("an indented fence reports blockStart at the backtick run, not at the indent", () => {
+  const md = "  ```nk-card\ntitle: x\n  ```\n";
+  const f = locateFence(md)!;
+  expect(f.blockStart).toBe(2);
+  expectOffsetsFaithful(md, f);
+});
+
+test("locateFence is total on non-string input rather than throwing", () => {
+  expect(locateFence(null as unknown as string)).toBeNull();
+  expect(locateFence(7 as unknown as string)).toBeNull();
+});
+
+test("a fence at EOF with no trailing newline still closes, blockEnd at the string end", () => {
+  const md = "```nk-card\na: 1\n```";
+  const f = locateFence(md)!;
+  expect(f.body).toBe("a: 1\n");
+  expect(f.blockEnd).toBe(md.length);
+  expectOffsetsFaithful(md, f);
 });

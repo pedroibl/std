@@ -211,6 +211,32 @@ const DEPLOY_VAULT = {
   desc: "the Obsidian vault to deploy into (required — std bakes in no vault path)",
 } as const;
 
+// The notekit READ-surface flags (Story 2.1). Stated as consts beside the `--vault` pair for the same
+// reason: `--config` is declared by two subcommands, and one const is one place for the shipped help
+// to say it. `check:surface-drift` matches on flag NAME, and `config`/`at`/`spec` are the three names
+// genuinely new to its global union — `json` is already in it via JSON_FLAG.
+const NOTEKIT_CONFIG = {
+  name: "--config",
+  arity: "value",
+  metavar: "<path>",
+  value: "path",
+  desc: "the caller-local note-type registry to read (required — std bakes in no registry)",
+} as const;
+
+const NOTEKIT_AT = {
+  name: "--at",
+  arity: "value",
+  metavar: "<iso>",
+  desc: "stamp the card with this timestamp instead of the clock, making the output byte-reproducible",
+} as const;
+
+const NOTEKIT_SPEC_STDIN = {
+  name: "--spec",
+  arity: "value",
+  metavar: "-",
+  desc: "read the candidate RenderSpec from stdin; `-` is the only accepted value",
+} as const;
+
 const VERIFY_VAULT = {
   name: "--vault",
   arity: "value",
@@ -319,11 +345,12 @@ export const SURFACE = {
     },
     {
       name: "notekit",
-      // ⚠ `deploy` ONLY, and no `verify` sibling — unlike cn and dashkit. notekit v1 ships no plugin
-      // envelope (Story 1.4 ⚠️-2: the contract + `notekit verify`/`doctor` are FR18, Epic 3), so the
-      // model must not offer a subcommand the CLI would reject. The asymmetry is the decision, not an
-      // omission. ⚠ Naming a vault in this `desc` is a RED BUILD (check:no-consumer-ids scans src/**).
-      desc: "bundle the notekit Obsidian edge",
+      // ⚠ NO `verify` SIBLING — unlike cn and dashkit. notekit v1 ships no plugin envelope (Story 1.4
+      // ⚠️-2: the contract + `notekit verify`/`doctor` are FR18, Epic 3), so the model must not offer a
+      // subcommand the CLI would reject. That absence is the decision, and it survives Story 2.1's
+      // three read verbs landing beside `deploy` — the invariant is "no `verify`", never "deploy alone".
+      // ⚠ Naming a vault in this `desc` is a RED BUILD (check:no-consumer-ids scans src/**).
+      desc: "render, check, and bundle the notekit Obsidian edge",
       subcommands: [
         {
           name: "deploy",
@@ -338,8 +365,39 @@ export const SURFACE = {
             },
           ],
         },
+        {
+          name: "render",
+          desc: "preview a note as an nk-card; writes nothing (the sole-writer path is a later story)",
+          flags: [NOTEKIT_CONFIG, NOTEKIT_AT, JSON_FLAG],
+        },
+        {
+          name: "validate",
+          // ⚠ NO `--config`, deliberately. `validate` checks a candidate against std's OWN branch table
+          // (NK_BRANCHES) and never reads the caller's registry, so declaring one "for consistency"
+          // would ship a silent lie: check:surface-drift cannot catch a SURFACE entry that no code
+          // reads (its own header says so), and the flag would render in --help, be offered by the
+          // `_std` completer, be accepted from the user, and then be ignored. Declare only what the
+          // code parses.
+          desc: "check a RenderSpec read from stdin, returning the Result union",
+          flags: [NOTEKIT_SPEC_STDIN, JSON_FLAG],
+        },
+        {
+          name: "capabilities",
+          // No `--at` (nothing here is time-varying) and no `--spec`.
+          desc: "list the declared note types, generated from the one registry",
+          flags: [NOTEKIT_CONFIG, JSON_FLAG],
+        },
       ],
-      helpGroups: [{ subs: ["deploy"] }],
+      // Every subcommand must appear in exactly ONE helpGroups entry (surface.test.ts), and a group
+      // with no `desc` must wrap exactly one sub — so these are four single-sub groups, each inheriting
+      // its sub's own desc. `renderHelp` builds the `commands:` block from here, so an ungrouped verb
+      // would be invisible in --help even though the subcommand exists.
+      helpGroups: [
+        { subs: ["deploy"] },
+        { subs: ["render"] },
+        { subs: ["validate"] },
+        { subs: ["capabilities"] },
+      ],
     },
     {
       name: "bmad",
@@ -483,6 +541,11 @@ export const HELP_OPTION_BLOCKS = [
   ["cn", "deploy"],
   ["dashkit", "deploy"],
   ["notekit", "deploy"],
+  // Inserted immediately after `notekit deploy` so notekit's blocks stay contiguous — this list is
+  // ORDERED SHIPPED DATA: its order is the rendered HELP bytes, and therefore the FROZEN_HELP delta.
+  ["notekit", "render"],
+  ["notekit", "validate"],
+  ["notekit", "capabilities"],
   ["cn", "verify"],
   ["dashkit", "verify"],
 ] as const;

@@ -110,6 +110,7 @@ describe("⚠️-1 — the barrel's import graph never reaches the DOM half", ()
       "core-nknode.ts",
       "core-html.ts",
       "core-registry.ts",
+      "core-capabilities.ts",
     ]) {
       expect(names).toContain(core);
     }

@@ -58,10 +58,15 @@ describe("SURFACE is validated, serializable DATA (AC1)", () => {
     expect(subNames(S, "alias")).toEqual([]);
     expect(subNames(S, "cn")).toEqual(["deploy", "verify"]);
     expect(subNames(S, "dashkit")).toEqual(["deploy", "verify"]);
-    // ⚠ `deploy` ALONE — the asymmetry is Story 1.4's ⚠️-2 decision, asserted so it cannot be "fixed" by
+    // ⚠ NO `verify` — the asymmetry is Story 1.4's ⚠️-2 decision, asserted so it cannot be "fixed" by
     // someone pattern-matching on the two edges above. notekit v1 ships no plugin envelope (FR18/Epic 3),
     // so a `notekit verify` in the model would offer a subcommand `main.ts` does not route.
-    expect(subNames(S, "notekit")).toEqual(["deploy"]);
+    //
+    // ⚠ The invariant is "no `verify`", NOT "deploy alone" — this read "deploy ALONE" until Story 2.1
+    // added the three read verbs, and prose asserting a property the model no longer has is worse than
+    // no prose. The `verify` half of the decision is what survives; the arity was never the point.
+    expect(subNames(S, "notekit")).toEqual(["deploy", "render", "validate", "capabilities"]);
+    expect(subNames(S, "notekit")).not.toContain("verify");
     expect(subNames(S, "bmad")).toEqual(["install", "update", "deploy", "verify"]);
   });
 

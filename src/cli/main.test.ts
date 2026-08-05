@@ -204,9 +204,45 @@ describe("notekit dispatch (Story 1.4 Task 3)", () => {
       console.error = realError;
     }
     // notekit's own usage, never dashkit's or cn's — a copy-pasted spec would show the wrong command.
-    expect(errs.join("\n")).toContain("usage: std notekit deploy --vault <dir>");
+    // ⚠ WIDENED by Story 2.1: the spec's usage line now names all four verbs, because this is what
+    // `runEdgeDeploy` prints on an unknown sub and a `deploy`-only line would tell the user the CLI
+    // has one verb when it has four. The old literal is pinned as ABSENT so it cannot come back.
+    expect(errs.join("\n")).toContain("usage: std notekit <deploy|render|validate|capabilities>");
+    expect(errs.join("\n")).toContain("render <note> --config <path>");
+    expect(errs.join("\n")).not.toContain("usage: std notekit deploy --vault <dir>");
     expect(errs.join("\n")).not.toContain("std dashkit deploy");
     expect(errs.join("\n")).not.toContain("std cn deploy");
+  });
+
+  test("the three read verbs route to runNotekitRead, and deploy still routes to the deploy runner", async () => {
+    // Story 2.1's pre-dispatch. Each read verb is identified by the exit code it OWNS: a missing
+    // --config is the read surface's usage 2, which the deploy runner would never produce (it does not
+    // parse --config at all), and none of the three touches a vault.
+    const errs: string[] = [];
+    const realError = console.error;
+    console.error = (l: unknown) => errs.push(String(l));
+    try {
+      expect(await runMain(["notekit", "render", "n.md"], { log: () => {} })).toBe(2);
+      expect(await runMain(["notekit", "capabilities"], { log: () => {} })).toBe(2);
+      expect(await runMain(["notekit", "validate"], { log: () => {} })).toBe(2);
+    } finally {
+      console.error = realError;
+    }
+    const printed = errs.join("\n");
+    expect(printed).toContain("--config <path> is required"); // the READ surface's message…
+    expect(printed).toContain("--spec - is required");
+    expect(printed).not.toContain("bundle src/notekit"); // …and never the deploy runner's
+
+    // `deploy` falls THROUGH the pre-dispatch, unchanged: it still fails on the missing --vault the
+    // deploy runner owns, which the read surface does not parse.
+    const deployErrs: string[] = [];
+    console.error = (l: unknown) => deployErrs.push(String(l));
+    try {
+      expect(await runMain(["notekit", "deploy"], { log: () => {} })).toBe(2);
+    } finally {
+      console.error = realError;
+    }
+    expect(deployErrs.join("\n")).toContain("--vault");
   });
 
   test("the unknown-command line names notekit — a registered command must be discoverable", async () => {
@@ -329,6 +365,9 @@ commands:
   dashkit deploy    bundle src/dashkit -> <vault>/Scripts/dashkit.js (one-way; the vault is build output only)
   dashkit verify    check a vault against dashkit's declared plugin envelope (AD-6)
   notekit deploy    bundle src/notekit -> <vault>/Scripts/notekit.js (one-way; the vault is build output only)
+  notekit render    preview a note as an nk-card; writes nothing (the sole-writer path is a later story)
+  notekit validate   check a RenderSpec read from stdin, returning the Result union
+  notekit capabilities   list the declared note types, generated from the one registry
   bmad install|update|deploy   dry-run by default; --apply to mutate, --push to push
   bmad verify       prove both Surfaces are byte-faithful to source (read-only)
 
@@ -345,6 +384,19 @@ notekit deploy options:
   --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)
   --watch           deploy once, then stay resident and redeploy on every save under src/notekit, src/core
 
+notekit render options:
+  --config <path>   the caller-local note-type registry to read (required — std bakes in no registry)
+  --at <iso>        stamp the card with this timestamp instead of the clock, making the output byte-reproducible
+  --json            emit the machine-readable ledger; it is then the only thing on stdout
+
+notekit validate options:
+  --spec -          read the candidate RenderSpec from stdin; \`-\` is the only accepted value
+  --json            emit the machine-readable ledger; it is then the only thing on stdout
+
+notekit capabilities options:
+  --config <path>   the caller-local note-type registry to read (required — std bakes in no registry)
+  --json            emit the machine-readable ledger; it is then the only thing on stdout
+
 cn verify options:
   --vault <dir>     the Obsidian vault to check (required)
                     drift is reported and never fatal; a missing foundation exits 1
@@ -358,43 +410,68 @@ flags:
 
 describe("HELP — byte-identity oracle (3.1 AC2)", () => {
   // Self-check on the TRANSCRIPTION first: a copy-paste slip would freeze the wrong bytes and then pass
-  // the toBe below forever. `.length` is UTF-16 units, NOT bytes — HELP now carries FOUR em dashes (the
-  // title, plus one per `--vault` row, and 1.4 added a third `--vault` row), so Buffer.byteLength is 1918
-  // while `.length` is 1910. Both re-measured on the shipped constant at Story 1.4.
+  // the toBe below forever. `.length` is UTF-16 units, NOT bytes — the gap is the multi-byte characters
+  // HELP carries (the title's em dash, one per `--vault` row, and Story 2.1's two `--config` rows), so
+  // Buffer.byteLength runs ahead of `.length`. All three re-measured on the shipped constant at 2.1.
   test("the frozen literal is the one that was measured", () => {
-    expect(FROZEN_HELP.length).toBe(1910);
-    expect(Buffer.byteLength(FROZEN_HELP)).toBe(1918);
-    expect(FROZEN_HELP.split("\n").length).toBe(37);
+    expect(FROZEN_HELP.length).toBe(2949);
+    expect(Buffer.byteLength(FROZEN_HELP)).toBe(2961);
+    expect(FROZEN_HELP.split("\n").length).toBe(53);
   });
 
   test("HELP is byte-identical to the frozen text", () => {
     expect(HELP).toBe(FROZEN_HELP);
   });
 
-  // The re-freeze is only honest if the delta is ITSELF asserted. Removing the five notekit lines
-  // from FROZEN_HELP must reproduce the 32-line/1573-char text 3.1 measured — so a re-freeze that
-  // quietly reflowed or dropped a pre-existing line fails here even though the `toBe` above is green.
+  // The re-freeze is only honest if the delta is ITSELF asserted. Stripping EVERY notekit line from
+  // FROZEN_HELP must reproduce the 32-line/1573-char text 3.1 measured — so a re-freeze that quietly
+  // reflowed or dropped a pre-existing line fails here even though the `toBe` above is green.
+  //
+  // ⚠ This test used to hardcode 1.4's five notekit lines and strip them by INDEX. Story 2.1 added
+  // sixteen more, which broke it — so the filter is now a RULE ("every notekit command row, and every
+  // notekit options block with its blank separator") rather than a list. The baseline it lands on is
+  // unchanged and deliberately so: 3.1's pre-notekit measurement is the one fixed point, and anchoring
+  // to it means the next notekit story extends the RULE'S INPUT, never the oracle's target.
   test("the delta from the 3.1 baseline is EXACTLY the notekit additions, nothing else", () => {
-    const added = [
-      "  notekit deploy    bundle src/notekit -> <vault>/Scripts/notekit.js (one-way; the vault is build output only)",
-      "",
-      "notekit deploy options:",
-      "  --vault <dir>     the Obsidian vault to deploy into (required — std bakes in no vault path)",
-      "  --watch           deploy once, then stay resident and redeploy on every save under src/notekit, src/core",
-    ];
     const lines = FROZEN_HELP.split("\n");
-    // Drop the command row, then the four-line block (blank separator + header + two flags).
-    const rowAt = lines.indexOf(added[0]!);
-    expect(rowAt).toBeGreaterThan(-1);
-    const blockAt = lines.indexOf("notekit deploy options:");
-    expect(blockAt).toBeGreaterThan(-1);
-    const baseline = lines.filter(
-      (_, i) => i !== rowAt && i !== blockAt - 1 && i !== blockAt && i !== blockAt + 1 && i !== blockAt + 2,
-    );
+    const baseline: string[] = [];
+    const removed: string[] = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i]!;
+      if (line.startsWith("  notekit ")) {
+        removed.push(line); // a command row in the `commands:` block
+        i++;
+        continue;
+      }
+      if (/^notekit .* options:$/.test(line)) {
+        // The blank separator BEFORE the header belongs to this block, and was already kept.
+        if (baseline[baseline.length - 1] === "") removed.push(baseline.pop()!);
+        removed.push(line);
+        i++;
+        while (i < lines.length && lines[i] !== "") removed.push(lines[i++]!);
+        continue;
+      }
+      baseline.push(line);
+      i++;
+    }
+
     expect(baseline.length).toBe(32); // 3.1's measured line count
     expect(baseline.join("\n").length).toBe(1573); // …and its measured char count
-    // Every added line really is one of the five named above — no sixth slipped in.
-    const removed = lines.filter((_, i) => i === rowAt || (i >= blockAt - 1 && i <= blockAt + 2));
-    expect(removed).toEqual(added);
+
+    // …and the removed set is accounted for exactly: four command rows and four option blocks.
+    expect(removed.filter((l) => l.startsWith("  notekit "))).toEqual([
+      "  notekit deploy    bundle src/notekit -> <vault>/Scripts/notekit.js (one-way; the vault is build output only)",
+      "  notekit render    preview a note as an nk-card; writes nothing (the sole-writer path is a later story)",
+      "  notekit validate   check a RenderSpec read from stdin, returning the Result union",
+      "  notekit capabilities   list the declared note types, generated from the one registry",
+    ]);
+    expect(removed.filter((l) => /^notekit .* options:$/.test(l))).toEqual([
+      "notekit deploy options:",
+      "notekit render options:",
+      "notekit validate options:",
+      "notekit capabilities options:",
+    ]);
+    expect(removed.length + baseline.length).toBe(lines.length); // nothing fell between the two sets
   });
 });

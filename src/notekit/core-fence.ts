@@ -2,10 +2,18 @@
 // process/document refs. `core` is the SOLE owner of this grammar — nothing else hand-rolls fence
 // `key: value` parsing or writing, and every writer goes through `serializeFenceBody`.
 //
-// SCOPE: the body of a fenced code block whose info string is `nk-<type>` (NK-2) — the lines *inside*
-// the fence, never the note's YAML frontmatter. The render seam's field values come from here
-// (NK-1.8); `parseFrontmatter` (src/core/parse.ts) stays the CALLER's tool for the `nk-type:` opt-in,
-// outside core. The fence container itself (info string, delimiters) is owned downstream, not here.
+// SCOPE: a fenced code block whose info string is `nk-<type>` (NK-2) — both its BODY (the `key: value`
+// lines inside) and, since Story 2.1, its CONTAINER (info string and delimiters, via `locateFence`).
+// Never the note's YAML frontmatter: the render seam's field values come from the body (NK-1.8), and
+// `parseFrontmatter` (src/core/parse.ts) stays the CALLER's tool for the `nk-type:` opt-in.
+//
+// The container used to be disclaimed here, and that was right while the DOM post-processor was the
+// only reader — Obsidian had already split the block into `<pre>/<code>` before `core` saw it, so the
+// delimiters never reached this file. The CLI reads raw markdown and has no such host, so the
+// container grammar comes home to the codec that already owns the body. `locateFence` and
+// `edge/post-processor.ts`'s `findFence` are TWO LOCATORS OF ONE GRAMMAR — `^nk-([a-z]+)$` here,
+// `/^language-nk-([a-z]+)$/` there — exactly as `core-html.ts` and `edge/nkcard.ts` are two
+// serializers of one tree (NK-1.3). Change the grammar in one and you must change it in the other.
 //
 // FR16 parity is defined as `serializeFenceBody(parseFenceBody(body)) === body`, modulo the
 // normalization declared below.
@@ -126,4 +134,112 @@ export function serializeFenceBody(fields: FenceFields): string {
       return `${key}: ${written}`;
     })
     .join("\n");
+}
+
+// ── locateFence ─────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * An nk-fence found in raw markdown: its routed type, its body, and four byte-faithful offsets into
+ * the string it was found in.
+ *
+ * `body` is `markdown.slice(bodyStart, bodyEnd)` and therefore INCLUDES its trailing newline whenever
+ * it is non-empty — `serializeFenceBody` emits none, so a writer splicing over `[bodyStart, bodyEnd)`
+ * must re-add one or the closing delimiter glues onto the last field. The block bounds run from the
+ * opening backtick run to just past the closing run's line terminator, so replacing
+ * `[blockStart, blockEnd)` removes the whole fence and nothing else.
+ */
+export type LocatedFence = {
+  /** The `[a-z]+` captured from the info string — `card`, not `nk-card`. Routes through the registry. */
+  type: string;
+  body: string;
+  bodyStart: number;
+  bodyEnd: number;
+  blockStart: number;
+  blockEnd: number;
+};
+
+/**
+ * The info string of an nk-fence, trimmed. The DOM side enforces the same shape one level up, as the
+ * class token `language-nk-<type>` (`edge/post-processor.ts` FENCE_CLASS) — one grammar, two locators.
+ */
+const FENCE_INFO = /^nk-([a-z]+)$/;
+
+/** An opening fence line: optional indent, a run of three or more backticks, then the info string. */
+const FENCE_OPEN = /^[ \t]*(`{3,})(.*)$/;
+
+/** A closing fence line: optional indent, a backtick run, nothing else but whitespace. */
+const FENCE_CLOSE = /^[ \t]*(`{3,})[ \t]*$/;
+
+/** Where a line's content ends and the next line begins. Handles LF, CRLF and lone CR alike. */
+function lineBounds(text: string, start: number): { end: number; next: number } {
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\n") return { end: i, next: i + 1 };
+    if (ch === "\r") return { end: i, next: text[i + 1] === "\n" ? i + 2 : i + 1 };
+  }
+  return { end: text.length, next: text.length };
+}
+
+/**
+ * Find the FIRST nk-fence in raw markdown, or `null` when there is none.
+ *
+ * TOTAL — `null` for every failure mode (no fence at all, an unterminated fence, an info string
+ * outside the grammar), never a throw. That copies `resolveTemplate`'s deliberate totality
+ * (`core-registry.ts`) and not `cardTree`'s throw, for the reason stated there: "no nk-fence here" is a
+ * MODELED OUTCOME the CLI reports to the author, not a caller bug. `| null`, not `| undefined` — the
+ * barrel and the registry both use `null`, and mixing the two is how a caller's `??` starts lying.
+ *
+ * Non-nk fences are walked THROUGH, not scanned into: a ```` ```js ```` block whose contents happen to
+ * contain a line reading ```` ```nk-card ```` is code, not a fence, and matching it would let a code
+ * sample rewrite the note. Only backtick fences are recognised — Obsidian emits `language-` classes for
+ * those, and the DOM locator sees nothing else.
+ */
+export function locateFence(markdown: string): LocatedFence | null {
+  if (typeof markdown !== "string") return null;
+
+  let cursor = 0;
+  while (cursor < markdown.length) {
+    const line = lineBounds(markdown, cursor);
+    const open = FENCE_OPEN.exec(markdown.slice(cursor, line.end));
+    if (open === null) {
+      cursor = line.next;
+      continue;
+    }
+
+    const ticks = open[1]!;
+    const info = FENCE_INFO.exec(open[2]!.trim());
+    // The backtick run starts after whatever indent the line carried.
+    const blockStart = cursor + markdown.slice(cursor, line.end).indexOf(ticks);
+    const bodyStart = line.next;
+
+    // Walk to this fence's closing delimiter — a run at least as long as the opening one.
+    let scan = bodyStart;
+    let closed: { bodyEnd: number; blockEnd: number } | null = null;
+    while (scan < markdown.length) {
+      const inner = lineBounds(markdown, scan);
+      const close = FENCE_CLOSE.exec(markdown.slice(scan, inner.end));
+      if (close !== null && close[1]!.length >= ticks.length) {
+        closed = { bodyEnd: scan, blockEnd: inner.next };
+        break;
+      }
+      scan = inner.next;
+    }
+
+    // An unterminated fence swallows the rest of the document either way: if it was ours we have no
+    // block to report, and if it was not, nothing after it is a fence.
+    if (closed === null) return null;
+
+    if (info !== null) {
+      return {
+        type: info[1]!,
+        body: markdown.slice(bodyStart, closed.bodyEnd),
+        bodyStart,
+        bodyEnd: closed.bodyEnd,
+        blockStart,
+        blockEnd: closed.blockEnd,
+      };
+    }
+    cursor = closed.blockEnd; // a fence, but not one of ours — skip its whole block
+  }
+  return null;
 }
