@@ -3,7 +3,8 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runNotekitRead, type NotekitReadDeps } from "./notekit-read";
+import { VALUE_FLAGS, runNotekitRead, type NotekitReadDeps } from "./notekit-read";
+import { SURFACE } from "./surface";
 import { stripStringsAndComments } from "../../scripts/lib/specifiers";
 import type { NoteTypeRegistry } from "../notekit/index";
 
@@ -443,14 +444,94 @@ describe("dispatch", () => {
     expect(await runNotekitRead(["render", "n.md", ...CONFIG], h.deps)).toBe(2);
   });
 
-  test("a throw from deep in the render chain still lands on an exit code", async () => {
-    // cardTree throws on a non-object spec; the wrap is what keeps that off main.ts's unhandled path.
+  test("an UNMODELLED throw is fail-loud 1, not a usage 2", async () => {
+    // The two codes are not interchangeable: 2 means "you typed something wrong". Everything reaching
+    // the outer catch is an internal fault (cardTree on a non-object spec, an fs fault outside the
+    // modelled null), and calling that usage misdirects the user. The one genuinely-usage throw — an
+    // unloadable --config — never gets here, because resolveRegistry catches it and returns 2 itself.
     const h = harness({
       readNote: () => {
         throw new Error("fs exploded in an unmodeled way");
       },
     });
+    expect(await runNotekitRead(["render", "n.md", ...CONFIG], h.deps)).toBe(1);
+    expect(h.err.join("\n")).toContain("fs exploded in an unmodeled way");
+  });
+
+  test("…and the two paths stay DISTINGUISHABLE — a bad --config is still 2", async () => {
+    // The assertion that keeps the fix honest: if the fail-loud catch ever swallowed the config path
+    // too, both would collapse to one code and the distinction above would be decorative.
+    const h = harness({
+      loadRegistry: () => {
+        throw new Error("top-level throw at import");
+      },
+    });
     expect(await runNotekitRead(["render", "n.md", ...CONFIG], h.deps)).toBe(2);
+  });
+
+  test("a caller config that throws from INSIDE capabilities is a crash (1), not a verdict", async () => {
+    // A registry is arbitrary caller TypeScript. This is why `capabilities` is documented as having no
+    // failure VERDICT rather than as "exit set {0,2}" — the latter reading is strictly false.
+    //
+    // ⚠ A plain throwing GETTER, deliberately, and not a Proxy: a Proxy raises on the `await` inside
+    // resolveRegistry (awaiting any object reads `.then`), so it never reaches the generator and exits
+    // 2 as a config-load failure — measured during the 2.1 code review. Only a getter on an otherwise
+    // ordinary object survives the load and throws where this test needs it to.
+    const hostile = { templates: {} } as unknown as NoteTypeRegistry;
+    Object.defineProperty(hostile, "noteTypes", {
+      enumerable: true,
+      get(): never {
+        throw new Error("hostile registry getter");
+      },
+    });
+    const h = harness({ loadRegistry: async () => hostile });
+    expect(await runNotekitRead(["capabilities", ...CONFIG, "--json"], h.deps)).toBe(1);
+    expect(h.out).toEqual([]);
+    expect(h.err.join("\n")).toContain("hostile registry getter");
+  });
+
+  test("…and a PROXY registry is a config-load failure (2), which is a different thing", async () => {
+    // Recorded because it is the case the review probed, and the two codes are correct for different
+    // reasons: the Proxy never survived loading; the getter did and then crashed the generator.
+    const h = harness({
+      loadRegistry: async () =>
+        new Proxy({} as NoteTypeRegistry, {
+          get() {
+            throw new Error("hostile proxy");
+          },
+        }),
+    });
+    expect(await runNotekitRead(["capabilities", ...CONFIG, "--json"], h.deps)).toBe(2);
+  });
+});
+
+// ── the VALUE_FLAGS drift gate (2.1 code review, finding 3) ──────────────────────────────────────
+
+describe("VALUE_FLAGS tracks the declared surface", () => {
+  test("it is EXACTLY the value-arity flags on notekit's read verbs", () => {
+    // The landmine this closes: a value flag added to surface.ts and missed in VALUE_FLAGS makes
+    // notePositional treat its VALUE as the <note> path — silently, on every invocation that puts the
+    // flag first. check:surface-drift cannot catch it: that gate proves every flag READ is declared,
+    // which is the opposite direction. So this test is the drift gate for the set's completeness.
+    const notekit = SURFACE.commands.find((c) => c.name === "notekit")!;
+    const readVerbs = ["render", "validate", "capabilities"];
+    const declared = new Set(
+      notekit.subcommands
+        .filter((sub) => readVerbs.includes(sub.name))
+        // Widened deliberately: SURFACE is `as const satisfies CommandSurface`, so each subcommand's
+        // `flags` is its own readonly TUPLE of literal types and `flatMap` cannot unify them. The
+        // narrowing is what the model is FOR elsewhere; here only `name` and `arity` are read.
+        .flatMap((sub) => (sub.flags ?? []) as readonly { name: string; arity: string }[])
+        .filter((flag) => flag.arity === "value")
+        .map((flag) => flag.name.replace(/^--/, "")),
+    );
+    expect([...VALUE_FLAGS].sort()).toEqual([...declared].sort());
+  });
+
+  test("the gate is not vacuous — it found flags to compare", () => {
+    // Both sides empty would satisfy the toEqual above forever.
+    expect(VALUE_FLAGS.size).toBeGreaterThan(0);
+    expect([...VALUE_FLAGS].sort()).toEqual(["at", "config", "spec"]);
   });
 });
 

@@ -64,9 +64,6 @@ export type NotekitReadErrorCode =
  */
 export type NotekitErrorCode = NotekitReadErrorCode | RenderSpecErrorCode;
 
-/** A CLI-level failure payload. `field` rides only on the `core` half (see {@link NotekitErrorCode}). */
-export type NotekitReadError = { code: NotekitReadErrorCode; message: string };
-
 /** Every effect injectable, so the whole surface is unit-testable with no fs, no stdin and no clock. */
 export interface NotekitReadDeps {
   log?: (line: string) => void;
@@ -173,8 +170,15 @@ function valueFlag(argv: string[], name: string): { present: boolean; value?: st
 /**
  * Value flags whose SPACE form consumes the following token. That token is a flag's value, never a
  * positional.
+ *
+ * ⚠ THIS MUST MATCH the `arity: "value"` flags declared for notekit's read verbs in `surface.ts`. A
+ * flag added there and missed here silently eats the `<note>` positional — the exact defect
+ * `notePositional` exists to fix, re-introduced by omission. Exported so `notekit-read.test.ts` can
+ * assert the two agree: `check:surface-drift` will NOT catch this (it checks that every flag READ is
+ * declared, not that this set is complete), so the drift gate for it is that test. A comment would not
+ * have gone red.
  */
-const VALUE_FLAGS = new Set(["config", "at", "spec"]);
+export const VALUE_FLAGS = new Set(["config", "at", "spec"]);
 
 /**
  * The `<note>` positional.
@@ -393,10 +397,18 @@ async function runValidate(argv: string[], deps: NotekitReadDeps): Promise<numbe
 /**
  * `capabilities` — the generated catalog of declared note types (FR-11, NFR5).
  *
- * Its exit set is `{0, 2}` and it can NEVER return `1` — a property, not an omission. Every malformed
- * registry class DEGRADES in the generator (a non-object yields an empty `noteTypes`; an unresolvable
- * entry is omitted), so there is no failure verdict to report. A `capabilities` that returns `1` means
- * someone added a throw path.
+ * IT HAS NO FAILURE VERDICT — a property, not an omission. Every malformed registry class DEGRADES in
+ * the generator (a non-object yields an empty `noteTypes`; an unresolvable entry is omitted), so there
+ * is nothing for it to report as failed: its own returns are `0` and the usage `2` from a missing or
+ * unloadable `--config`.
+ *
+ * ⚠ That is NOT the same as "the exit set is {0,2}", which is how this read before the 2.1 code review
+ * and was strictly false: a caller's config is arbitrary TypeScript, so a throwing GETTER survives the
+ * load and raises from INSIDE `capabilities(registry)`, and that unmodelled fault exits `1` through
+ * `runNotekitRead`'s fail-loud catch. A `1` here therefore means a crash, never a verdict — and the
+ * distinction is the whole point, because the first phrasing would have made the fail-loud fix look
+ * like a regression. (A Proxy registry is a different case and exits `2`: `await`ing any object reads
+ * `.then`, so it raises during the load and never reaches the generator. Both are pinned by tests.)
  */
 async function runCapabilities(argv: string[], deps: NotekitReadDeps): Promise<number> {
   const log = deps.log ?? ((l: string) => console.log(l));
@@ -444,7 +456,18 @@ export async function runNotekitRead(
       onUnknown,
     );
   } catch (e) {
+    // FAIL-LOUD `1`, NOT a usage `2`. Everything that reaches here is an UNMODELLED internal fault —
+    // the modelled failures already returned through the envelope, and an unloadable `--config` (the
+    // one genuinely-usage throw) is caught by `resolveRegistry` and returns 2 there. Reporting a crash
+    // as "usage" tells the user they typed something wrong when they did not.
+    //
+    // The story prescribed routing every escape onto "row 1", which is the usage 2 — but the precedent
+    // it cites for the shape, `src/bmad/cli.ts`, returns **1** for a classified fault and RE-THROWS an
+    // unclassified one. Re-throwing is not available here (`main.ts` would surface it as an unhandled
+    // rejection rather than an exit code, which is exactly what the no-escape rule forbids), so this
+    // takes the other half of that precedent: report, and exit 1 per the estate's contract at
+    // `main.ts` — 0 ok, 1 fail-loud, 2 usage.
     err(`std notekit: ${(e as Error).message ?? String(e)}`);
-    return 2;
+    return 1;
   }
 }
