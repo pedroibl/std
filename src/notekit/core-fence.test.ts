@@ -344,8 +344,14 @@ function expectRoundTrip(markdown: string, f: LocatedFence, newBody: string): st
   return after;
 }
 
-// Every AC #1 fixture, run through (b) and — where an apply is possible — (c).
-const SPLICE_FIXTURES: Array<{ name: string; md: string; newBody?: string }> = [
+// Every AC #1 fixture, run through (b) and (c).
+//
+// ⚠ `newBody` IS REQUIRED, not optional. It was optional while oracle (c) force-unwrapped it for every
+// fixture, so a future fixture that omitted the field would have sent `undefined` into `spliceFence`,
+// which writes the literal text "undefined" into the note body — and the failure would have surfaced as
+// a body MISMATCH, pointing at the codec instead of at the missing fixture field. Every fixture already
+// supplies one, so requiring it costs nothing and makes the comment above true of the loop below.
+const SPLICE_FIXTURES: Array<{ name: string; md: string; newBody: string }> = [
   { name: "a plain nk-fence", md: "# Note\n\n```nk-card\ntitle: Primer\n```\n\nprose after\n", newBody: "title: Primer\nstatus: live\n" },
   {
     name: "TWO nk-fences — the first is the one spliced",
@@ -377,9 +383,12 @@ const SPLICE_FIXTURES: Array<{ name: string; md: string; newBody?: string }> = [
 describe("spliceFence — oracle (b): delimiter framing, read off the note", () => {
   for (const fx of SPLICE_FIXTURES) {
     test(fx.name, () => {
-      const f = locateFence(fx.md)!;
+      // ⚠ CHECK BEFORE UNWRAP. With `locateFence(fx.md)!` on the line above the assertion, the `!` made
+      // the assertion run on a value already assumed non-null — if a fixture stopped locating a fence,
+      // `expectDelimiterFraming` threw on `f.bodyStart` and this message never printed.
+      const f = locateFence(fx.md);
       expect(f).not.toBeNull();
-      expectDelimiterFraming(fx.md, f);
+      expectDelimiterFraming(fx.md, f!);
     });
   }
 
@@ -393,10 +402,14 @@ describe("spliceFence — oracle (b): delimiter framing, read off the note", () 
 describe("spliceFence — oracle (c): the changed body re-locates byte-for-byte", () => {
   for (const fx of SPLICE_FIXTURES) {
     test(fx.name, () => {
-      const f = locateFence(fx.md)!;
-      const after = expectRoundTrip(fx.md, f, fx.newBody!);
+      // Same check-before-unwrap as oracle (b), and for the same reason.
+      const f = locateFence(fx.md);
+      expect(f).not.toBeNull();
+      const after = expectRoundTrip(fx.md, f!, fx.newBody);
       // …and oracle (b) again on the RESULT: both delimiter lines survived the write.
-      expectDelimiterFraming(after, locateFence(after)!);
+      const relocated = locateFence(after);
+      expect(relocated).not.toBeNull();
+      expectDelimiterFraming(after, relocated!);
     });
   }
 
@@ -481,6 +494,60 @@ describe("spliceFence — the stale-fence throw", () => {
   test("it is unreachable from the write path — the splice runs on the located string", () => {
     const md = "```nk-card\na: 1\n```\n";
     expect(() => spliceFence(md, locateFence(md)!, "a: 2\n")).not.toThrow();
+  });
+
+  // ── the DEGENERATE offset pairs the byte compare alone could not catch (CodeRabbit, PR #83) ────────
+  //
+  // The four shapes below all pass `markdown.slice(bodyStart, bodyEnd) === fence.body`, because `slice`
+  // clamps and reorders its arguments in silence. Each is asserted as a THROW *and* paired with the
+  // exact corruption the un-guarded splice produced, so the fixture records what the guard is buying
+  // rather than only that it fires. `spliceFence` is exported from `src/notekit/index.ts`, so a fence
+  // LITERAL from a later story is a reachable caller — `locateFence` emits none of these.
+  describe("degenerate offsets pass the byte compare and MUST still throw", () => {
+    const MD = "abcdef"; // not a note: these are offset shapes, and a fence would only obscure them
+
+    // [name, bodyStart, bodyEnd, body, what the un-guarded three-slice concat returned]
+    const DEGENERATE: Array<[string, number, number, string, string]> = [
+      ["inverted pair, empty body", 4, 2, "", "abcdXcdef"],
+      ["negative start, empty body", -1, 2, "", "abcdeXcdef"],
+      ["bodyEnd past the end of the string", 4, 99, "ef", "abcdX"],
+      ["non-integer offsets", 4.7, 6, "ef", "abcdX"],
+    ];
+
+    for (const [name, bodyStart, bodyEnd, body, wasCorruptedTo] of DEGENERATE) {
+      test(name, () => {
+        const fence = { type: "card", body, bodyStart, bodyEnd } as LocatedFence;
+
+        // the premise: the OLD guard's sole condition is satisfied, so it would not have thrown
+        expect(MD.slice(bodyStart, bodyEnd)).toBe(body);
+
+        // …and this is what it let through — the concat, spelled out rather than described
+        expect(MD.slice(0, bodyStart) + "X" + MD.slice(bodyEnd)).toBe(wasCorruptedTo);
+
+        // the guard now refuses it
+        expect(() => spliceFence(MD, fence, "X")).toThrow(/stale offsets/);
+      });
+    }
+
+    test("the two corrupting shapes really did lose or duplicate bytes — not a cosmetic difference", () => {
+      expect("abcdXcdef".replace("X", "")).not.toBe(MD); // "cd" duplicated
+      expect("abcdeXcdef".replace("X", "")).not.toBe(MD); // ditto
+      expect("abcdX".replace("X", "")).not.toBe(MD); // the "ef" tail dropped
+    });
+
+    test("the LEGAL boundary shapes still splice — the guard is not merely stricter", () => {
+      // bodyStart === bodyEnd (an empty fence body) and bodyEnd === markdown.length are both produced
+      // by `locateFence` and must survive every new clause.
+      const empty = "```nk-card\n```\n";
+      const f = locateFence(empty)!;
+      expect(f.bodyStart).toBe(f.bodyEnd);
+      expect(() => spliceFence(empty, f, "a: 1\n")).not.toThrow();
+
+      const atEof = "```nk-card\na: 1\n```"; // no trailing newline
+      const g = locateFence(atEof)!;
+      expect(() => spliceFence(atEof, g, "a: 2\n")).not.toThrow();
+      expect(spliceFence(MD, { type: "card", body: MD, bodyStart: 0, bodyEnd: MD.length } as LocatedFence, "X")).toBe("X");
+    });
   });
 });
 

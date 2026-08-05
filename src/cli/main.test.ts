@@ -454,7 +454,7 @@ commands:
   dashkit deploy    bundle src/dashkit -> <vault>/Scripts/dashkit.js (one-way; the vault is build output only)
   dashkit verify    check a vault against dashkit's declared plugin envelope (AD-6)
   notekit deploy    bundle src/notekit -> <vault>/Scripts/notekit.js (one-way; the vault is build output only)
-  notekit render    preview a note as an nk-card; writes nothing (the sole-writer path is a later story)
+  notekit render    preview a note as an nk-card; writes only with --apply (the sole writer)
   notekit validate   check a RenderSpec read from stdin, returning the Result union
   notekit capabilities   list the declared note types, generated from the one registry
   bmad install|update|deploy   dry-run by default; --apply to mutate, --push to push
@@ -503,9 +503,15 @@ describe("HELP — byte-identity oracle (3.1 AC2)", () => {
   // the toBe below forever. `.length` is UTF-16 units, NOT bytes — the gap is the multi-byte characters
   // HELP carries (the title's em dash, one per `--vault` row, and Story 2.1's two `--config` rows), so
   // Buffer.byteLength runs ahead of `.length`. All three re-measured on the shipped constant at 2.1.
+  //
+  // ⚠ RE-FROZEN ON THE #83 FOLLOW-UP. The `notekit render` desc changed ("writes nothing (the
+  // sole-writer path is a later story)" → "writes only with --apply (the sole writer)") because 2.2's
+  // `--apply` row had falsified it, and `renderHelp` prints both strings in one output. Twelve fewer
+  // characters, same line count: 3048/3060/54 → 3036/3048/54. Both numbers re-measured off the shipped
+  // constant, never transcribed from the diff.
   test("the frozen literal is the one that was measured", () => {
-    expect(FROZEN_HELP.length).toBe(3048);
-    expect(Buffer.byteLength(FROZEN_HELP)).toBe(3060);
+    expect(FROZEN_HELP.length).toBe(3036);
+    expect(Buffer.byteLength(FROZEN_HELP)).toBe(3048);
     expect(FROZEN_HELP.split("\n").length).toBe(54);
   });
 
@@ -552,7 +558,7 @@ describe("HELP — byte-identity oracle (3.1 AC2)", () => {
     // …and the removed set is accounted for exactly: four command rows and four option blocks.
     expect(removed.filter((l) => l.startsWith("  notekit "))).toEqual([
       "  notekit deploy    bundle src/notekit -> <vault>/Scripts/notekit.js (one-way; the vault is build output only)",
-      "  notekit render    preview a note as an nk-card; writes nothing (the sole-writer path is a later story)",
+      "  notekit render    preview a note as an nk-card; writes only with --apply (the sole writer)",
       "  notekit validate   check a RenderSpec read from stdin, returning the Result union",
       "  notekit capabilities   list the declared note types, generated from the one registry",
     ]);
@@ -571,14 +577,29 @@ describe("HELP — byte-identity oracle (3.1 AC2)", () => {
   // assertion the re-freeze above would be blind precisely where 2.2 moved the bytes.
   //
   // It is stated as a REMOVAL back to 2.1's measured text rather than as a second frozen literal:
-  // deleting the one `--apply` line must reproduce 2949/2961/53 exactly, which is only true if that
-  // line is the whole delta.
-  test("the delta from the post-2.1 freeze is EXACTLY the one --apply row", () => {
+  // reversing 2.2's additions must reproduce 2949/2961/53 exactly, which is only true if they are the
+  // whole delta.
+  //
+  // ⚠ THE DELTA IS NOW TWO THINGS, NOT ONE. The #83 follow-up corrected the `notekit render` desc, so
+  // reversing only the `--apply` row no longer lands on 2.1's text. The fix is to reverse BOTH and keep
+  // 2.1's measured numbers as the target — NOT to re-measure the target to whatever the code now says.
+  // 3.1's and 2.1's fixed points are the anchors; a later story extends the reversal, never the target.
+  // Re-measuring instead would make this oracle assert only that arithmetic works.
+  test("the delta from the post-2.1 freeze is EXACTLY the --apply row plus the render desc", () => {
     const APPLY_ROW =
       "  --apply           actually execute the plan. WITHOUT IT NOTHING MUTATES (dry-run is the default)";
+    const RENDER_ROW_2_1 =
+      "  notekit render    preview a note as an nk-card; writes nothing (the sole-writer path is a later story)";
+    const RENDER_ROW_NOW =
+      "  notekit render    preview a note as an nk-card; writes only with --apply (the sole writer)";
 
     const lines = FROZEN_HELP.split("\n");
     expect(lines.filter((l) => l === APPLY_ROW)).toHaveLength(1); // one row, not two
+    expect(lines.filter((l) => l === RENDER_ROW_NOW)).toHaveLength(1);
+    expect(lines.filter((l) => l === RENDER_ROW_2_1)).toHaveLength(0); // the stale claim is gone
+
+    // …and the corrected desc names the flag that contradicted it, so the two rows now agree.
+    expect(RENDER_ROW_NOW).toContain("--apply");
 
     // …and it sits inside `notekit render options:`, not somewhere that merely counts the same.
     const header = lines.indexOf("notekit render options:");
@@ -591,7 +612,10 @@ describe("HELP — byte-identity oracle (3.1 AC2)", () => {
       "--json",
     ]);
 
-    const post21 = lines.filter((l) => l !== APPLY_ROW).join("\n");
+    const post21 = lines
+      .filter((l) => l !== APPLY_ROW)
+      .map((l) => (l === RENDER_ROW_NOW ? RENDER_ROW_2_1 : l))
+      .join("\n");
     expect(post21.length).toBe(2949);
     expect(Buffer.byteLength(post21)).toBe(2961);
     expect(post21.split("\n").length).toBe(53);

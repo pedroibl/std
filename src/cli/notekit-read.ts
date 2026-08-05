@@ -90,7 +90,11 @@ export type Envelope = { ok: true; value: unknown } | { ok: false; error: unknow
 
 const USAGE = [
   "usage: std notekit <render|validate|capabilities>",
-  "  render <note> --config <path> [--at <iso>] [--json]   preview a note as an nk-card; writes nothing",
+  // ⚠ "writes nothing" was FALSE from the moment 2.2 shipped `--apply`, and this USAGE is the block a
+  // FAILING `render --apply` invocation prints — `runNotekitApply` reaches it through `renderPlan`. The
+  // synopsis column is left unwidened deliberately: adding `[--apply]` to it realigns all three rows for
+  // no gain, and the claim, not the synopsis, was the thing that lied. Corrected on the #83 follow-up.
+  "  render <note> --config <path> [--at <iso>] [--json]   preview a note as an nk-card; writes only with --apply",
   "  validate --spec - [--json]                            check a RenderSpec read from stdin",
   "  capabilities --config <path> [--json]                 list the declared note types",
 ].join("\n");
@@ -125,6 +129,32 @@ export function emit(
     return;
   }
   err(humanError(env.error));
+}
+
+/**
+ * The text of a CAUGHT value, for a value that `catch` binds as `unknown` and that JavaScript lets be
+ * literally anything.
+ *
+ * ⚠ IT REPLACES `(e as Error).message ?? String(e)`, WHICH IS NOT A FALLBACK AT ALL. The property read
+ * runs BEFORE `??` can apply, so a thrown `null`/`undefined` raises `TypeError: null is not an object`
+ * out of the very catch block that exists to stop a throw from escaping. Reproduced 2026-08-06 against
+ * this file and `notekit-write.ts`: a `readNote` that threw `undefined` left `runNotekitApply` by
+ * TypeError, so `main.ts` reported an unhandled rejection instead of exit 1. `??` also cannot cover a
+ * non-Error object with no `message` at all — `throw {code:"x"}` yields `undefined ?? String(e)` →
+ * `"[object Object]"`, i.e. the fallback fires but tells the reader nothing the raw value did not.
+ *
+ * `instanceof Error` first, `String(e)` otherwise. Same shape as `core/result.ts`'s `classify`,
+ * `src/proc/index.ts`'s `message`, and `src/http/index.ts` — this is the estate's existing idiom, not
+ * a new one.
+ *
+ * ⚠ IT LIVES HERE, NOT IN `notekit-write.ts`, and not duplicated into both. Four call sites across the
+ * two CLI files (two here, two there) is past D2's Rule of Three, and the dependency already runs one
+ * way — `notekit-write.ts` imports this module and never the reverse — so one owner costs no new edge.
+ * It is EXPORTED for that import and for a direct unit test; a local copy per file is how the two
+ * halves of one contract drift.
+ */
+export function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 /** The human rendering of a success payload — one shape per verb, never a second renderer. */
@@ -242,7 +272,7 @@ async function resolveRegistry(
   try {
     return await (deps.loadRegistry ?? defaultLoadRegistry)(flag.value);
   } catch (e) {
-    err(`std notekit: cannot load the note-type registry — ${(e as Error).message}`);
+    err(`std notekit: cannot load the note-type registry — ${errorText(e)}`);
     return null;
   }
 }
@@ -390,10 +420,15 @@ export async function renderPlan(
 /**
  * `render <note>` — preview a note as an nk-card and report the round-trip diff. Writes nothing.
  *
- * Seven returns, and every one goes through `emit`: one usage path (`2`), five failure rows (`1`, each
- * carrying a typed `code`), one success (`0`). No row falls out of the envelope. The rows themselves
- * are computed by `renderPlan`, which `render --apply` (Story 2.2) calls too — one computation, so the
- * preview and the write cannot disagree.
+ * SEVEN ROWS, THREE RETURNS — the two counts are different things and the docblock used to conflate
+ * them. `renderPlan` computes the rows (Story 2.2 extracted it); this function maps them to exit codes:
+ * `usage` → `2` WITHOUT calling `emit`, because `renderPlan` already wrote the usage line to stderr;
+ * `error` → `1` through `emit` (five failure rows, each carrying a typed `code`); `plan` → `0` through
+ * `emit`. So every RESULT rides the envelope, and the one return that does not is the one that has no
+ * result to carry.
+ *
+ * `render --apply` (Story 2.2) calls `renderPlan` too — one computation, so the preview and the write
+ * cannot disagree.
  */
 async function runRender(argv: string[], deps: NotekitReadDeps): Promise<number> {
   const log = deps.log ?? ((l: string) => console.log(l));
@@ -535,7 +570,7 @@ export async function runNotekitRead(
     // rejection rather than an exit code, which is exactly what the no-escape rule forbids), so this
     // takes the other half of that precedent: report, and exit 1 per the estate's contract at
     // `main.ts` — 0 ok, 1 fail-loud, 2 usage.
-    err(`std notekit: ${(e as Error).message ?? String(e)}`);
+    err(`std notekit: ${errorText(e)}`);
     return 1;
   }
 }

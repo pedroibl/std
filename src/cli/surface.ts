@@ -367,7 +367,11 @@ export const SURFACE = {
         },
         {
           name: "render",
-          desc: "preview a note as an nk-card; writes nothing (the sole-writer path is a later story)",
+          // ⚠ THIS `desc` AND THE `--apply` ROW BELOW RENDER IN THE SAME `--help` OUTPUT. It used to read
+          // "writes nothing (the sole-writer path is a later story)", which Story 2.2 falsified the
+          // moment it added `APPLY` — the user read that the command writes nothing directly above the
+          // flag that makes it write. Corrected on the #83 follow-up.
+          desc: "preview a note as an nk-card; writes only with --apply (the sole writer)",
           // `APPLY` is the bmad family's const, REUSED rather than re-authored (Story 2.2): its text
           // ("WITHOUT IT NOTHING MUTATES (dry-run is the default)") IS NK-4 rule 3's contract, and the
           // JSON_FLAG / DEPLOY_VAULT / VERIFY_VAULT hoists are the precedent. Stated consequence:
