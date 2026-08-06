@@ -98,19 +98,38 @@ jobs:
             src/notekit/notewright-apply-gate.test.ts \
             src/notekit/notewright-dispatch.test.ts 2>&1 | tee probe-output.txt
 
-          echo "── asserting the probes actually RAN ──"
-          if grep -q "STD_HARNESS_PROBES=1" probe-output.txt; then
-            echo "::error::the opt-in skip fired WITH the flag set — the flag is not reaching the suite"
+          echo "── 1. POSITIVE: the gated probes reported that they RAN ──"
+          # ⚠ THIS IS THE ONE THAT MATTERS, and the first draft did not have it. Cross-vendor re-verify
+          # found the canary was purely NEGATIVE — it asserted the ABSENCE of skip strings, so DELETING
+          # the three probes, or rewriting their skip copy, left the job green while nothing ran. An
+          # absence-detector cannot distinguish "it ran" from "it is gone". Each probe now emits its own
+          # marker and we require exactly three.
+          RAN=$(grep -c "PROBE RAN:" probe-output.txt || true)
+          echo "probes reporting: $RAN (required: 3)"
+          grep "PROBE RAN:" probe-output.txt || true
+          if [ "$RAN" -ne 3 ]; then
+            echo "::error::expected 3 gated probes to report running, got $RAN."
+            echo "::error::Either a probe was deleted, or it skipped, or its marker drifted."
             exit 1
           fi
-          if grep -qi "SKIP: .claude. is not on PATH" probe-output.txt; then
-            echo "::error::a probe skipped for an absent binary AFTER the install step verified one"
+
+          echo "── 2. NEGATIVE: no probe anywhere skipped ──"
+          # ⚠ TAG-SHAPED, NOT PHRASE-SHAPED. The previous greps were coupled to exact wording and already
+          # had a live landmine: apply-gate says "SKIP: \`claude\` is not on PATH" while dispatch says
+          # "SKIP: no \`claude\` on PATH" — same condition, different sentence, and only one was matched.
+          # Matching the bracket tag plus "SKIP:" catches every skip in both files regardless of wording,
+          # and cannot be defeated by someone rephrasing a message.
+          if grep -nE '\[(apply-gate|notewright-dispatch)[^]]*\] SKIP:' probe-output.txt; then
+            echo "::error::a probe SKIPPED on the one path where skipping must be impossible."
+            echo "::error::The lines above name which. This is the canary's entire purpose."
             exit 1
           fi
+
+          echo "── 3. FLOOR: the suite itself is not a stub ──"
+          # A coarse tripwire only — it catches "almost nothing ran", NOT probe liveness. Step 1 does that.
           PASSED=$(grep -oE "^ *[0-9]+ pass" probe-output.txt | grep -oE "[0-9]+" | head -1)
           echo "tests passed: ${PASSED:-none}"
           if [ -z "${PASSED:-}" ] || [ "$PASSED" -lt 100 ]; then
             echo "::error::expected the full gate suite (100+ tests); got '${PASSED:-none}'."
-            echo "::error::A canary that runs almost nothing is green for the wrong reason."
             exit 1
           fi

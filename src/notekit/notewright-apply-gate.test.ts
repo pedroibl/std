@@ -446,6 +446,19 @@ const DOCTOR_SPAWN_TIMEOUT_MS = 30_000;
  * where skipping is impossible. Opt-in without that canary would be a probe that never runs at all, which
  * is precisely the green-by-construction failure NK-10 r4 exists to forbid. Do not adopt one half.
  */
+/**
+ * The POSITIVE liveness marker each gated probe emits when it genuinely runs.
+ *
+ * ⚠ WHY A MARKER AND NOT "no skip warning appeared". Cross-vendor re-verify 2026-08-06 found the canary
+ * was a purely NEGATIVE detector: it asserted the ABSENCE of skip strings, so deleting these three tests
+ * outright — or rewriting their skip copy — left the job GREEN while nothing ran. An absence-detector
+ * cannot tell "it ran" from "it is gone". `bun test` does not print test names on pass, so the probe has
+ * to say so itself. The canary asserts EXACTLY `EXPECTED_PROBE_RUNS` of these.
+ */
+const PROBE_RAN = (name: string) => console.log(`[apply-gate g] PROBE RAN: ${name}`);
+/** How many gated probes must report. Bumping this without adding a probe is the drift it exists to catch. */
+const EXPECTED_PROBE_RUNS = 3;
+
 const HARNESS_PROBES = process.env.STD_HARNESS_PROBES === "1";
 /**
  * The reason string, so a skipped run says WHY rather than vanishing.
@@ -970,6 +983,7 @@ describe("apply gate (g) — the harness still HAS the machinery the deny rule r
       expect(true).toBe(true);
       return;
     }
+    PROBE_RAN("AC #3g parser-accepts");
     const verdict = doctorVerdict(bin, readFileSync(SETTINGS, "utf8"));
     // A present binary whose probe cannot run is RED, never SKIP — same discipline as (b).
     expect(verdict.ran).toBe(true);
@@ -991,6 +1005,7 @@ describe("apply gate (g) — the harness still HAS the machinery the deny rule r
       expect(true).toBe(true);
       return;
     }
+    PROBE_RAN("NON-VACUITY malformed-rule");
     const pristine = readFileSync(SETTINGS, "utf8");
     const mutated = pristine.replace(DENY_ENTRY, "Skill(notewright-apply");   // closing paren dropped
     expect(mutated).not.toBe(pristine);
@@ -1018,6 +1033,7 @@ describe("apply gate (g) — the harness still HAS the machinery the deny rule r
       expect(true).toBe(true);
       return;
     }
+    PROBE_RAN("blind-spot unknown-tool");
     const bogus = doctorVerdict(bin, '{"permissions":{"deny":["Fnord(notewright-apply)"]}}');
     expect(bogus.ran).toBe(true);
     expect(bogus.skipped).toEqual([]);   // an unknown TOOL is accepted; only bad SHAPE is rejected
