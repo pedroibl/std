@@ -32,6 +32,14 @@ concurrency:
   group: harness-liveness
   cancel-in-progress: true
 
+# ⚠ LEAST PRIVILEGE, AND IT MATTERS MORE HERE THAN IN ci.yml. With no block the job inherits the repo
+# default token scope, which can be write-all, and `actions/checkout` persists that token into
+# .git/config where any later step can read it. THIS job pipes a remote script into `bash`, so a
+# persisted write-scoped token is a real exposure rather than a theoretical one. It only ever needs to
+# read the repo. Raised by CodeRabbit.
+permissions:
+  contents: read
+
 jobs:
   liveness:
     name: Upstream primitive liveness
@@ -39,6 +47,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # see the `permissions` note above — nothing here needs the token
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -50,6 +60,12 @@ jobs:
 
       - name: Install claude (native installer)
         run: |
+          # ⚠ pipefail, because the pipeline's status is `bash`'s and not `curl`'s: a failed download
+          # leaves bash reading EMPTY STDIN and exiting 0, so the step passes having installed nothing
+          # and the failure resurfaces one step later as "claude not on PATH" — misattributing a network
+          # error to a missing binary. That misattribution is the exact thing the next step exists to
+          # prevent, so allowing it here would have been the same defect one step upstream.
+          set -o pipefail
           curl -fsSL https://claude.ai/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -104,11 +120,20 @@ jobs:
           # the three probes, or rewriting their skip copy, left the job green while nothing ran. An
           # absence-detector cannot distinguish "it ran" from "it is gone". Each probe now emits its own
           # marker and we require exactly three.
+          # ⚠ ONE OWNER FOR THE COUNT. Hardcoding `3` here made the source and the canary two sources of
+          # truth for the same number — exactly the defect 4d9943e fixed for `porcelainPaths`, committed
+          # again three commits later. The test file's own constant is read out instead.
+          WANT=$(grep -oE 'EXPECTED_PROBE_RUNS = [0-9]+' src/notekit/notewright-apply-gate.test.ts \
+                 | grep -oE '[0-9]+' || true)
+          if [ -z "${WANT:-}" ]; then
+            echo "::error::could not read EXPECTED_PROBE_RUNS from the source — the canary lost its owner"
+            exit 1
+          fi
           RAN=$(grep -c "PROBE RAN:" probe-output.txt || true)
-          echo "probes reporting: $RAN (required: 3)"
+          echo "probes reporting: $RAN (required: $WANT, read from source)"
           grep "PROBE RAN:" probe-output.txt || true
-          if [ "$RAN" -ne 3 ]; then
-            echo "::error::expected 3 gated probes to report running, got $RAN."
+          if [ "$RAN" -ne "$WANT" ]; then
+            echo "::error::expected $WANT gated probes to report running, got $RAN."
             echo "::error::Either a probe was deleted, or it skipped, or its marker drifted."
             exit 1
           fi
@@ -127,7 +152,11 @@ jobs:
 
           echo "── 3. FLOOR: the suite itself is not a stub ──"
           # A coarse tripwire only — it catches "almost nothing ran", NOT probe liveness. Step 1 does that.
-          PASSED=$(grep -oE "^ *[0-9]+ pass" probe-output.txt | grep -oE "[0-9]+" | head -1)
+          # ⚠ `|| true` IS LOAD-BEARING, not defensive noise. Under `set -e` + `set -o pipefail` a grep
+          # that matches nothing exits 1, the assignment inherits it, and the STEP DIES HERE — making the
+          # guard below unreachable and killing the run with no diagnostic. That is the precise case the
+          # guard exists to report on. Found by CodeRabbit; `RAN` above had the guard and this did not.
+          PASSED=$(grep -oE "^ *[0-9]+ pass" probe-output.txt | grep -oE "[0-9]+" | head -1 || true)
           echo "tests passed: ${PASSED:-none}"
           if [ -z "${PASSED:-}" ] || [ "$PASSED" -lt 100 ]; then
             echo "::error::expected the full gate suite (100+ tests); got '${PASSED:-none}'."

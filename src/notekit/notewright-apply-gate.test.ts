@@ -958,6 +958,21 @@ describe("apply gate (g) — the harness still HAS the machinery the deny rule r
     expect(probeAnchorsPresent(real.replaceAll(DENY_ANCHORS[1]!, "dmi"), DENY_ANCHORS)).toBe(false);
   }, SPAWNING_TEST_TIMEOUT_MS);
 
+  test("EXPECTED_PROBE_RUNS is OWNED here — the canary reads this number, so this file enforces it", () => {
+    // ⚠ WITHOUT THIS THE CONSTANT IS AN ORPHAN, which is worse than the duplication it replaced. Review
+    // flagged the count having two owners (here and a hardcoded `3` in harness-liveness.yml); the
+    // workflow now greps this constant, which makes THIS file the owner — and an owner that never checks
+    // its own number owns nothing. Adding a fourth gated probe without bumping the constant would leave
+    // the canary demanding three, passing, and never noticing the fourth had gone silent.
+    //
+    // Reads its own source, the way the rest of this file asserts structure rather than trusting it.
+    const self = readFileSync(join(import.meta.dir, "notewright-apply-gate.test.ts"), "utf8");
+    const gates = [...self.matchAll(/if \(!HARNESS_PROBES\) \{/g)].length;
+    const markers = [...self.matchAll(/^\s*PROBE_RAN\(/gm)].length;
+    expect(gates).toBe(EXPECTED_PROBE_RUNS);      // every gated probe...
+    expect(markers).toBe(EXPECTED_PROBE_RUNS);    // ...reports exactly once when it runs
+  });
+
   test("COUNTERFACTUAL 7b — the probe is not a constant: it answers true and false on pure input", () => {
     // Runs with or without the binary. `every` on an empty anchor list would be vacuously true, which is
     // the way this predicate could rot into a tautology; pinned here.
@@ -1542,6 +1557,11 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
       cmd: ["git", "status", "--porcelain", "-z", "--", "src/", "scripts/"],
       cwd: REPO,
       stdout: "pipe",
+      // Bounded like every other spawn here. These are cheap local git calls and were left unbounded
+      // deliberately in 4d9943e — review pushed back that "cheap" is a claim about the happy path, and a
+      // git that blocks on an index.lock is not exotic. Consistency costs nothing; the exception did.
+      timeout: CLI_SPAWN_TIMEOUT_MS,
+      stdin: "ignore",
       stderr: "pipe",
     });
     expect(proc.exitCode).toBe(0);
@@ -1555,7 +1575,10 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
     // assertion becomes `expect([]).toEqual([])` and passes whatever the commits touched. The comment
     // beside it rejected `git diff <base>..HEAD` for being vacuous PRE-commit and was right; the answer
     // is both forms, not either. Together they bite in both states, which is what the claim needs.
-    const base = Bun.spawnSync({ cmd: ["git", "merge-base", "main", "HEAD"], cwd: REPO, stdout: "pipe" });
+    const base = Bun.spawnSync({
+      cmd: ["git", "merge-base", "main", "HEAD"], cwd: REPO, stdout: "pipe",
+      timeout: CLI_SPAWN_TIMEOUT_MS, stdin: "ignore",
+    });
     if (base.exitCode !== 0) {
       console.warn("[apply-gate AC#6] SKIP: no `main` to diff against — committed-range check unverified");
       expect(true).toBe(true);
@@ -1566,6 +1589,8 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
       cmd: ["git", "diff", "--name-only", "-z", `${merge}..HEAD`, "--", "src/", "scripts/"],
       cwd: REPO,
       stdout: "pipe",
+      timeout: CLI_SPAWN_TIMEOUT_MS,
+      stdin: "ignore",
       stderr: "pipe",
     });
     expect(proc.exitCode).toBe(0);
