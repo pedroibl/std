@@ -1160,20 +1160,28 @@ describe("AC #4 — `--apply` is opt-in; the default path leaves the vault byte-
   });
 
   test("2.2's single-`--apply`-read gate stays at EXACTLY ONE, in main.ts", () => {
-    // ⚠ THE GLOB FORM, not a shell-expanded path list: `-g '!*.test.ts'` does NOT filter a file
-    // ripgrep was handed explicitly, so the path-list form drags this very test file into scope and
-    // counts its own `--apply` fixtures as extra reads. A measurement correction, not a contract
-    // change — the assertion (exactly one read, in `main.ts`) is 2.2's, unchanged.
-    const proc = Bun.spawnSync({
-      cmd: ["rg", "-n", 'hasFlag\\([^)]*"apply"', "src/",
-            "-g", "src/cli/main.ts", "-g", "src/cli/notekit-*.ts", "-g", "src/notekit/**/*.ts",
-            "-g", "!*.test.ts"],
-      cwd: join(import.meta.dir, "..", ".."),
-      stdout: "pipe", stderr: "pipe", stdin: "ignore",
-    });
-    const hits = proc.stdout.toString().trim().split("\n").filter((l) => l.length > 0);
-    expect(hits).toHaveLength(1);
-    expect(hits[0]).toContain("src/cli/main.ts");
+    // The assertion is 2.2's, unchanged: `--apply` is read exactly once across the notekit surface, in
+    // `main.ts`, and every other consumer takes what routing already decided. 2.5 adds zero reads.
+    //
+    // ⚠ WALKED WITH `Bun.Glob`, NOT `rg`. 2.2 states this gate as a ripgrep command with a
+    // shell-expanded path list, which is broken twice over: `-g '!*.test.ts'` does not filter an
+    // explicitly-handed file (so the test files' own `--apply` fixtures count as reads), and the runner
+    // may have no ripgrep at all (measured — this exact gate failed in CI while green locally).
+    // A measurement correction, not a contract change. Record it so 2.2's copy gets the same fix.
+    const ROOT_DIR = join(import.meta.dir, "..", "..");
+    const APPLY_READ = /hasFlag\([^)]*"apply"/;
+    const hits: string[] = [];
+    for (const pattern of ["src/cli/main.ts", "src/cli/notekit-*.ts", "src/notekit/**/*.ts"]) {
+      for (const file of new Bun.Glob(pattern).scanSync({ cwd: ROOT_DIR })) {
+        if (file.endsWith(".test.ts")) continue;
+        // ⚠ RAW SOURCE, NOT MASKED — the opposite of AC #1's gate, and for a precise reason. There the
+        // thing counted is a CALL and the string literals are noise; here the string literal `"apply"`
+        // IS the thing counted, so `stripStringsAndComments` erases exactly what this looks for and the
+        // scan returns zero. (Measured: it did.) 2.2's original scanned raw too; only the walk changed.
+        if (APPLY_READ.test(readFileSync(join(ROOT_DIR, file), "utf-8"))) hits.push(file);
+      }
+    }
+    expect(hits).toEqual(["src/cli/main.ts"]);
   });
 });
 
@@ -1329,12 +1337,31 @@ describe("AC #6 — the required-field gap, on EVERY gap path", () => {
 describe("AC #1 — the frontmatter→fence derivation has ONE call site, and the residuals are named", () => {
   const ROOT = join(import.meta.dir, "..", "..");
 
-  /** The scope, as a GLOB over `src/` — never a shell-expanded path list. See the test below for why. */
-  const SCOPE = ["-g", "src/notekit/**/*.ts", "-g", "src/cli/notekit-*.ts", "-g", "!*.test.ts"];
+  /**
+   * The scope: the slice's non-test sources.
+   *
+   * ⚠ WALKED WITH `Bun.Glob`, NOT BY SPAWNING `rg`. The first version shelled out, passed on this
+   * machine, and failed in CI — the runner has no ripgrep, so the scan returned zero files and four
+   * assertions collapsed. A gate whose scope depends on a binary that may not exist is a gate that
+   * reports whatever the environment happens to allow. `scripts/check-core-purity.ts` already walks
+   * `PURE_GLOBS` this way; this is that idiom, not a new one.
+   *
+   * ⚠ IF YOU RUN THE EQUIVALENT BY HAND, USE RIPGREP'S GLOB FORM AND NOT A SHELL-EXPANDED PATH LIST:
+   * `-g '!*.test.ts'` does NOT filter a file ripgrep was handed explicitly, so
+   * `rg … src/notekit/ src/cli/notekit-*.ts` drags the test files in and this story's own fixtures
+   * count as violations. That trap is why the scope is computed here rather than copied from a
+   * command line.
+   */
+  const SCOPE_GLOBS = ["src/notekit/**/*.ts", "src/cli/notekit-*.ts"] as const;
 
   function scopeFiles(): string[] {
-    const proc = Bun.spawnSync({ cmd: ["rg", "--files", "src/", ...SCOPE], cwd: ROOT, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-    return proc.stdout.toString().trim().split("\n").filter((l) => l.length > 0);
+    const found = new Set<string>();
+    for (const pattern of SCOPE_GLOBS) {
+      for (const hit of new Bun.Glob(pattern).scanSync({ cwd: ROOT })) {
+        if (!hit.endsWith(".test.ts")) found.add(hit);
+      }
+    }
+    return [...found].sort();
   }
 
   /**
@@ -1433,18 +1460,26 @@ describe("AC #1 — the frontmatter→fence derivation has ONE call site, and th
     expect(rawCallForm.length).toBeGreaterThan(callSites().length);
   });
 
-  test("THE SCOPE IS A GLOB, and the shell-expanded form is a DIFFERENT, broken scope", () => {
-    // `-g '!*.test.ts'` does not filter a file ripgrep was handed explicitly. Measured, not assumed.
+  test("THE SCOPE IS NON-EMPTY AND TEST-FREE — a scope that reads nothing is a gate that proves nothing", () => {
+    // Both halves matter and they fail differently. An empty scope is the CI failure this gate already
+    // had once (no ripgrep on the runner → zero files → every assertion below it vacuously true). A
+    // scope that swept the test files in would count this story's own `parseFrontmatter(` fixtures as
+    // violations and could never reach green.
     const globbed = scopeFiles();
-    expect(globbed.length).toBeGreaterThan(0); // a scope that matches nothing is a gate that reads nothing
+    expect(globbed.length).toBeGreaterThan(5);
     expect(globbed.every((f) => !f.endsWith(".test.ts"))).toBe(true);
+    // The two files the derivation and the writer actually live in must BOTH be in scope — a glob that
+    // silently stopped covering one of them would leave the count at one for the wrong reason.
+    expect(globbed).toContain("src/cli/notekit-read.ts");
+    expect(globbed).toContain("src/cli/notekit-write.ts");
+  });
 
-    const expanded = Bun.spawnSync({
-      cmd: ["rg", "--files", "-g", "!*.test.ts", "src/notekit/", "src/cli/notekit-read.test.ts"],
-      cwd: ROOT, stdout: "pipe", stderr: "pipe", stdin: "ignore",
-    }).stdout.toString();
-    // The explicitly-handed test file survives the ignore glob — which is the whole trap.
-    expect(expanded).toContain("src/cli/notekit-read.test.ts");
+  test("the gate reads REAL bytes — every scoped file exists and is non-empty", () => {
+    // The other half of the CI lesson: the walk must yield paths that resolve. A scope of names that
+    // read as empty strings scans nothing while looking busy.
+    for (const file of scopeFiles()) {
+      expect(readFileSync(join(ROOT, file), "utf-8").length).toBeGreaterThan(0);
+    }
   });
 });
 
