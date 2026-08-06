@@ -1540,6 +1540,14 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
   const ALLOWLIST = [
     "src/notekit/notewright-dispatch.test.ts",   // 2.3's file, amended by this story (⚠️-1)
     "src/notekit/notewright-apply-gate.test.ts", // this file
+    // Story 2.5 (author mode) — six exact paths, EXTENDING and never widening. 2.5 adds no invocation,
+    // no key and no surface to this story's three gated files, which is why `.claude/` is untouched.
+    "src/notekit/core-fence.ts",
+    "src/notekit/core-fence.test.ts",
+    "src/notekit/index.ts",
+    "src/cli/notekit-read.ts",
+    "src/cli/notekit-write.ts",
+    "src/cli/notekit-write.test.ts",
   ];
 
   // `porcelainPaths` is IMPORTED, not redefined here — see the header's rule against a copied probe.
@@ -1629,9 +1637,14 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
   test("AC #6 — the allowlist is exact paths, and an UNLISTED dirty path still reddens", () => {
     // The proof that the amendment widened nothing: a path under `src/` that is not enumerated is a
     // finding, whatever its name and however close it sits to a listed one.
-    const unlisted = porcelainPaths("?? src/notekit/core-fence.ts\0 M src/cli/main.ts\0")
+    // ⚠ THE EXAMPLE MOVED AT STORY 2.5, THE CLAIM DID NOT. It used to name `src/notekit/core-fence.ts`,
+    // which 2.5 legitimately added to the allowlist — so the fixture would have asserted that a LISTED
+    // path reddens, which is the opposite of the property. `core-html.ts` is a real sibling no story in
+    // this epic touches, and it sits inside the same directory, so the near-miss the assertion is about
+    // is preserved exactly.
+    const unlisted = porcelainPaths("?? src/notekit/core-html.ts\0 M src/cli/main.ts\0")
       .filter((p) => !ALLOWLIST.includes(p));
-    expect(unlisted).toEqual(["src/notekit/core-fence.ts", "src/cli/main.ts"]);
+    expect(unlisted).toEqual(["src/notekit/core-html.ts", "src/cli/main.ts"]);
     // A prefix pattern would have waved the first one straight through — which is why there is none.
     expect(ALLOWLIST.every((p) => p.endsWith(".ts") && !p.includes("*"))).toBe(true);
   });

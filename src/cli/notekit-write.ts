@@ -27,8 +27,15 @@
 
 import { hasFlag } from "../core/index";
 import { atomicWrite, readIfExists } from "../fsx";
-import { serializeFenceBody, spliceFence, type FenceFields } from "../notekit/index";
-import { emit, errorText, renderPlan, type NotekitReadDeps } from "./notekit-read";
+import { createFence, spliceFence } from "../notekit/index";
+import {
+  composeBody,
+  emit,
+  errorText,
+  renderPlan,
+  seedValue,
+  type NotekitReadDeps,
+} from "./notekit-read";
 
 /**
  * The write-path failure codes, new to this story. EDGE-level, never in `core`: "the file changed under
@@ -70,40 +77,18 @@ function writeErrorMessage(code: NotekitWriteErrorCode, notePath: string, detail
 }
 
 /**
- * 🔴 THE NEWLINE CONTRACT, IN ONE FUNCTION. Getting it wrong destroys the fence on EVERY apply.
+ * ⚠ RE-EXPORTED, NOT REDEFINED. `composeBody` (the newline contract) and `deriveFenceFields` (the one
+ * frontmatter→fence derivation, which returns its gap advisory from the SAME pass) both MOVED to `./notekit-read` at
+ * Story 2.5, for the reason 2.2 gave when it put `composeBody` here: "it has exactly one caller". Each
+ * now has two — the author-mode PREVIEW on the read surface and the WRITE on this one — and the
+ * dependency runs ONE WAY, so the single owner has to be the lower module. That is 2.2's own
+ * `errorText` ruling applied a second time.
  *
- * The two sides do not meet: a located body CARRIES its trailing newline whenever it is non-empty
- * (`locateFence`'s `[bodyStart, bodyEnd)` excludes both delimiter LINES, and a line owns its own
- * terminator), while `serializeFenceBody` is a `.join("\n")` and emits NONE. Splicing raw codec output
- * therefore glues the closing ``` onto the last `key: value` line, and the fence stops being a fence —
- * the epic's headline promise, inverted.
- *
- * The empty case must stay `""` and not `"\n"`: an empty record has to splice back to
- * `bodyStart === bodyEnd`, i.e. to a fence whose two delimiter lines are adjacent.
- *
- * ⚠ IT LIVES HERE, NOT IN `core-fence.ts`. It has exactly one caller, so D2's Rule of Three says it has
- * not earned a home in the pure module — and keeping it edge-side keeps the codec's exported surface to
- * the things 2.1 and 2.2 genuinely contract on. It is EXPORTED so the test can call it directly: an
- * inline expression inside the write sequence would be untestable and would leave the negative case
- * (raw output breaks the fence) with nothing to call.
+ * The re-export is what makes this a MOVE rather than a rewrite: every 2.2 import and every 2.2 test
+ * resolves through this name unedited, and their staying green is the proof. Neither carries a write
+ * token, so the sole-writer gate over this file is unaffected.
  */
-export function composeBody(fields: FenceFields): string {
-  if (typeof fields !== "object" || fields === null || Array.isArray(fields)) {
-    // (d) of the four input classes: a non-object never reaches the codec. The writer's only source of
-    // fields is `parseFenceBody`, which always returns a record — so this cannot fire from the CLI, and
-    // it FAILS LOUD rather than emitting text if some later caller hands it something else.
-    throw new Error(`nk-fence compose: fields must be a record, got ${describeNonRecord(fields)}`);
-  }
-  const serialized = serializeFenceBody(fields);
-  return serialized === "" ? "" : `${serialized}\n`;
-}
-
-/** A readable name for whatever was handed to `composeBody` in place of a record. */
-function describeNonRecord(value: unknown): string {
-  if (value === null) return "null";
-  if (Array.isArray(value)) return "an array";
-  return typeof value;
-}
+export { composeBody, deriveFenceFields } from "./notekit-read";
 
 /**
  * `render <note> --apply` — preview, then splice the fence body and write the note atomically.
@@ -154,7 +139,34 @@ export async function runNotekitApply(
       emit({ ok: false, error: outcome.error }, json, log, err);
       return 1; // rows 2–6
     }
-    const plan = outcome.plan;
+
+    // ── 1b. NORMALIZE THE TWO SHAPES INTO ONE WRITE INTENT (Story 2.5) ────────────────────────────
+    // ⚠ THE TWO BRANCHES DIVERGE HERE AND NOWHERE ELSE. Author mode composes with `createFence` (the one
+    // allowed structural add, NK-4 rule 2) and transform mode with `spliceFence` (a body replacement
+    // between offsets that already exist) — different operations, deliberately not one generalized
+    // function. Everything downstream is shared, and it HAS to be: the sole-writer gate requires exactly
+    // ONE write call in the whole slice, so a second sequence for author mode would either duplicate the
+    // permitted call site or bypass the discipline it enforces. One sequence is the gate's shape, not a
+    // convenience.
+    const plan =
+      outcome.kind === "seed"
+        ? {
+            notePath: outcome.seed.notePath,
+            noteText: outcome.seed.noteText,
+            preview: seedValue(outcome.seed),
+            done: (written: boolean) => seedValue(outcome.seed, written),
+          }
+        : {
+            notePath: outcome.plan.notePath,
+            noteText: outcome.plan.noteText,
+            preview: { html: outcome.plan.html, diff: outcome.plan.diff, spec: outcome.plan.spec },
+            done: (written: boolean) => ({
+              html: outcome.plan.html,
+              diff: outcome.plan.diff,
+              spec: outcome.plan.spec,
+              written,
+            }),
+          };
 
     // ── 2. the preview, BEFORE anything is written (NK-4 rule 3) ──────────────────────────────────
     // ⚠ Under `--json` the preview cannot PRECEDE the write in print order, and pretending otherwise
@@ -163,10 +175,23 @@ export async function runNotekitApply(
     // is computed from the plan's pre-write bytes, the same bytes the write is composed from, and it is
     // the byte-identical twin of a preview-only run's `diff`. Without `--json` the ordering claim is
     // literal, and this is the line that makes it so.
-    if (!json) emit({ ok: true, value: { html: plan.html, diff: plan.diff, spec: plan.spec } }, false, log, err);
+    if (!json) emit({ ok: true, value: plan.preview }, false, log, err);
 
     // ── 3. compose the next note — the ONLY place note text is built ──────────────────────────────
-    const next = spliceFence(plan.noteText, plan.fence, composeBody(plan.fields));
+    // ⚠ THE TWO OPERATIONS ARE DIFFERENT AND ARE DELIBERATELY NOT ONE GENERALIZED FUNCTION.
+    // `spliceFence` replaces a body between two offsets that ALREADY EXIST; `createFence` inserts a
+    // whole block where there is nothing to replace — the one allowed structural add (NK-4 rule 2). A
+    // splice that can also create is exactly the widening that rule confines. Both are pure, both
+    // compose through the SAME `composeBody`, and this is the only line where the branches differ.
+    const next =
+      outcome.kind === "seed"
+        ? createFence(
+            outcome.seed.noteText,
+            outcome.seed.type,
+            composeBody(outcome.seed.fields),
+            outcome.seed.insertAt,
+          )
+        : spliceFence(outcome.plan.noteText, outcome.plan.fence, composeBody(outcome.plan.fields));
 
     // ── 4. re-read: did the note change under us? ─────────────────────────────────────────────────
     // `null` (the note was deleted) and "different bytes" are the SAME outcome and the same code — a
@@ -183,8 +208,11 @@ export async function runNotekitApply(
     // whitespace-only change, a case-only change, or any change past character 400 hashes identically
     // and this gate could not go red.
     // ⚠ Compared against `current`, not a third read: step 4 already established that the file equals
-    // `plan.noteText`, so re-reading would cost a syscall and open a second TOCTOU window for nothing.
-    if (current === next) return succeed(plan, false, json, log, err);
+    // `noteText`, so re-reading would cost a syscall and open a second TOCTOU window for nothing.
+    // ⚠ UNREACHABLE ON THE AUTHOR ARM, by construction rather than by omission: `createFence` always
+    // inserts bytes, so `current === next` cannot hold there. Left shared rather than branched — a
+    // conditional here would be a second path through the one sequence whose value is that it has one.
+    if (current === next) return succeed(plan.done(false), plan.notePath, false, json, log, err);
 
     // ── 6. the write — the ONE permitted call site in the slice ───────────────────────────────────
     try {
@@ -207,7 +235,7 @@ export async function runNotekitApply(
     }
 
     // ── 8. success ────────────────────────────────────────────────────────────────────────────────
-    return succeed(plan, true, json, log, err);
+    return succeed(plan.done(true), plan.notePath, true, json, log, err);
   } catch (e) {
     // FAIL-LOUD `1`, INHERITED FROM 2.1 UNCHANGED — not a new outcome. `runNotekitRead` wraps its own
     // dispatch in exactly this catch for exactly this reason: an unmodelled throw (a caller `--config`
@@ -226,9 +254,18 @@ export async function runNotekitApply(
   }
 }
 
-/** Row 10 — the success envelope, and the single human result line that follows the preview. */
+
+/**
+ * Row 10 — the success envelope, and the single human result line that follows the preview.
+ *
+ * ⚠ IT TAKES THE VALUE ALREADY BUILT rather than rebuilding it from a plan (Story 2.5). Author mode's
+ * payload carries a `gaps` key the transform payload does not, and re-deriving the shape here would
+ * mean this function knowing which branch produced it — a second place the two payloads could drift.
+ * The caller's `done(written)` is the ONE builder per branch.
+ */
 function succeed(
-  plan: { html: string; diff: string; spec: unknown; notePath: string },
+  value: Record<string, unknown>,
+  notePath: string,
   written: boolean,
   json: boolean,
   log: (line: string) => void,
@@ -237,15 +274,10 @@ function succeed(
   if (json) {
     // ONE result object, both forms — the same rule `capabilities` follows. `written` rides the
     // envelope; the human form prints it as its own line rather than re-rendering the payload.
-    emit(
-      { ok: true, value: { html: plan.html, diff: plan.diff, spec: plan.spec, written } },
-      true,
-      log,
-      err,
-    );
+    emit({ ok: true, value }, true, log, err);
     return 0;
   }
-  log(written ? `✓ wrote ${plan.notePath}` : "✓ already current, nothing written");
+  log(written ? `✓ wrote ${notePath}` : "✓ already current, nothing written");
   return 0;
 }
 

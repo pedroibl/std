@@ -301,3 +301,67 @@ export function spliceFence(markdown: string, fence: LocatedFence, body: string)
   }
   return markdown.slice(0, fence.bodyStart) + body + markdown.slice(fence.bodyEnd);
 }
+
+// ── createFence ─────────────────────────────────────────────────────────────────────────────────
+
+/** An info-string type as the grammar admits it — `card`, never `nk-card` and never `Card`. */
+const FENCE_TYPE = /^[a-z]+$/;
+
+/**
+ * Insert a whole nk-fence block where none existed — THE ONE ALLOWED STRUCTURAL ADD (NK-4 rule 2,
+ * author mode). One two-slice concat, the `insertInSection` shape (`src/core/markdown.ts`), so "every
+ * byte outside the inserted block is identical" is true BY CONSTRUCTION.
+ *
+ * ⚠ IT IS NOT `spliceFence`, AND NOT A GENERALIZATION OF IT. `spliceFence` replaces a body between two
+ * offsets that ALREADY EXIST; this one adds a block where there is nothing to replace. Sharing an
+ * implementation would mean a splice that can also create, which is exactly the widening NK-4 rule 2
+ * confines to one function.
+ *
+ * ⚠ `body` ARRIVES ALREADY NEWLINE-TERMINATED — it is `composeBody(fields)` (`src/cli/notekit-write.ts`),
+ * which is the same contract `spliceFence` documents above. A second `\n` here would put a blank line
+ * inside the fence, which `parseFenceBody` then DROPS (rule 2), making `serialize(parse(body)) !== body`
+ * on a fence this function just created and failing FR-16 parity on the spot. The empty case is
+ * `composeBody({}) === ""`, which yields ```` ```nk-card\n```\n ```` and a fence with
+ * `bodyStart === bodyEnd`.
+ *
+ * ⚠ THE SEPARATORS ARE UNCONDITIONAL, and the consequence is DECLARED rather than "fixed": at `at === 0`
+ * the result opens with a blank line. That branch is unreachable from the CLI (no frontmatter ⇒ no
+ * `nk-type:` opt-in ⇒ the write path's row 3 fires first), so it is a unit-test observation and not a
+ * note anyone sees. A conditional separator would be a second code path through the one function whose
+ * whole value is that it has one. If the insertion point ever moves somewhere a leading blank line is
+ * visible, that is when the conditional earns itself.
+ *
+ * ⚠ PURE (D1) BUT NOT TOTAL, on the same split `spliceFence` states: "this note has no fence" is a
+ * MODELED OUTCOME (`locateFence`'s `| null`); "this type is not in the grammar" and "this offset does
+ * not index this string" are CALLER BUGS, the class `cardTree` already answers with a throw
+ * (`core-nknode.ts`). Both throws are unreachable from the CLI — the type comes from a registry the
+ * caller already resolved, the offset from the note the block is being inserted into — so both are
+ * exercised directly at unit level rather than left as untested arms.
+ *
+ * 🔴 THE `at` GUARD IS NOT DEFENSIVE PADDING, AND THE OFFSET IS THE DANGEROUS ARGUMENT.
+ * `String.prototype.slice` coerces and clamps rather than failing, so the two-slice form has no natural
+ * bottom and every bad offset returns a PLAUSIBLE-LOOKING string. Measured against
+ * `"---\ntitle: T\nnk-type: card\n---\n\nProse here.\n"` with the guard removed:
+ *
+ *   `at = NaN` → both slices resolve to `(0,0)` and `(0)`, so the block lands BEFORE the opening `---`
+ *                and the note is no longer frontmatter-led — no opt-in, unrenderable
+ *   `at = 1.5` → the insertion splits `---` mid-delimiter
+ *   `at = -1`  → the last byte is duplicated on both sides of the block
+ *
+ * None of the three throws, and the `locateFence` inverse oracle stays GREEN on all three — it still
+ * finds the fence, because the note is wrecked AROUND it. That asymmetry is why the guard exists and
+ * why the oracle alone does not cover placement. The caller computes `at` from a frontmatter scan that
+ * can return `-1`, so this is a reachable caller bug rather than a hypothetical one.
+ */
+export function createFence(markdown: string, type: string, body: string, at: number): string {
+  if (!FENCE_TYPE.test(type)) {
+    throw new Error("nk-fence create: info-string type must match /^[a-z]+$/");
+  }
+  if (!Number.isInteger(at) || at < 0 || at > markdown.length) {
+    throw new Error(
+      `nk-fence create: insertion offset must be an integer in 0…${markdown.length}, got ${at}`,
+    );
+  }
+  const block = "```nk-" + type + "\n" + body + "```\n";
+  return markdown.slice(0, at) + "\n" + block + "\n" + markdown.slice(at);
+}

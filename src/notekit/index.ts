@@ -29,7 +29,7 @@
 // stating the same fields would be the fork this note exists to prevent, and would drift the moment
 // either side gained a field. The DOM-typed `Renderer` stays edge-internal by the same rule (⚠️-4).
 
-export { locateFence, parseFenceBody, serializeFenceBody, spliceFence } from "./core-fence";
+export { createFence, locateFence, parseFenceBody, serializeFenceBody, spliceFence } from "./core-fence";
 export type { FenceFields, LocatedFence } from "./core-fence";
 
 export { CATALOG_VERSION, capabilities } from "./core-capabilities";
