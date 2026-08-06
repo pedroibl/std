@@ -2141,3 +2141,58 @@ describe("2.7 ⚠️-2 (RULED) — a fenceless note honours --body -, and the te
     expect(h.writes).toEqual([]);
   });
 });
+
+describe("2.7 AC #1 — a HOSTILE stdin body cannot reach a byte outside the fence", () => {
+  // 🔴 THE STORY'S HEADLINE SAFETY CLAIM, ATTACKED RATHER THAN ASSERTED. `--body -` is admissible only
+  // because it changes the ORIGIN of bytes in an already-sanctioned region, never which bytes are
+  // reachable (NK-4 rule 5). The obvious way that could be false is a body that carries structure: a
+  // fence delimiter, a second whole fence, a frontmatter block. None of the story's fixtures tried it.
+  //
+  // The reason it holds is mechanical rather than defensive, and worth stating because it is what a
+  // future codec change could break: `parseFenceBody` keeps only lines that SPLIT ON A COLON, and
+  // ```` ``` ````, ```` ```nk-card ```` and `---` carry none — so they are dropped at parse and never
+  // reach `serializeFenceBody`. The writer therefore cannot emit a delimiter it did not compose.
+  const NOTE = ["---", "nk-type: card", "---", "", "```nk-card", "title: Before", "```", "", "prose after"].join("\n");
+
+  const HOSTILE: Array<[string, string]> = [
+    ["a closing delimiter run", "title: X\n```\n"],
+    ["an opening delimiter run", "title: X\n```nk-card\n"],
+    ["a WHOLE second fence", "title: X\n```nk-card\ntitle: Y\n```\n"],
+    ["a frontmatter block", "title: X\n---\nnk-type: primer\n---\n"],
+    ["a very long single field", `title: ${"A".repeat(500)}\n`],
+  ];
+
+  for (const [label, body] of HOSTILE) {
+    test(`${label} on stdin leaves ONE fence, the prose intact, and the routing unmoved`, async () => {
+      const h = harness({ readNote: scriptedReads(NOTE, NOTE, "unused"), readBody: async () => body });
+      expect(await runNotekitApply(["render", "n.md", ...CONFIG, ...BODY_FLAG], h.deps)).toBe(1); // row 9
+      const written = h.writes[0]![1];
+
+      // Exactly ONE opening delimiter — a second would be structure the channel smuggled in.
+      expect(written.match(/^```nk-[a-z]+$/gm)!.length).toBe(1);
+      // …and the note still re-locates, on the same type: routing never came from stdin.
+      const f = locateFence(written);
+      expect(f).not.toBeNull();
+      expect(f!.type).toBe("card");
+      // …and every byte outside the fence is identical.
+      expect(written.startsWith("---\nnk-type: card\n---\n\n")).toBe(true);
+      expect(written.slice(f!.blockEnd)).toBe("\nprose after");
+      // …and what landed inside is exactly the codec's own output, so the writer composed every byte.
+      expect(f!.body).toBe(composeBody(parseFenceBody(body)));
+    });
+  }
+
+  test("the mechanism, stated as a test: a colonless line is DROPPED at parse", () => {
+    // If this ever stops being true, every assertion above becomes a coincidence rather than a proof.
+    expect(parseFenceBody("```")).toEqual({});
+    expect(parseFenceBody("```nk-card")).toEqual({});
+    expect(parseFenceBody("---")).toEqual({});
+    expect(serializeFenceBody(parseFenceBody("title: X\n```\n---\n"))).toBe("title: X");
+  });
+
+  test("…and a second `title:` in a hostile body follows the LAST-wins rule, not a merge", async () => {
+    // The whole-second-fence case above carries two titles. Which one lands is a declared normalization
+    // (duplicate key keeps the last), not an accident — pinned so the fixture's meaning is unambiguous.
+    expect(parseFenceBody("title: X\n```nk-card\ntitle: Y\n```\n")).toEqual({ title: "Y" });
+  });
+});
