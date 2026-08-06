@@ -1,0 +1,164 @@
+# std — harness liveness canary (NK-11 r3, NK-12 r3/r6).
+#
+# NOT A MERGE GATE, AND DELIBERATELY NOT ON `pull_request`. Every probe here asserts a fact about an
+# artifact upstream ships and this repo neither owns nor pins — the installed `claude` binary. Those are
+# CANARIES about the world, not gates about a diff. On the PR path they would fail every open PR in the
+# repo the day upstream renames a primitive, including PRs nowhere near notekit, and a gate that fails
+# the innocent is the kind that gets switched off (NK-11 r2).
+#
+# A RED HERE IS AN ARCHITECTURE ALARM, not a broken build: restate the affected NK-10 clause and open a
+# story. Nothing here can block a merge.
+#
+# ⚠ `runs-on: ubuntu-latest` IS LOAD-BEARING — it is not a default and must not be "upgraded" to macOS.
+# These probes spawn `claude doctor`, which on macOS performs SecKeychainItemModifyContent against the
+# operator's real login keychain (NK-12, found by an operator's credential dialog). This runner is the
+# one place `STD_HARNESS_PROBES=1` is admissible, and the reason is a PROPERTY, not an OS name (NK-12 r6):
+#   · no operator credential store — macOS Keychain Services is an Apple-only API and does not exist here
+#   · no interactive session — headless, no window server, so no modal can block an unattended run
+# If a macOS job is ever added to this workflow for a good reason, IT MUST NOT SET THAT FLAG. A scheduled
+# unattended run is a WORSE place for a keychain write than an interactive one, not a safer one: nobody
+# is present to see what the machine asks for, and a blocking modal reports as a timeout.
+
+name: Harness liveness
+
+on:
+  schedule:
+    # Daily. The point is bounded detection latency — a primitive disappearing upstream is noticed within
+    # a day rather than whenever someone next runs the suite on a machine that happens to have the binary.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: harness-liveness
+  cancel-in-progress: true
+
+# ⚠ LEAST PRIVILEGE, AND IT MATTERS MORE HERE THAN IN ci.yml. With no block the job inherits the repo
+# default token scope, which can be write-all, and `actions/checkout` persists that token into
+# .git/config where any later step can read it. THIS job pipes a remote script into `bash`, so a
+# persisted write-scoped token is a real exposure rather than a theoretical one. It only ever needs to
+# read the repo. Raised by CodeRabbit.
+permissions:
+  contents: read
+
+jobs:
+  liveness:
+    name: Upstream primitive liveness
+    runs-on: ubuntu-latest          # ⚠ see the header — NOT a default, and not macOS. NK-12 r6.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # see the `permissions` note above — nothing here needs the token
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Install claude (native installer)
+        run: |
+          # ⚠ pipefail, because the pipeline's status is `bash`'s and not `curl`'s: a failed download
+          # leaves bash reading EMPTY STDIN and exiting 0, so the step passes having installed nothing
+          # and the failure resurfaces one step later as "claude not on PATH" — misattributing a network
+          # error to a missing binary. That misattribution is the exact thing the next step exists to
+          # prevent, so allowing it here would have been the same defect one step upstream.
+          set -o pipefail
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # ⚠ THIS STEP EXISTS BECAUSE THE PROBES CANNOT TELL THE TWO FAILURES APART. Gates (b)/(g) read the
+      # binary with `strings -a` and are RED when an anchor is missing — which is correct when upstream
+      # dropped the anchor, and WRONG when the install produced a script shim with no strings in it at
+      # all. Both look identical to the assertion. So the shape of the artifact is checked HERE, where a
+      # failure reads as "the install is wrong" instead of as "upstream removed the primitive".
+      - name: Verify the installed artifact is a native executable, not a shim
+        run: |
+          BIN="$(command -v claude)" || { echo "::error::claude not on PATH after install"; exit 1; }
+          REAL="$(readlink -f "$BIN")"
+          echo "resolved: $BIN -> $REAL"
+          file "$REAL"
+          claude --version
+          if ! file "$REAL" | grep -qi "ELF"; then
+            echo "::error::resolved claude is not a native ELF binary — \`strings\` probes would go RED"
+            echo "::error::for the wrong reason. Fix the install step; do NOT relax the probes."
+            exit 1
+          fi
+          COUNT="$(strings -a "$REAL" | wc -l)"
+          echo "strings readable: $COUNT lines"
+          if [ "$COUNT" -lt 1000 ]; then
+            echo "::error::strings returned $COUNT lines — the probe would read an empty haystack"; exit 1
+          fi
+
+      # The canary proper. STD_HARNESS_PROBES=1 is set ONLY here (NK-12 r3): it makes the `bin === null`
+      # branch and the opt-in skip both unreachable, so this is the one place where a probe cannot skip.
+      # That property is what makes the whole arrangement honest — opt-in alone would be a probe that
+      # never runs, which is the green-by-construction failure NK-10 r4 forbids (NK-12 r4).
+      #
+      # 🔴 SETTING THE FLAG IS NOT ENOUGH, AND ASSUMING IT WAS IS THE BUG THIS STEP EXISTS TO PREVENT.
+      # Cross-vendor review caught the first draft of this workflow doing exactly that: it exported the
+      # variable and trusted the probes to run. But every skip path in the suite is `console.warn` +
+      # `expect(true).toBe(true)` — a SKIP is GREEN. So a binary that vanished, a renamed env var, a
+      # moved test file, or a `bun test` that matched nothing would all produce a passing canary that
+      # proved nothing. The output is therefore ASSERTED against, not merely produced: the job fails if
+      # any skip marker appears, and fails if the probe count is not what it must be. A canary that can
+      # be green while silent is not a canary.
+      - name: Liveness probes (the only place they cannot skip)
+        env:
+          STD_HARNESS_PROBES: "1"
+        run: |
+          set -o pipefail
+          bun test \
+            src/notekit/notewright-apply-gate.test.ts \
+            src/notekit/notewright-dispatch.test.ts 2>&1 | tee probe-output.txt
+
+          echo "── 1. POSITIVE: the gated probes reported that they RAN ──"
+          # ⚠ THIS IS THE ONE THAT MATTERS, and the first draft did not have it. Cross-vendor re-verify
+          # found the canary was purely NEGATIVE — it asserted the ABSENCE of skip strings, so DELETING
+          # the three probes, or rewriting their skip copy, left the job green while nothing ran. An
+          # absence-detector cannot distinguish "it ran" from "it is gone". Each probe now emits its own
+          # marker and we require exactly three.
+          # ⚠ ONE OWNER FOR THE COUNT. Hardcoding `3` here made the source and the canary two sources of
+          # truth for the same number — exactly the defect 4d9943e fixed for `porcelainPaths`, committed
+          # again three commits later. The test file's own constant is read out instead.
+          WANT=$(grep -oE 'EXPECTED_PROBE_RUNS = [0-9]+' src/notekit/notewright-apply-gate.test.ts \
+                 | grep -oE '[0-9]+' || true)
+          if [ -z "${WANT:-}" ]; then
+            echo "::error::could not read EXPECTED_PROBE_RUNS from the source — the canary lost its owner"
+            exit 1
+          fi
+          RAN=$(grep -c "PROBE RAN:" probe-output.txt || true)
+          echo "probes reporting: $RAN (required: $WANT, read from source)"
+          grep "PROBE RAN:" probe-output.txt || true
+          if [ "$RAN" -ne "$WANT" ]; then
+            echo "::error::expected $WANT gated probes to report running, got $RAN."
+            echo "::error::Either a probe was deleted, or it skipped, or its marker drifted."
+            exit 1
+          fi
+
+          echo "── 2. NEGATIVE: no probe anywhere skipped ──"
+          # ⚠ TAG-SHAPED, NOT PHRASE-SHAPED. The previous greps were coupled to exact wording and already
+          # had a live landmine: apply-gate says "SKIP: \`claude\` is not on PATH" while dispatch says
+          # "SKIP: no \`claude\` on PATH" — same condition, different sentence, and only one was matched.
+          # Matching the bracket tag plus "SKIP:" catches every skip in both files regardless of wording,
+          # and cannot be defeated by someone rephrasing a message.
+          if grep -nE '\[(apply-gate|notewright-dispatch)[^]]*\] SKIP:' probe-output.txt; then
+            echo "::error::a probe SKIPPED on the one path where skipping must be impossible."
+            echo "::error::The lines above name which. This is the canary's entire purpose."
+            exit 1
+          fi
+
+          echo "── 3. FLOOR: the suite itself is not a stub ──"
+          # A coarse tripwire only — it catches "almost nothing ran", NOT probe liveness. Step 1 does that.
+          # ⚠ `|| true` IS LOAD-BEARING, not defensive noise. Under `set -e` + `set -o pipefail` a grep
+          # that matches nothing exits 1, the assignment inherits it, and the STEP DIES HERE — making the
+          # guard below unreachable and killing the run with no diagnostic. That is the precise case the
+          # guard exists to report on. Found by CodeRabbit; `RAN` above had the guard and this did not.
+          PASSED=$(grep -oE "^ *[0-9]+ pass" probe-output.txt | grep -oE "[0-9]+" | head -1 || true)
+          echo "tests passed: ${PASSED:-none}"
+          if [ -z "${PASSED:-}" ] || [ "$PASSED" -lt 100 ]; then
+            echo "::error::expected the full gate suite (100+ tests); got '${PASSED:-none}'."
+            exit 1
+          fi

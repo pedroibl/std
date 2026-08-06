@@ -109,7 +109,11 @@ function strayKeys(text: string, allowed: string[]): string[] {
  * occurrence and return true for a key that had in fact been renamed — a false PASS, which is worse than
  * the false fail it was widening to avoid.
  */
-function probeKeySpelling(schemaLine: string, key: string, anchor: string): boolean {
+// ⚠ AMENDMENT 2, Story 2.4 (declared in its ⚠️-1). The `export` token below is the ONLY change: Story
+// 2.4's apply gate needs this same probe for `disable-model-invocation`, and a COPY would give the
+// estate's only frontmatter-expiry guard two sources of truth — the day one is corrected the other rots
+// silently. One token, one owner. Nothing about the function's behaviour or its 200-char window moved.
+export function probeKeySpelling(schemaLine: string, key: string, anchor: string): boolean {
   const at = schemaLine.indexOf(anchor);
   if (at < 0) return false; // the prose itself is gone: the feature moved, which is also a red
   const window = schemaLine.slice(Math.max(0, at - 200), at);
@@ -243,7 +247,7 @@ function nkTokens(text: string): string[] {
  * would mangle it into `/original.ts`. It is consumed explicitly here. Both halves are returned: a
  * rename touches the path it left as much as the path it landed on, and AC #4c is about files touched.
  */
-function porcelainPaths(stdout: string): string[] {
+export function porcelainPaths(stdout: string): string[] {
   const records = stdout.split("\0").filter((r) => r.length > 0);
   const out: string[] = [];
   for (let i = 0; i < records.length; i++) {
@@ -560,13 +564,27 @@ describe("notewright dispatch — gate (c): content assertions", () => {
     expect(shellLines(sed).map((l) => l.split(/\s+/)[0])).toContain("sed");
   });
 
-  test("AC #4d — the apply flag appears nowhere in either file", () => {
+  test("AC #4d — the apply flag reaches the preview SKILL never, and the agent only to forbid itself", () => {
     // Same invariant as 2.2's "no default that enables it", one layer up: 2.2 ensures the flag has no
-    // default that turns it on; 2.3 ensures the agent surface never types it. The path that AUTHORIZES
-    // reaching it is Story 2.4's, named here only to say who owns it.
+    // default that turns it on; 2.3 ensures no ungated surface types it.
     const flag = "--" + "apply"; // split so this file's own list does not trip a future whole-tree scan
-    expect(agentText).not.toContain(flag);
+
+    // The preview SKILL keeps the absolute zero. It is model-invocable, so the flag must not reach it.
     expect(skillText).not.toContain(flag);
+
+    // ⚠ THE AGENT HALF WAS AMENDED 2026-08-06 (review of 2.4). The blanket zero was wrong in a way that
+    // took building 2.4 to see: the agent is the EXECUTOR, and forbidding it the flag left it unable to
+    // state the one rule that matters ("never write `--apply` yourself"). 2.4 reconciled it instead with
+    // a general posture clause — "that posture was authorized by the human who typed it" — which asserts
+    // something a forked run CANNOT verify, and which a model-authored spawn prompt satisfies exactly as
+    // well as a human one. A vague rule on a write path is worse than a specific one, so the specific one
+    // is now permitted and the vague one is banned by name.
+    const forbids = /never write `--apply` yourself/.test(agentText);
+    expect(forbids).toBe(true);
+    // Every occurrence in the agent must sit in the prohibition, never in a runnable command block.
+    for (const line of shellLines(agentText)) expect(line).not.toContain(flag);
+    // …and the superseded authorization-by-inference wording must not come back.
+    expect(agentText).not.toMatch(/authorized by the human who typed it/);
   });
 
   test("AC #5 — no `nk-`-prefixed note-type literal in either file", () => {
@@ -891,7 +909,15 @@ describe("notewright dispatch — AC #4c: nothing under src/ or scripts/ moved",
    * 2.5, 2.6 and 2.7 each append their own file here (the Epic-2 ruling §7 makes that explicit). A
    * prefix like `src/notekit/` would silently permit every future file in the slice.
    */
-  const WORKING_TREE_ALLOWLIST = ["src/notekit/notewright-dispatch.test.ts"];
+  // ⚠ AMENDMENT 1, Story 2.4 (declared in its ⚠️-1). ONE exact path appended — 2.4's apply gate lives at
+  // `src/notekit/notewright-apply-gate.test.ts` (beside the slice it governs, D6), so it lands inside this
+  // scan the moment it exists. This EXTENDS the enumeration and does not relax it: an unlisted dirty path
+  // under `src/` or `scripts/` still reddens. It is deliberately NOT a prefix like `src/notekit/notewright-*`
+  // — a permissive pattern is how this assertion would stop being a gate.
+  const WORKING_TREE_ALLOWLIST = [
+    "src/notekit/notewright-dispatch.test.ts",
+    "src/notekit/notewright-apply-gate.test.ts",
+  ];
 
   test("COUNTERFACTUAL 12 — a rename parses to BOTH its paths, not to `old -> new`", () => {
     // Constructed from REAL `-z` output (probed 2026-08-06 against a scratch repo), so the shape is
