@@ -24,7 +24,7 @@ import {
 } from "../notekit/index";
 import { parseFrontmatter } from "../core/index";
 import { statMtime } from "../fsx";
-import { stripStringsAndComments } from "../../scripts/lib/specifiers";
+import { stripComments, stripStringsAndComments } from "../../scripts/lib/specifiers";
 
 const AT = "2026-01-01T00:00:00.000Z";
 
@@ -1162,29 +1162,60 @@ describe("AC #4 — `--apply` is opt-in; the default path leaves the vault byte-
     expect(env.value).not.toHaveProperty("written"); // preview only — nothing was written to report
   });
 
-  test("2.2's single-`--apply`-read gate stays at EXACTLY ONE, in main.ts", () => {
-    // The assertion is 2.2's, unchanged: `--apply` is read exactly once across the notekit surface, in
-    // `main.ts`, and every other consumer takes what routing already decided. 2.5 adds zero reads.
+  test("the single-read gate covers BOTH --apply and --body, at EXACTLY ONE site each", () => {
+    // The assertion is 2.2's, unchanged for `--apply`: it is read exactly once across the notekit
+    // surface, in `main.ts`, and every other consumer takes what routing already decided. 2.5 adds zero
+    // reads. Story 2.7 adds the `--body` half to THIS gate rather than writing another one — see below.
     //
     // ⚠ WALKED WITH `Bun.Glob`, NOT `rg`. 2.2 states this gate as a ripgrep command with a
     // shell-expanded path list, which is broken twice over: `-g '!*.test.ts'` does not filter an
     // explicitly-handed file (so the test files' own `--apply` fixtures count as reads), and the runner
     // may have no ripgrep at all (measured — this exact gate failed in CI while green locally).
     // A measurement correction, not a contract change. Record it so 2.2's copy gets the same fix.
+    //
+    // 🔴 AND STORY 2.7 PROVED THAT NOTE THE HARD WAY. Its first draft wrote a THIRD copy of this gate
+    // in `main.test.ts` that shelled out to `rg` — green locally, `Executable not found in $PATH: "rg"`
+    // in CI, on a PR whose whole point was that the local bar was green. The fix recorded here was one
+    // file away and had already named the failure. So the flags were folded into this ONE gate instead:
+    // three copies of a guard is how one of them rots, which is the same call the estate made for
+    // `porcelainPaths`, `probeKeySpelling` and the working-tree allowlist.
+    //
+    // ⚠ MASKED WITH `stripComments` (Story 2.7, cross-vendor review finding). Raw source counts a token
+    // wherever it appears, so a COMMENT naming the banned form reddens a tree whose production code has
+    // exactly one reader — measured. ⚠ `stripComments`, NOT `stripStringsAndComments`: the stronger
+    // helper blanks string CONTENT, and the string literal `"apply"` IS the thing counted here, so it
+    // would erase exactly what this looks for and return a green zero. (Measured: it did. That is why
+    // the note this replaced said "raw" — the correct refinement is to mask comments only, not to give
+    // up on masking.) `sole-writer.test.ts` can use the stronger one because it bans a CALL token.
     const ROOT_DIR = join(import.meta.dir, "..", "..");
-    const APPLY_READ = /hasFlag\([^)]*"apply"/;
-    const hits: string[] = [];
-    for (const pattern of ["src/cli/main.ts", "src/cli/notekit-*.ts", "src/notekit/**/*.ts"]) {
+    const SCOPE = ["src/cli/main.ts", "src/cli/notekit-*.ts", "src/notekit/**/*.ts"];
+    const scanned: string[] = [];
+    const sources = new Map<string, string>();
+    for (const pattern of SCOPE) {
       for (const file of new Bun.Glob(pattern).scanSync({ cwd: ROOT_DIR })) {
         if (file.endsWith(".test.ts")) continue;
-        // ⚠ RAW SOURCE, NOT MASKED — the opposite of AC #1's gate, and for a precise reason. There the
-        // thing counted is a CALL and the string literals are noise; here the string literal `"apply"`
-        // IS the thing counted, so `stripStringsAndComments` erases exactly what this looks for and the
-        // scan returns zero. (Measured: it did.) 2.2's original scanned raw too; only the walk changed.
-        if (APPLY_READ.test(readFileSync(join(ROOT_DIR, file), "utf-8"))) hits.push(file);
+        scanned.push(file);
+        sources.set(file, stripComments(readFileSync(join(ROOT_DIR, file), "utf-8")));
       }
     }
-    expect(hits).toEqual(["src/cli/main.ts"]);
+    // THE SCOPE IS NON-EMPTY, or every count below is a vacuous zero on an empty walk.
+    expect(scanned.length).toBeGreaterThan(0);
+
+    // 🔴 OCCURRENCES, NOT FILES — and this was found by watching the counterfactual, not by reading.
+    // Both 2.2's original and its Bun.Glob rewrite collected the FILES a flag is read in, so a SECOND
+    // `hasFlag(rest, "apply")` planted inside `main.ts` — precisely what 2.2's own story text forbids
+    // ("never a second `hasFlag` call") — left `["src/cli/main.ts"]` unchanged and the gate green. The
+    // gate was one notch weaker than the claim it is quoted as making. `match(…g)` counts every call.
+    const readsOf = (flag: string): string[] => {
+      const re = new RegExp(`hasFlag\\([^)]*"${flag}"`, "g");
+      return [...sources].flatMap(([f, src]) => (src.match(re) ?? []).map(() => f));
+    };
+
+    // ONE `--apply` reader, in `main.ts` — 2.2's assertion, now counting calls rather than files.
+    expect(readsOf("apply")).toEqual(["src/cli/main.ts"]);
+    // Story 2.7's half: ONE `--body` reader, and it is the shared two-form predicate — never a local
+    // bare-form read in `main.ts` or in the runner, which would be blind to `--body=-`.
+    expect(readsOf("body")).toEqual(["src/cli/notekit-write.ts"]);
   });
 });
 
@@ -2233,5 +2264,28 @@ describe("2.7 AC #1 — a HOSTILE stdin body cannot reach a byte outside the fen
     // The whole-second-fence case above carries two titles. Which one lands is a declared normalization
     // (duplicate key keeps the last), not an accident — pinned so the fixture's meaning is unambiguous.
     expect(parseFenceBody("title: X\n```nk-card\ntitle: Y\n```\n")).toEqual({ title: "Y" });
+  });
+});
+
+describe("2.7 — the single-read gate's mask, both halves (cross-vendor review NIT)", () => {
+  // A mask that swallowed the REAL reads too would be a gate that cannot fail, so the mask itself is
+  // asserted rather than trusted. Pure string work: no filesystem, no subprocess — which is also why it
+  // survived the `rg` outage that took the gate's first draft red in CI.
+  const BODY_READ = /hasFlag\([^)]*"body"/;
+
+  test("a COMMENT naming the banned form no longer counts — line and block", () => {
+    expect(BODY_READ.test(stripComments(`// never a local hasFlag(argv, "body") here\nconst x = 1;\n`))).toBe(false);
+    expect(BODY_READ.test(stripComments(`/* hasFlag(argv, "body") */\nconst y = 2;\n`))).toBe(false);
+  });
+
+  test("…and the REAL reader still does — the half that stops the mask being a blindfold", () => {
+    expect(BODY_READ.test(stripComments(`const p = hasFlag(argv, "body");\n`))).toBe(true);
+  });
+
+  test("🔴 …and `stripStringsAndComments` would NOT — which is why the gate uses the weaker helper", () => {
+    // It blanks string CONTENT, so the flag name the gate counts disappears and every count reads zero
+    // while the tick stays green. Asserted rather than left as prose, because "use the other helper" is
+    // exactly the kind of tidy-up a later editor makes.
+    expect(BODY_READ.test(stripStringsAndComments(`const p = hasFlag(argv, "body");\n`))).toBe(false);
   });
 });
