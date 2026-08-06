@@ -1585,6 +1585,32 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
       return;
     }
     const merge = base.stdout.toString().trim();
+
+    // ⚠ ON `main` THERE IS NO BRANCH DELTA, AND THIS ASSERTION IS ABOUT A BRANCH. Once the story lands,
+    // `merge-base(main, HEAD)` IS `HEAD`, the range is empty, and the non-vacuity check below —
+    // `changed.length > 0`, which exists to prove the allowlist comparison was not made against nothing
+    // — asserts that a branch with no commits committed something. It cannot pass.
+    //
+    // 🔴 THIS SHIPPED RED TO `main` AND BROKE IT (2026-08-06, squash 7e10ba0), and it was found by the
+    // harness-liveness canary's very first run rather than by any review. Nothing could have caught it
+    // earlier: on every feature branch the range is non-empty and the test is green, so it passes every
+    // pre-merge check and fails the instant it is merged. That is a failure shape this estate had not
+    // seen — a test whose correctness depends on WHICH REF IT RUNS ON. The fix detects the condition
+    // instead of weakening the assertion, which still means exactly what it said everywhere it has a
+    // subject: verified by counterfactual (an unlisted file committed on a branch still reddens).
+    const head = Bun.spawnSync({
+      cmd: ["git", "rev-parse", "HEAD"], cwd: REPO, stdout: "pipe",
+      timeout: CLI_SPAWN_TIMEOUT_MS, stdin: "ignore",
+    }).stdout.toString().trim();
+    if (merge === head) {
+      console.warn(
+        "[apply-gate AC#6] SKIP: HEAD is the merge-base with `main` — there is no branch range to " +
+          "check. This assertion is about a FEATURE BRANCH's committed delta; on `main` it has no subject.",
+      );
+      expect(true).toBe(true);
+      return;
+    }
+
     const proc = Bun.spawnSync({
       cmd: ["git", "diff", "--name-only", "-z", `${merge}..HEAD`, "--", "src/", "scripts/"],
       cwd: REPO,
