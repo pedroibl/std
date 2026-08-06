@@ -427,6 +427,22 @@ const DOCTOR_TIMEOUT_MS = 60_000;
 const DOCTOR_SPAWN_TIMEOUT_MS = 30_000;
 
 /**
+ * The opt-in for probes that SPAWN the installed harness and therefore touch the host (NK-12 r3).
+ *
+ * ⚠ THIS IS ROUTING, NOT A SKIP CONDITION, AND THE DISTINCTION IS LOAD-BEARING. NK-10 r4 says an absent
+ * binary is the ONLY skip condition, and that still holds for everything it was written about: it governs
+ * what makes a probe INCONCLUSIVE. This flag governs WHERE a probe runs. It is admissible only because
+ * NK-11 r3's scheduled `harness-liveness.yml` sets it unconditionally — the probe keeps exactly one place
+ * where skipping is impossible. Opt-in without that canary would be a probe that never runs at all, which
+ * is precisely the green-by-construction failure NK-10 r4 exists to forbid. Do not adopt one half.
+ */
+const HARNESS_PROBES = process.env.STD_HARNESS_PROBES === "1";
+/** The reason string, so a skipped run says WHY rather than vanishing. */
+const HARNESS_PROBES_SKIP =
+  "[apply-gate g] SKIP: spawns the real `claude` binary, which WRITES to the macOS login keychain " +
+  "(NK-12). Set STD_HARNESS_PROBES=1 to run; the scheduled harness-liveness workflow always does.";
+
+/**
  * Gate (g)'s BEHAVIOURAL step: hand a settings file to the harness's OWN permission-rule parser and read
  * back which rules it threw away.
  *
@@ -443,9 +459,27 @@ const DOCTOR_SPAWN_TIMEOUT_MS = 30_000;
  * parsing `Skill(…)` while ceasing to ENFORCE it. That second failure is what the string anchors watch,
  * and neither watches a change to the enforcement PREDICATE's shape. Stated, not blurred.
  *
- * ⚠ HERMETIC BY CONSTRUCTION: `CLAUDE_CONFIG_DIR` is redirected into the throwaway dir, so the run reads
- * and writes nothing under the operator's real `~/.claude`; the auto-updater and telemetry are off. Two
- * runs cost ~1.5s total. Verified: the only files it created were inside the redirected config dir.
+ * 🔴 NOT HERMETIC, AND OPT-IN FOR THAT REASON (NK-12, 2026-08-06). This docstring previously read
+ * *"HERMETIC BY CONSTRUCTION: `CLAUDE_CONFIG_DIR` is redirected into the throwaway dir, so the run reads
+ * and writes nothing under the operator's real `~/.claude` … Verified: the only files it created were
+ * inside the redirected config dir."* Every clause of that is TRUE and the conclusion drawn from it was
+ * FALSE, which is the part worth keeping in view: the verification was scoped to the resource the
+ * redirect covered, so it could only ever confirm itself.
+ *
+ * What it missed: this spawns the REAL installed `claude` binary with the operator's REAL `HOME` (see
+ * `env` below — only `CLAUDE_CONFIG_DIR` is redirected). `claude doctor` performs
+ * `SecKeychainItemModifyContent` — a **write** — against the macOS login keychain at
+ * `~/Library/Keychains/login.keychain-db`, which does not live under `~/.claude` and was never inside the
+ * boundary this comment claimed. Found by an operator's credential dialog, not by review; four review
+ * passes read the hermeticity claim as a premise and checked only what followed from it.
+ *
+ * Redirecting `HOME` as well is deliberately NOT the fix: the login keychain binds to the macOS security
+ * session rather than to `$HOME` alone, so that containment would be unverifiable without triggering the
+ * dialog it is meant to avoid — the same error one layer down. Routing is the fix.
+ *
+ * SO: skipped unless `STD_HARNESS_PROBES=1`, and run unconditionally in the scheduled
+ * `harness-liveness.yml` (NK-11 r3) where the runner is ephemeral. Opt-in ALONE would be a probe that
+ * never runs; the canary is what keeps this honest, and NK-12 r4 makes the pair the invariant.
  */
 function doctorVerdict(bin: string, settingsJson: string): DoctorVerdict {
   const dir = mkdtempSync(join(tmpdir(), "nk-doctor-"));
@@ -884,6 +918,11 @@ describe("apply gate (g) — the harness still HAS the machinery the deny rule r
     // files in the current directory and prints every permission rule it SKIPPED and why, so handing it
     // our real file answers "does this harness still turn our exact rule text into a live rule" —
     // a question no `strings` scan can reach.
+    if (!HARNESS_PROBES) {
+      console.warn(HARNESS_PROBES_SKIP);
+      expect(true).toBe(true);
+      return;
+    }
     const bin = resolveBinary();
     if (bin === null) {
       console.warn("[apply-gate g] SKIP: `claude` is not on PATH — rule-parser acceptance unverified");
@@ -900,6 +939,11 @@ describe("apply gate (g) — the harness still HAS the machinery the deny rule r
     // 🔴 WITHOUT THIS, THE ASSERTION ABOVE IS DECORATION. "No rules were skipped" is also what a harness
     // that stopped reporting skipped rules would print, and what a probe pointed at the wrong directory
     // would print. The mutant proves the channel is live in the same run.
+    if (!HARNESS_PROBES) {
+      console.warn(HARNESS_PROBES_SKIP);
+      expect(true).toBe(true);
+      return;
+    }
     const bin = resolveBinary();
     if (bin === null) {
       console.warn("[apply-gate g/non-vacuity] SKIP: `claude` is not on PATH");
@@ -922,6 +966,11 @@ describe("apply gate (g) — the harness still HAS the machinery the deny rule r
     // that widened that carve-out to assistant text would leave every assertion in this file green while
     // the claim quietly stopped holding. Re-run the `REAL-1`/`REAL-2` probes on any material bump; there
     // is no test here that catches it, and saying otherwise would be the vacuity this loop exists to find.
+    if (!HARNESS_PROBES) {
+      console.warn(HARNESS_PROBES_SKIP);
+      expect(true).toBe(true);
+      return;
+    }
     const bin = resolveBinary();
     if (bin === null) {
       console.warn("[apply-gate g/blind-spot] SKIP: `claude` is not on PATH");
