@@ -531,7 +531,10 @@ describe("VALUE_FLAGS tracks the declared surface", () => {
   test("the gate is not vacuous — it found flags to compare", () => {
     // Both sides empty would satisfy the toEqual above forever.
     expect(VALUE_FLAGS.size).toBeGreaterThan(0);
-    expect([...VALUE_FLAGS].sort()).toEqual(["at", "config", "spec"]);
+    // `body` joined at Story 2.7: `--body` is declared `arity: "value"` on `notekit render`, so the
+    // equality above forces it — and without it `render --body - --apply <note>` would read the literal
+    // `-` as the <note> path.
+    expect([...VALUE_FLAGS].sort()).toEqual(["at", "body", "config", "spec"]);
   });
 });
 

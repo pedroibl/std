@@ -230,6 +230,18 @@ const NOTEKIT_AT = {
   desc: "stamp the card with this timestamp instead of the clock, making the output byte-reproducible",
 } as const;
 
+// Story 2.7 — the enrichment channel. ⚠ NO `value` KIND, DELIBERATELY. `FlagValueKind` drives the `_std`
+// completer, and `value: "path"` would make it offer FILE PATHS for a flag whose only legal value is `-`
+// — advertising the `--body <path>` surface NK-8 rule 3 explicitly refuses. Omitting it is the choice.
+// ⚠ `arity: "value"` OBLIGES A `metavar` (`surface.test.ts`'s per-flag loop asserts one on every value
+// flag), and `"-"` is the metavar because `-` is also the whole grammar.
+const NOTEKIT_BODY_STDIN = {
+  name: "--body",
+  arity: "value",
+  metavar: "-",
+  desc: "read the fence body from stdin instead of the note's own fence. Requires --apply",
+} as const;
+
 const NOTEKIT_SPEC_STDIN = {
   name: "--spec",
   arity: "value",
@@ -380,7 +392,7 @@ export const SURFACE = {
           // ⚠ Declaring it is a CORRECTNESS requirement, not a gate catch: check:surface-drift's union
           // is global and name-level, and `apply` is already in it via bmad — so a read of that flag
           // passes that gate whether or not this row exists. The gate that bites is FROZEN_HELP.
-          flags: [NOTEKIT_CONFIG, NOTEKIT_AT, APPLY, JSON_FLAG],
+          flags: [NOTEKIT_CONFIG, NOTEKIT_AT, APPLY, NOTEKIT_BODY_STDIN, JSON_FLAG],
         },
         {
           name: "validate",

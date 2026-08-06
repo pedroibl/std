@@ -222,6 +222,14 @@ function valueFlag(argv: string[], name: string): { present: boolean; value?: st
  * Value flags whose SPACE form consumes the following token. That token is a flag's value, never a
  * positional.
  *
+ * ⚠ `body` JOINED THE SET AT STORY 2.7 AND IT CHANGES A TRACED BEHAVIOUR, so it is worth a sentence.
+ * Without it, `render --body - --apply <note>` would hand `notePositional` the literal `-` as the
+ * `<note>` path — `-` does not start with `--`, so it reads as a positional — and the run would exit `1`
+ * with `nk-note-unreadable`. Loud and safe, but wrong: `-` is `--body`'s VALUE. With `body` in the set
+ * the value is skipped with its flag and BOTH flag orderings resolve the same `<note>`. The membership
+ * is not optional either — `notekit-read.test.ts`'s drift test below requires this set to equal the
+ * declared `arity: "value"` flags exactly, so declaring `--body` in `surface.ts` forces it.
+ *
  * ⚠ THIS MUST MATCH the `arity: "value"` flags declared for notekit's read verbs in `surface.ts`. A
  * flag added there and missed here silently eats the `<note>` positional — the exact defect
  * `notePositional` exists to fix, re-introduced by omission. Exported so `notekit-read.test.ts` can
@@ -229,7 +237,7 @@ function valueFlag(argv: string[], name: string): { present: boolean; value?: st
  * declared, not that this set is complete), so the drift gate for it is that test. A comment would not
  * have gone red.
  */
-export const VALUE_FLAGS = new Set(["config", "at", "spec"]);
+export const VALUE_FLAGS = new Set(["config", "at", "spec", "body"]);
 
 /**
  * The `<note>` positional.
@@ -421,22 +429,52 @@ export function deriveFenceFields(
   const fields: FenceFields = Object.create(null);
   const gaps: string[] = [];
   for (const key of wanted) {
-    if (!Object.prototype.hasOwnProperty.call(frontmatter, key)) {
-      gaps.push(key);
-      continue;
-    }
+    // PRESENT-BUT-EMPTY is a gap on the same footing as absent: the human still has to fill it in, and
+    // `validate` will not tell them — a non-title empty is `ok:true` with `value: ""`. It is still
+    // DERIVED, because omitting it would change what the card renders (no row versus an empty row).
+    if (isGap(frontmatter, key)) gaps.push(key);
+    if (!Object.prototype.hasOwnProperty.call(frontmatter, key)) continue;
     // ⚠ THE CAST IS UNSOUND AND KEEPS ITS GUARD FOR A RUNTIME REASON. `parseFrontmatter`'s return type
     // says `string | string[]`, but the record is a plain `{}` and the value came from arbitrary note
     // text; the `hasOwnProperty` check above is what makes the read sound. Do not delete it because
     // tsc is happy — tsc never saw the note.
-    const value = frontmatter[key] as string | string[];
-    // PRESENT-BUT-EMPTY is a gap on the same footing as absent: the human still has to fill it in, and
-    // `validate` will not tell them — a non-title empty is `ok:true` with `value: ""`. It is still
-    // DERIVED, because omitting it would change what the card renders (no row versus an empty row).
-    if (value === "") gaps.push(key);
-    fields[key] = value;
+    fields[key] = frontmatter[key] as string | string[];
   }
   return { fields, gaps };
+}
+
+/**
+ * THE ONE GAP RULE: a rubric key the record leaves absent, or answers with an empty string.
+ *
+ * ⚠ EXTRACTED AT STORY 2.7 SO IT IS STATED ONCE. That story gave the advisory a second field origin
+ * (stdin), and two field origins with two inlined copies of "what counts as a gap" is a rule that drifts
+ * on the first edit to either.
+ * ⚠ MEMBERSHIP IS `hasOwnProperty.call`, NEVER truthiness and never `in`: the stdin/derived records are
+ * `Object.create(null)` and a frontmatter record is a plain `{}`, so one read form has to be correct on
+ * both — `in` walks the prototype chain and `!record[k]` passes on `toString` while failing on
+ * `__proto__`.
+ */
+function isGap(record: Record<string, string | string[]>, key: string): boolean {
+  if (!Object.prototype.hasOwnProperty.call(record, key)) return true;
+  return record[key] === "";
+}
+
+/**
+ * The rubric keys a record of ALREADY-RESOLVED fields leaves unanswered — the advisory's `fields`-first
+ * form (Story 2.7).
+ *
+ * ⚠ A SECOND ENTRY POINT, NOT A SECOND NOTION. It walks the SAME `rubricKeys` and applies the SAME
+ * `isGap` rule as `deriveFenceFields`; what differs is only where the fields came from. The derivation
+ * keeps its single pass — the property its own comment declares load-bearing — because this form is for
+ * the origin that never had a frontmatter pass to ride on.
+ */
+function rubricGaps(fields: FenceFields, rubric: Rubric): string[] {
+  return rubricKeys(rubric).filter((key) => isGap(fields, key));
+}
+
+/** The stdin arm's `DerivedFields`: fields already resolved by the codec, gaps measured against them. */
+function fromBody(fields: FenceFields, rubric: Rubric): DerivedFields {
+  return { fields, gaps: rubricGaps(fields, rubric) };
 }
 
 /**
@@ -540,6 +578,24 @@ export async function renderPlan(
   argv: string[],
   deps: NotekitReadDeps,
   err: (line: string) => void,
+  /**
+   * Story 2.7 — the `--body -` enrichment channel. When present, the FIELDS come from
+   * `parseFenceBody(bodyOverride)` instead of from the note's own fence body (or, on the author arm,
+   * instead of the frontmatter derivation). Only the codec's INPUT BYTES gain a second origin.
+   *
+   * 🔴 IT REPLACES THE FIELDS SOURCE, NEVER THE REGION SOURCE. `locateFence(noteText)` still runs, still
+   * governs which bytes are replaced, and still produces the `type` that routes. A stdin body carries
+   * CONTENT: it carries no offsets, no info string and no region. `--body -` selects the content ORIGIN;
+   * the note's fence state selects the region OPERATION (`spliceFence` | `createFence`) — the flag never
+   * chooses a terminal. Reading "body from stdin" as "region from stdin" is the ONE way this channel
+   * could breach NK-4, so it is written here rather than left to be inferred.
+   *
+   * ⚠ `""` IS A REAL BODY and must arrive as `""`, never coalesced to `undefined`: an empty body parses
+   * to `{}`, fails `validate` with `nk-missing-field`/`title` and exits `1` with the note untouched.
+   * Mapping it to `undefined` would silently restore the note's own fence and turn that loud refusal
+   * into a successful no-op.
+   */
+  bodyOverride?: string,
 ): Promise<PlanOutcome> {
   const notePath = notePositional(argv.slice(1));
 
@@ -596,20 +652,32 @@ export async function renderPlan(
       frontmatterEnd,
       registry,
       at.value ?? deps.now?.() ?? new Date().toISOString(),
+      bodyOverride,
     );
     if (seed !== null) return seed;
-    // ⚠ THE MESSAGE DISTINGUISHES THE TWO REFUSAL ARMS; THE CODE DOES NOT, DELIBERATELY. A second code
+    // ⚠ THE MESSAGE DISTINGUISHES THE REFUSAL ARMS; THE CODE DOES NOT, DELIBERATELY. A second code
     // would be a widening SM-C2 counts against, and 2.3's/2.4's error-code inventories pin the count.
     // But "note has no nk-fence" alone is a dead end for the arm author mode declined: the reader needs
     // to know whether the note is malformed or simply has nothing to seed from. Message text is not in
     // any sibling's inventory, so this costs nothing and answers the question.
+    //
+    // 🔴 THE THIRD ARM IS STORY 2.7'S, AND IT EXISTS BECAUSE THE TWO-ARM FORM STATED A FALSE CAUSE —
+    // cross-vendor review finding (grok, 2026-08-06), reproduced before it was believed. With
+    // `--body -` the seed's field source is STDIN, so condition 3 fails when the STDIN BODY answered no
+    // rubric key. The frontmatter wording then blamed a frontmatter that may answer every key it has,
+    // and an operator (or an agent) following it would "fix" the frontmatter forever while the real
+    // repair is to pipe a body or drop the flag. That is the exact class this story's own apply-skill
+    // text warns about for JSON-on-stdin — a refusal that names the wrong thing — reproduced one layer
+    // down. ⚠ The unterminated-fence arm still wins: it is a fact about the NOTE and outranks both.
     return {
       kind: "error",
       error: {
         code: "nk-no-fence",
         message: FENCE_OPENING_LINE.test(source)
           ? "note has no nk-fence — an opening delimiter is present but never closed, so nothing was created over it"
-          : "note has no nk-fence, and its frontmatter answers no key of the note type's rubric — nothing to seed one from",
+          : bodyOverride !== undefined
+            ? "note has no nk-fence, and the fence body read from stdin answers no key of the note type's rubric — nothing to seed one from"
+            : "note has no nk-fence, and its frontmatter answers no key of the note type's rubric — nothing to seed one from",
       },
     };
   }
@@ -623,7 +691,10 @@ export async function renderPlan(
     };
   }
 
-  const fields = parseFenceBody(fence.body);
+  // THE ONE SUBSTITUTION POINT OF STORY 2.7, and it is the fields source. Everything around it —
+  // `locateFence` above, `resolveTemplate`, `noteToRenderSpec`, `validate`, the diff, and the splice the
+  // writer performs — is untouched by the override.
+  const fields = parseFenceBody(bodyOverride ?? fence.body);
   const generatedAt = at.value ?? deps.now?.() ?? new Date().toISOString();
   const spec = noteToRenderSpec(fields, template.rubric, {
     id: `nk-${slugify(basename(notePath))}`,
@@ -637,6 +708,12 @@ export async function renderPlan(
 
   // The FR-16 parity signal: the note's own fence body against its canonical form. EMPTY when they are
   // equal. Reported, never enforced — `notekit lint` (3.1) is what fails a build on drift.
+  //
+  // ⚠ WITH A `--body -` OVERRIDE THIS STOPS BEING A PARITY DIFF AND BECOMES A REAL ONE, and that is the
+  // observable difference Story 2.7 exists for. The "before" side is unchanged — still the note's
+  // CURRENT `fence.body` — while the "after" side is now the composed stdin proposal. Without an
+  // override the two sides are the note's body and its canonical form, which is the FR-16 signal that
+  // was here before. One expression, two meanings, because only the fields source moved.
   const proposed = serializeFenceBody(fields);
   const diff = diffFenceBody(fence.body, proposed);
 
@@ -707,6 +784,20 @@ function seedPlan(
   frontmatterEnd: number,
   registry: NoteTypeRegistry,
   generatedAt: string,
+  /**
+   * Story 2.7 — the created fence's body comes from stdin instead of from the frontmatter derivation.
+   *
+   * ⚠ HONOURING IT ON THIS ARM IS A RULED DECISION, not a story-level one (architect 2026-08-06, spine
+   * NK-8 rule 1 amended): a fenceless note honours `--body -` and the pipeline terminates at
+   * `createFence`. `--body -` selects the content ORIGIN; the note's fence state selects the region
+   * OPERATION. Refusing the combination would buy no safety — rubric projection, `validate` and
+   * refusal-on-invalid run identically on both terminals — while IGNORING it would be the silent no-op
+   * at exit `0` that NK-8 rule 2 forbids by name.
+   *
+   * ⚠ ROUTING STILL NEVER COMES FROM STDIN: conditions 1 and 2 below are unchanged, so a fenceless note
+   * with no resolvable `nk-type` still refuses exactly as it did before the flag existed.
+   */
+  bodyOverride?: string,
 ): PlanOutcome | null {
   if (FENCE_OPENING_LINE.test(source)) return null; // 1 — unterminated fence: refuse, never create
 
@@ -719,7 +810,19 @@ function seedPlan(
     };
   }
 
-  const { fields, gaps } = deriveFenceFields(frontmatter, template.rubric);
+  // ⚠ THE ADVISORY'S INPUT IS REROUTED TO THE FINAL FIELDS, AND NOTHING MORE (Story 2.7). With a stdin
+  // body the frontmatter is no longer the field source, so a frontmatter-keyed advisory would name keys
+  // the written fence does not reflect. Both arms go through `rubricGaps`, which walks the SAME
+  // `rubricKeys` and applies the SAME gap rule as the derivation — one notion of "what this note type
+  // wants", one notion of "a gap", two field origins.
+  // ⚠ CONDITION 3 IS EVALUATED OVER THE FINAL FIELDS TOO. Author mode exists to carry content into a
+  // first fence; with `--body -` that content is the stdin body, so an empty one has nothing to seed
+  // from and refuses through 2.1's `nk-no-fence` exactly as an unanswering frontmatter does.
+  const derived: DerivedFields =
+    bodyOverride === undefined
+      ? deriveFenceFields(frontmatter, template.rubric)
+      : fromBody(parseFenceBody(bodyOverride), template.rubric);
+  const { fields, gaps } = derived;
   if (Object.keys(fields).length === 0) return null; // 3 — nothing to seed from
 
   const spec = noteToRenderSpec(fields, template.rubric, {
