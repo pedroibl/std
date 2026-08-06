@@ -36,6 +36,8 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
+import { stripStringsAndComments } from "../../../scripts/lib/specifiers";
+
 import { RENDERERS } from "./dispatch";
 
 // This file sits in `src/notekit/edge/`, so the slice root is one level up and the repo root three.
@@ -73,53 +75,75 @@ describe("SM-C1 — src/notekit ships exactly one renderer", () => {
     // When a legitimate fifth DOM helper is added later, the story that adds it extends this set with a
     // reason — that friction is the feature, not an obstacle to route around.
     //
-    // 🔴 TWO DECLARATION FORMS, AND A TOTAL THAT MUST RECONCILE — because the single-form version of
-    // this scan DID NOT BITE. Measured: `export const renderTimelineDom = (spec: RenderSpec):
-    // HTMLElement => …` planted in `nkcard.ts` left this test 4-pass/0-fail. A `function`-only regex
-    // is blind to the arrow form, which is the same smuggled-renderer class the test exists to catch
-    // and one keystroke away from the form it does catch. So both forms are matched AND the count of
-    // named symbols is reconciled against the total number of `): HTMLElement` return annotations in
-    // the slice. That reconciliation is the load-bearing half: a THIRD declaration form nobody
-    // anticipated (a class method, an object literal member) fails LOUDLY as an unreconciled
-    // annotation instead of passing silently. A scan that cannot see a form is a scan that is green
-    // for it.
-    // ⚠ `HTML\w*Element`, NOT `HTMLElement` — also MEASURED. `Renderer` returns `HTMLElement`, and
-    // every `HTMLDivElement`/`HTMLSpanElement`/… IS one, so a renderer annotated with a SUBTYPE is
-    // registrable in `RENDERERS` and typechecks fine. Pinned to the exact string `HTMLElement`, this
-    // scan left `function renderTimelineDom(spec): HTMLDivElement` at 4 pass / 0 fail — a second
-    // evasion, in the same class as the arrow form and found the same way, by planting it.
+    // 🔴 THIS ASSERTION HAS BEEN WRONG TWICE, AND BOTH TIMES BY BEING BLIND TO A SPELLING RATHER
+    // THAN TO AN IDEA. It began matching only `function name(…): HTMLElement`; an arrow const walked
+    // straight past it. Widened to two forms, `: HTMLDivElement` — a subtype, perfectly registrable —
+    // walked past that. A cross-vendor review then planted five more and FOUR STAYED GREEN, the worst
+    // being `export const x: Renderer = (spec) => …`, which is the most idiomatic way to write a
+    // renderer in this codebase and never spells an element type at the return site at all.
+    //
+    // The lesson is not "add another pattern". It is that a scan keyed on ONE syntactic signal is
+    // green for every spelling its author failed to imagine. So this asserts THREE INDEPENDENT
+    // SIGNALS, and a smuggled renderer has to defeat all three:
+    //
+    //   1. NAMED — the symbol names behind element-returning and `Renderer`-typed declarations.
+    //   2. RECONCILED — every element/`Renderer` type signal in the slice is accounted for by a name
+    //      this scan could resolve, so an unanticipated form fails LOUDLY as an unreconciled signal
+    //      rather than passing silently.
+    //   3. DOM BUDGET — the `document.createElement` call sites, pinned. This one reads no types at
+    //      all: a DOM factory has to MAKE an element whatever its annotation claims, so an inferred
+    //      return, a type alias and a `Renderer`-typed binding all redden here. A type can be spelled
+    //      a dozen ways; creating an element cannot be faked.
+    //
+    // ⚠ SCANNED OVER MASKED SOURCE. `stripStringsAndComments` is the estate's own masker, already
+    // imported this way by `index.test.ts`. Without it a comment or doc string containing
+    // `): HTMLElement` reddens the reconciliation with no new function in existence — a FALSE RED,
+    // which is how a gate earns a reputation for noise and gets deleted.
     const EL = String.raw`HTML\w*Element`;
     const NAMED_FORMS = [
-      new RegExp(String.raw`function ([A-Za-z0-9_]+)\s*\([^)]*\)\s*:\s*${EL}`, "g"), // function decls
+      // `function name(…): HTMLElement` / `: Promise<HTMLElement>`, generics and methods included.
       new RegExp(
-        String.raw`(?:const|let|var)\s+([A-Za-z0-9_]+)[^=\n]*=\s*(?:async\s*)?\([^)]*\)\s*:\s*${EL}`,
+        String.raw`function ([A-Za-z0-9_]+)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*:\s*(?:Promise<\s*)?${EL}`,
         "g",
-      ), // arrow consts
+      ),
+      // `const name = (…): HTMLElement => …`
+      new RegExp(
+        String.raw`(?:const|let|var)\s+([A-Za-z0-9_]+)[^=\n]*=\s*(?:async\s*)?\([^)]*\)\s*:\s*(?:Promise<\s*)?${EL}`,
+        "g",
+      ),
+      // `const name: Renderer = …` and `const name = (…) as Renderer` — typed at the BINDING, where
+      // a second renderer would most naturally be written in this codebase.
+      /(?:const|let|var)\s+([A-Za-z0-9_]+)\s*:\s*Renderer\b/g,
+      /(?:const|let|var)\s+([A-Za-z0-9_]+)[^=\n]*=[\s\S]{0,200}?\bas\s+Renderer\b/g,
     ];
 
     const found = new Set<string>();
-    let annotations = 0;
+    let signals = 0;
+    let domSites = 0;
     for (const file of sliceSources()) {
-      const src = readFileSync(file, "utf8");
-      // Return-type position only: `): HTML*Element`. A parameter or field typed with an element
-      // (`container: HTMLElement`, `element: HTMLElement`) is not a function returning one.
-      annotations += (src.match(new RegExp(String.raw`\)\s*:\s*${EL}`, "g")) ?? []).length;
+      const src = stripStringsAndComments(readFileSync(file, "utf8"));
+      // Return position only: `): HTML*Element`. A parameter or field typed with an element
+      // (`container: HTMLElement`) is not a function returning one. Plus the two binding-position
+      // `Renderer` spellings, which carry no element token at all.
+      signals += (src.match(new RegExp(String.raw`\)\s*:\s*(?:Promise<\s*)?${EL}`, "g")) ?? []).length;
+      signals += (src.match(/:\s*Renderer\b|\bas\s+Renderer\b/g) ?? []).length;
+      domSites += (src.match(/document\s*\.\s*createElement\s*\(/g) ?? []).length;
       for (const re of NAMED_FORMS) for (const m of src.matchAll(re)) found.add(m[1]!);
     }
 
     expect([...found].sort()).toEqual(["build", "nkTreeToDom", "noticeElement", "renderCardDom"]);
-    // …and nothing returns an element through a form this scan cannot name.
-    expect(annotations).toBe(found.size);
 
-    // 🔴 THE ONE GAP, STATED RATHER THAN LEFT FOR SOMEONE TO FIND. An UNANNOTATED function whose
-    // return type is merely inferred is invisible here — measured, it stays green. That is a closed
-    // boundary rather than a hole, because of how it composes with (a): an unannotated renderer that
-    // IS registered reddens (a) (any key beyond `nk-card`), and one that is NEITHER registered NOR
-    // annotated cannot be reached as a renderer at all — it is dead code, not a second renderer. So
-    // the pair (a)+(b) is closed for everything that can actually function as one. Verified by
-    // planting all six forms: function decl, arrow const, object-literal method, `HTMLDivElement`
-    // subtype, and a renderer in a NEW file (the walk is recursive) all redden; only the unannotated
-    // one does not, and it is covered by (a) the moment it becomes reachable.
+    // ⚠ `RENDERERS`' own table annotation and `rendererFor`'s `Renderer | null` return are two
+    // legitimate `Renderer` mentions naming no new factory, so they are carried as a NAMED constant
+    // rather than fudging the arithmetic. A third mention is a finding, not a rounding error.
+    const SANCTIONED_RENDERER_MENTIONS = 2; // dispatch.ts: the table's type + rendererFor's return
+    expect(signals).toBe(found.size + SANCTIONED_RENDERER_MENTIONS);
+
+    // 🔴 THE TYPE-FREE SIGNAL, and the one that closes the forms types cannot. Three
+    // `document.createElement` sites ship today: `nkcard.ts`'s element builder and its `<style>`
+    // injector, and `post-processor.ts`'s degrade notice. A new DOM factory must add a fourth, and
+    // no annotation trick avoids it. A legitimate fourth site is a story that raises this with a reason.
+    expect(domSites).toBe(3);
   });
 
   test("(c) `Rubric.kind` and `RenderSpec.kind` are both the unwidened literal `\"card\"`", () => {

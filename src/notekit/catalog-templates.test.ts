@@ -8,9 +8,19 @@
 //
 // ⚠ THE RUBRICS ARE DECLARED INLINE AND ARE HAND-KEPT IN STEP WITH THE VAULT CONFIG. Importing
 // `~/Documents/note-report/Scripts/notekit.config.ts` from `src/` would bake a vault path into the
-// package — the exact `check:no-consumer-ids` / D4 breach this story is otherwise built to avoid. The
-// drift that costs is real and it is caught downstream, by the catalog-parity assertion at the bottom
-// of this file: a template that exists in one place and not the other diverges the two key sets.
+// package — the exact `check:no-consumer-ids` / D4 breach this story is otherwise built to avoid.
+//
+// 🔴 AND NOTHING MECHANICAL CATCHES THAT DRIFT — said plainly, because an earlier version of this
+// header claimed the catalog-parity assertion below did. It does not, and a cross-vendor review was
+// right to call it. That assertion proves `Object.keys(registry.noteTypes)` ≡ the catalog's `nkType`
+// values ON A HERMETIC FIXTURE; it never reads the vault, never compares FIELD lists, and its fixture
+// binds all four note types to one shared rubric. So it catches a note type that exists in one place
+// and not the other, and it catches nothing at all about whether these three rubrics still match the
+// vault's. That parity is hand-kept, full stop. (Checked by hand at authoring: the vault's three
+// templates are key- and label-identical to the three below, with zero dead keys against the demo
+// notes.) A gate for it would have to live vault-side or at release time, outside `src/` — where the
+// vault path is allowed to exist. Overstating a gate is worse than not having one: it stops the next
+// person looking.
 //
 // ⚠ NOT A SECOND ORACLE FOR 1.2's MARKUP CONTRACT. The exact tag vocabulary is `NK_TAGS`'s and has its
 // own tests in `core-html.test.ts`. What is asserted here is skeleton IDENTITY across templates and the
@@ -165,12 +175,37 @@ describe("FR-15 — three templates, one renderer (headless)", () => {
       '<div class="nk-field"><span class="nk-field-label"></span><span class="nk-field-value"></span></div>';
     expect(skeletons[0]!.replace(rowUnit, "")).toBe(skeletons[1]!);
 
-    // Stated positively, and this one holds over the REAL notes too: the set of distinct tag+class
-    // markers each template can emit is the same for all three. A per-type element or a per-type class
-    // beyond the shared `nk-` set reddens here whatever the data.
+    // Stated positively: the set of distinct tag+class markers is the same for all three. A per-type
+    // element or a per-type class beyond the shared `nk-` set reddens here.
+    // ⚠ THIS RUNS ON THE SCALAR PROFILE, like everything above it — it is NOT a claim about the real
+    // notes. An earlier draft of this comment said it held "over the REAL notes too", which was
+    // wishful: markers are computed from `skeletons`, and `skeletons` is scalar-only by construction.
+    // Corrected rather than left, because a comment that overstates its assertion is how the next
+    // reader concludes the gate covers something it never looked at.
     const markers = (s: string) => [...new Set(s.match(/<[a-z0-9]+(?: class="[^"]*")?/g) ?? [])].sort();
     expect(markers(skeletons[1]!)).toEqual(markers(skeletons[2]!));
     expect(markers(skeletons[0]!)).toEqual(markers(skeletons[1]!));
+
+    // 🔴 AND THE SAME AGAIN OVER AN EQUAL-LENGTH ARRAY PROFILE, because the scalar profile is blind to
+    // list markup entirely — no scalar ever emits `<ul>`/`<li>`, so a global change to how list values
+    // render (`ul` → `ol`, a new wrapper, a per-type list class) passes everything above without a
+    // murmur. Measured: with `listNode` returning `tag: "ol"`, the scalar-only version of this test
+    // stayed 6 pass / 0 fail. Equal-length arrays are the point — UNEQUAL lengths are what made the
+    // raw comparison red on correct code in the first place, so the fix is to hold cardinality fixed,
+    // never to reintroduce the confound.
+    const withList = (rubric: Rubric): FenceFields => {
+      const fields: FenceFields = { [rubric.titleField]: "t" };
+      rubric.fields.forEach((f, i) => {
+        fields[f.key] = i === rubric.fields.length - 1 ? ["a", "b"] : "v";
+      });
+      return fields;
+    };
+    const listSkeletons = TEMPLATES.map((t) => skeleton(project(t.rubric, withList(t.rubric))));
+    expect(listSkeletons[1]).toBe(listSkeletons[2]);
+    expect(listSkeletons[0]!.replace(rowUnit, "")).toBe(listSkeletons[1]!);
+    expect(markers(listSkeletons[0]!)).toEqual(markers(listSkeletons[1]!));
+    // …and the list markup really is in the compared shape, so the assertions above are about it.
+    expect(listSkeletons[1]).toContain('<ul class="nk-field-values"><li class="nk-field-value">');
   });
 
   test("a rubric key the fence lacks yields NO row — never the literal `undefined` (FR-5)", () => {
@@ -204,8 +239,12 @@ describe("FR-15 — three templates, one renderer (headless)", () => {
 describe("NFR5 — the capabilities catalog IS the registry, not a fork of it", () => {
   // ⚠ A HERMETIC FIXTURE REGISTRY, NEVER THE VAULT. A test that reads
   // `~/Documents/note-report/Scripts/notekit.config.ts` bakes a vault path into the repo — the D4
-  // breach this whole story is built around avoiding. The fixture carries the same four note types the
-  // vault does, which is what makes the parity claim about this story's templates.
+  // breach this whole story is built around avoiding. The fixture carries the same four note-type KEYS
+  // the vault does, which is what ties the claim to this story's templates — but only their keys. All
+  // four bind to one shared rubric here, deliberately: what NFR5 asserts is that the catalog is
+  // GENERATED from the registry rather than forked from it, and one rubric proves that as well as four
+  // would while keeping the fixture readable. Rubric FIELD parity with the vault is not in scope for
+  // this assertion and is not claimed by it — see the file header.
   const FIXTURE = `import type { NotekitConfig } from ${JSON.stringify(join(REPO, "src", "notekit", "index.ts"))};
 
 const card = { renderer: "nk-card", rubric: { kind: "card", titleField: "title",

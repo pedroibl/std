@@ -85,7 +85,7 @@ import { join } from "node:path";
 import { parseFrontmatter } from "../core";
 import { statMtime } from "../fsx";
 import { locateFence } from "./core-fence";
-import { porcelainPaths, probeKeySpelling } from "./notewright-dispatch.test";
+import { WORKING_TREE_ALLOWLIST, porcelainPaths, probeKeySpelling } from "./notewright-dispatch.test";
 
 // ── the three files under test ───────────────────────────────────────────────────────────────────
 // Resolved from `import.meta.dir`, never cwd: `bun test` inherits whatever directory it was launched
@@ -1537,29 +1537,13 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
    * every future file in the slice, which is how this assertion stops being a gate. Extended by 2.5,
    * 2.6 and 2.7 in turn (Epic-2 ruling §7) — extend it, never replace it.
    */
-  const ALLOWLIST = [
-    "src/notekit/notewright-dispatch.test.ts",   // 2.3's file, amended by this story (⚠️-1)
-    "src/notekit/notewright-apply-gate.test.ts", // this file
-    // Story 2.5 (author mode) — six exact paths, EXTENDING and never widening. 2.5 adds no invocation,
-    // no key and no surface to this story's three gated files, which is why `.claude/` is untouched.
-    "src/notekit/core-fence.ts",
-    "src/notekit/core-fence.test.ts",
-    "src/notekit/index.ts",
-    "src/cli/notekit-read.ts",
-    "src/cli/notekit-write.ts",
-    "src/cli/notekit-write.test.ts",
-    // Review follow-up (cross-vendor F2) — the shared frontmatter-block locator in `core`.
-    "src/core/parse.ts",
-    "src/core/parse.test.ts",
-    "src/core/index.ts",
-    // Story 2.6 (the loom-catalog payoff demo) — two new `*.test.ts` and ONE `export` token on
-    // `RENDERERS` so the SM-C1 scan enumerates the renderer table rather than regex-scraping it. Its
-    // three templates are three entries in the VAULT's `notekit.config.ts`, outside every `src/**`
-    // scan by construction, which is why the slice gains no source file and no note-type literal.
-    "src/notekit/edge/renderer-count.test.ts",
-    "src/notekit/catalog-templates.test.ts",
-    "src/notekit/edge/dispatch.ts",
-  ];
+  // ⚠ ONE LIST, IMPORTED — NOT A SECOND COPY. Amended at Story 2.6 after a cross-vendor review pointed
+  // out that this file and `notewright-dispatch.test.ts` carried two hand-synced allowlists with
+  // nothing asserting they agreed. Both headers already confessed the drift risk; confessing it is not
+  // the same as closing it, and the day the two diverge the weaker one silently governs. This is the
+  // same call Story 2.4 made for `probeKeySpelling` and 2.5's review made for `porcelainPaths`: the
+  // estate's guards get ONE owner. Extending the allowlist is now a single edit at the declaration.
+  const ALLOWLIST = WORKING_TREE_ALLOWLIST;
 
   // `porcelainPaths` is IMPORTED, not redefined here — see the header's rule against a copied probe.
   // It was a byte-for-byte copy until review 2026-08-06: this file already imports `probeKeySpelling`
