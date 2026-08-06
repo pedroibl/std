@@ -9,7 +9,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { hasFlag } from "../core/index";
+import { flagValue, hasFlag } from "../core/index";
 import { runBmad } from "../bmad/cli";
 import { type CnDeployDeps, runCnDeploy } from "./cn-deploy";
 import { runCnVerify } from "./cn-verify";
@@ -17,7 +17,7 @@ import { runDashkitDeploy } from "./dashkit-deploy";
 import { runDashkitVerify } from "./dashkit-verify";
 import { runNotekitDeploy } from "./notekit-deploy";
 import { runNotekitRead } from "./notekit-read";
-import { runNotekitApply } from "./notekit-write";
+import { bodyFromStdinRequested, runNotekitApply } from "./notekit-write";
 import { RepoNavError, defaultTargets, installAlias, type RepoConfig } from "./repo-nav";
 import { SURFACE, renderAliasUsage, renderHelp } from "./surface";
 
@@ -105,14 +105,47 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     // surface and belongs in a story whose ACs test it (NK-4).
     const apply = hasFlag(rest, "apply");
 
+    // THE SINGLE TWO-FORM PRESENCE TEST for `--body` (Story 2.7), imported rather than re-expressed.
+    // `hasFlag` alone is blind to `--body=-`, and a second copy of the disjunction is exactly what later
+    // gets "simplified" back to it — so there is ONE definition and this is one of its two call sites.
+    const bodyPresent = bodyFromStdinRequested(rest);
+
     // `--apply` on a verb that is not `render` is a usage 2, never a silent no-op. It must precede
     // EVERY other branch, including the deploy fall-through: `runEdgeDeploy` has no unknown-flag
     // rejection, so `notekit deploy --apply --vault <dir>` would otherwise deploy and return 0 on a
-    // flag the user believed did something.
-    // ⚠ The `apply &&` half is load-bearing. Simplified to `rest[0] !== "render"` this would exit 2 for
-    // every non-render verb and kill the deploy fall-through entirely.
-    if (apply && rest[0] !== "render") {
-      console.error("usage: --apply is only valid on `std notekit render <note>`");
+    // flag the user believed did something. `--body` joins it for the same reason: `notekit deploy
+    // --body -` would otherwise deploy and exit 0 on a flag that did nothing.
+    // ⚠ The `apply || bodyPresent` half is load-bearing. Simplified to `rest[0] !== "render"` this would
+    // exit 2 for every non-render verb and kill the deploy fall-through entirely.
+    if ((apply || bodyPresent) && rest[0] !== "render") {
+      console.error(
+        `usage: ${apply ? "--apply" : "--body"} is only valid on \`std notekit render <note>\``,
+      );
+      return 2;
+    }
+
+    // NK-8 rule 2 — `--body -` is valid ONLY with `--apply`, and never a silent no-op. A usage `2`
+    // rather than an exit-`1` envelope because the fault is decidable from argv BEFORE any file is read
+    // (NK-7 rule 3, the decidability split), which is the same class and the same guard as the
+    // misplaced-`--apply` check above. ⚠ The code name is written as a greppable literal in the stderr
+    // text so the apply skill can name it and so a later promotion to a JSON envelope is one line.
+    if (bodyPresent && !apply) {
+      console.error("usage: --body - requires --apply (nk-body-without-apply)");
+      return 2;
+    }
+
+    // NK-8 rule 3 — `-` is the only accepted value, and ONE equality closes every misuse at once:
+    // a trailing `--body` (`flagValue` → `undefined`), `--body foo`, `--body=./b.txt`, `--body=` (→
+    // `""`), and `--body --json` (the space form takes the next token unconditionally, so the value is
+    // the literal `"--json"`).
+    // ⚠ THIS IS THE ONE NOTEKIT VALUE FLAG THAT DOES NOT NEED THE `hasFlag ? flagValue : default` DANCE,
+    // and saying so is what stops it being added back. That form exists so a value flag WITH a default
+    // cannot silently take the default when its value is missing (2.1's `--at` takes the clock).
+    // `--body` has no default and exactly one legal value, so `!== "-"` subsumes every trap — including
+    // 2.1's separate "reject a value starting with `--`" rule. Do NOT add a second `startsWith("--")`
+    // check: it is dead code that implies this equality is insufficient.
+    if (bodyPresent && flagValue(rest, "body") !== "-") {
+      console.error("usage: --body accepts exactly one value: `-` (read the fence body from stdin)");
       return 2;
     }
 

@@ -4,11 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  bodyFromStdinRequested,
   composeBody,
   deriveFenceFields,
+  readTextFromStream,
   runNotekitApply,
   type NotekitApplyDeps,
 } from "./notekit-write";
+import { Readable } from "node:stream";
 import { errorText, runNotekitRead } from "./notekit-read";
 import {
   createFence,
@@ -1553,5 +1556,588 @@ describe("the two nk-no-fence refusal arms are DISTINGUISHABLE by message (revie
     expect(tornEnv.error!.message).not.toBe(bareEnv.error!.message);
     expect(String(tornEnv.error!.message)).toContain("never closed");
     expect(String(bareEnv.error!.message)).toContain("nothing to seed");
+  });
+});
+
+// ═══ STORY 2.7 — the enrichment channel: `render <note> --apply --body -` ═════════════════════════
+//
+// The whole point of this story is one substitution: the FIELDS come from stdin instead of from the
+// note's own fence, and NOTHING else in the pipeline moves. So the proof is mostly a set of REGRESSIONS
+// — 2.2's oracles re-run over a `--body -` apply — plus the small number of genuinely new assertions
+// below (the two-form presence test, the grammar, the four input classes on stdin bytes, and the reader).
+
+/** A `readBody` double that THROWS — the behavioural half of "stdin is read only when the flag is". */
+const throwingBody = async (): Promise<string | null> => {
+  throw new Error("readBody must not be called when --body is absent");
+};
+
+const BODY_FLAG = ["--body", "-"];
+
+/** A Readable that emits `chunks` then ends. */
+function streamOf(...chunks: string[]): Readable {
+  return Readable.from(chunks);
+}
+/** A Readable that never pushes and never ends — the timeout path. */
+function neverEndingStream(): Readable {
+  return new Readable({ read() {} });
+}
+
+// ── Task 1 — the stdin TEXT reader ───────────────────────────────────────────────────────────────
+
+describe("2.7 readTextFromStream — text, and `\"\"` is NOT `null`", () => {
+  test("the full text is resolved verbatim, trailing newline included", async () => {
+    expect(await readTextFromStream(streamOf("title: T\nrole: r\n"))).toBe("title: T\nrole: r\n");
+  });
+
+  test("multi-chunk input is reassembled", async () => {
+    expect(await readTextFromStream(streamOf("title: ", "T\nrole", ": r"))).toBe("title: T\nrole: r");
+  });
+
+  test("🔴 COUNTERFACTUAL — an empty stream resolves `\"\"`, NOT `null`", async () => {
+    // THE ASSERTION THAT CATCHES THE CLONE SLIP. `readJsonFromStream`'s `onEnd` opens with
+    // `const text = data.trim(); if (!text) return finish(null)` BEFORE the parse, so a clone that
+    // deletes only `JSON.parse` keeps the empty-collapse and this line goes red. Its own suite asserts
+    // the OPPOSITE for the same input ("empty stdin → null"), so a copied test file carries the bug in.
+    const empty = await readTextFromStream(streamOf(""));
+    expect(empty).toBe("");
+    expect(empty).not.toBeNull();
+  });
+
+  test("…and whitespace-only survives as whitespace, for the same reason", async () => {
+    // The JSON twin collapses this to `null` too. Here it is a body the codec will read (and reject).
+    expect(await readTextFromStream(streamOf("   \n  "))).toBe("   \n  ");
+  });
+
+  test("leading indentation and the trailing newline are NOT trimmed", async () => {
+    // `composeBody` owns the newline contract and `parseFenceBody` owns whitespace normalization. The
+    // reader hands over bytes; trimming here would quietly take a decision from both.
+    expect(await readTextFromStream(streamOf("  title: T\n\n"))).toBe("  title: T\n\n");
+  });
+
+  test("timeout → null, and it resolves rather than hanging", async () => {
+    const start = Date.now();
+    expect(await readTextFromStream(neverEndingStream(), 40)).toBeNull();
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+
+  test("a stream `error` → null", async () => {
+    const s = new Readable({ read() {} });
+    queueMicrotask(() => s.emit("error", new Error("EPIPE")));
+    expect(await readTextFromStream(s, 5000)).toBeNull();
+  });
+
+  test("it resolves EXACTLY ONCE when end and timeout race", async () => {
+    // The `settled` guard. A second resolution is invisible to `await`, so it is counted at the source.
+    const s = new Readable({ read() {} });
+    let resolutions = 0;
+    const p = readTextFromStream(s, 10).then((v) => { resolutions++; return v; });
+    s.push("title: T");
+    s.push(null); // `end` fires…
+    await new Promise((r) => setTimeout(r, 60)); // …and the 10ms timer has long since elapsed
+    expect(await p).toBe("title: T"); // `end` won
+    expect(resolutions).toBe(1);
+  });
+
+  test("on resolution it detaches all three listeners and pauses the stream", async () => {
+    // ⚠ NOT DECORATION. A flowing `process.stdin` left attached keeps the event loop ref'd, and this
+    // CLI RETURNS a code rather than `process.exit`ing — so an undetached listener hangs the process.
+    const s = neverEndingStream();
+    await readTextFromStream(s, 20);
+    expect(s.listenerCount("data")).toBe(0);
+    expect(s.listenerCount("end")).toBe(0);
+    expect(s.listenerCount("error")).toBe(0);
+    expect(s.isPaused()).toBe(true);
+  });
+});
+
+describe("2.7 readStdinText — the DEFAULT reader runs, against a real piped stdin", () => {
+  // ⚠ EVERY OTHER TEST IN THIS STORY INJECTS `readBody`, so without these two the real reader — and its
+  // timeout and detach discipline — would be dead code the suite never executes. Same harness shape
+  // `src/stdio/read.test.ts` uses for the JSON twin.
+  const script = `import { readStdinText } from ${JSON.stringify(`${import.meta.dir}/notekit-write.ts`)};
+    process.stdout.write(JSON.stringify(await readStdinText()));`;
+
+  test("piped text arrives verbatim", async () => {
+    const proc = Bun.spawn(["bun", "-e", script], { stdin: "pipe", stdout: "pipe" });
+    proc.stdin.write("title: T\nrole: r\n");
+    await proc.stdin.end();
+    expect(JSON.parse(await new Response(proc.stdout).text())).toBe("title: T\nrole: r\n");
+  });
+
+  test("🔴 an empty pipe yields `\"\"` through the REAL reader too — not `null`", async () => {
+    const proc = Bun.spawn(["bun", "-e", script], { stdin: "pipe", stdout: "pipe" });
+    await proc.stdin.end(); // no bytes
+    // The JSON twin's identical subprocess test asserts `"null"` here. That divergence IS the story.
+    expect(await new Response(proc.stdout).text()).toBe('""');
+  });
+});
+
+// ── AC #2 — the two-form presence test, and the grammar ──────────────────────────────────────────
+
+describe("2.7 AC #2 — bodyFromStdinRequested sees BOTH argv forms", () => {
+  // ⚠ ASSERTED ON THE PREDICATE, NOT ON AN EXIT CODE. An exit-code-only assertion passes on the broken
+  // (`hasFlag`-only) form, because a missed `--body=-` degrades into a plain `render --apply` that
+  // exits 0. That is the un-failable class this epic keeps producing.
+  test("row 1 — the space form", () => {
+    expect(bodyFromStdinRequested(["render", "n.md", "--apply", "--body", "-"])).toBe(true);
+  });
+
+  test("row 2 — the EQUALS form is the same flag", () => {
+    expect(bodyFromStdinRequested(["render", "n.md", "--apply", "--body=-"])).toBe(true);
+  });
+
+  test("row 4 — a TRAILING --body is still PRESENT (it is a usage error, not an absence)", () => {
+    // `flagValue` returns `undefined` here, indistinguishable from absent — which is why the predicate
+    // cannot be `flagValue`-based either. Presence and validity are two questions.
+    expect(bodyFromStdinRequested(["render", "n.md", "--apply", "--body"])).toBe(true);
+  });
+
+  test("row 8 — absent is absent", () => {
+    expect(bodyFromStdinRequested(["render", "n.md", "--apply"])).toBe(false);
+    expect(bodyFromStdinRequested([])).toBe(false);
+  });
+
+  test("🔴 COUNTERFACTUAL — the `hasFlag` half ALONE misses row 2, silently", () => {
+    // Drop the `startsWith("--body=")` disjunct and this is what the predicate would answer. The run
+    // would then read no stdin, write the note's own fence back, and exit 0 on a flag the caller
+    // believed did something.
+    const hasFlagOnly = (argv: string[]) => argv.includes("--body");
+    expect(hasFlagOnly(["render", "n.md", "--apply", "--body=-"])).toBe(false);
+    expect(bodyFromStdinRequested(["render", "n.md", "--apply", "--body=-"])).toBe(true);
+  });
+
+  test("🔴 COUNTERFACTUAL — the `startsWith` half ALONE misses row 1", () => {
+    const equalsOnly = (argv: string[]) => argv.some((a) => a.startsWith("--body="));
+    expect(equalsOnly(["render", "n.md", "--apply", "--body", "-"])).toBe(false);
+    expect(bodyFromStdinRequested(["render", "n.md", "--apply", "--body", "-"])).toBe(true);
+  });
+
+  test("it does not fire on a different flag that merely starts the same way", () => {
+    expect(bodyFromStdinRequested(["render", "n.md", "--apply", "--bodyguard=-"])).toBe(false);
+  });
+});
+
+describe("2.7 AC #2 rows 8-9 — stdin is read only when asked, and an unreadable one is a usage 2", () => {
+  test("row 8 — NO --body: the reader is never even ATTEMPTED (throwing double)", async () => {
+    // The byte compare proves nothing was written; the throwing double proves nothing was TRIED.
+    const h = harness({ readNote: scriptedReads(MESSY, MESSY, MESSY_APPLIED), readBody: throwingBody });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG], h.deps)).toBe(0);
+    expect(h.writes[0]![1]).toBe(MESSY_APPLIED); // the note's OWN fence, normalized — 2.2's behaviour
+  });
+
+  test("row 9 — an unreadable stdin exits 2, prints to stderr, writes nothing", async () => {
+    const h = harness({ readBody: async () => null });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, ...BODY_FLAG], h.deps)).toBe(2);
+    expect(h.writes).toEqual([]);
+    expect(h.out).toEqual([]);
+    expect(h.err.join("\n")).toContain("stdin");
+  });
+
+  test("row 9 — …and NOTHING lands on stdout even under --json", async () => {
+    // NK-7 rule 2's envelope is the only thing on stdout — but the run never reached the pipeline that
+    // produces one, so a usage 2 emits none. This is 2.2's row-1 shape, inherited.
+    const h = harness({ readBody: async () => null });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", ...BODY_FLAG], h.deps)).toBe(2);
+    expect(h.out).toEqual([]);
+    expect(h.writes).toEqual([]);
+  });
+
+  test("🔴 `\"\"` IS NOT ROW 9 — a readable-but-empty body reaches the codec and fails at validate", async () => {
+    // The two failure modes are one `null` apart in the reader and two exit codes apart here.
+    const h = harness({ readBody: async () => "" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", ...BODY_FLAG], h.deps)).toBe(1);
+    expect(envelope(h.out).error).toMatchObject({ code: "nk-missing-field", field: "title" });
+    expect(h.writes).toEqual([]);
+  });
+});
+
+// ── AC #1 — the same codec, the same pipeline, and a diff that finally carries something ─────────
+
+describe("2.7 AC #1 — the diff stops being a normalization diff and becomes a real one", () => {
+  test("no --body on a CANONICAL note ⇒ diff EMPTY (the FR-16 parity signal, unchanged)", async () => {
+    const h = harness({ readNote: scriptedReads(CANONICAL, CANONICAL, CANONICAL), readBody: throwingBody });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", "--at", AT], h.deps)).toBe(0);
+    expect(envelope(h.out).value!.diff).toBe("");
+  });
+
+  test("🔴 …and WITH a different body on stdin ⇒ a NON-EMPTY diff whose proposed side is what landed", async () => {
+    // Without this half the story ships a channel that provably carries nothing.
+    const body = "title: Enriched\nsummary: From the agent\nstatus: draft\n";
+    const applied = CANONICAL.replace(
+      "title: Primer\nsummary: A thing\nstatus: live",
+      "title: Enriched\nsummary: From the agent\nstatus: draft",
+    );
+    const h = harness({
+      readNote: scriptedReads(CANONICAL, CANONICAL, applied),
+      readBody: async () => body,
+    });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", "--at", AT, ...BODY_FLAG], h.deps)).toBe(0);
+
+    const diff = String(envelope(h.out).value!.diff);
+    expect(diff).not.toBe("");
+    // The proposed side of the diff equals the fence body of the bytes actually written, byte for byte.
+    expect(locateFence(h.writes[0]![1])!.body).toBe(composeBody(parseFenceBody(body)));
+    expect(diff).toContain("title: Enriched");
+    // …and the "before" side is still the note's CURRENT body — the override moved only the after side.
+    expect(diff).toContain("title: Primer");
+  });
+
+  test("COUNTERFACTUAL — feeding the note's OWN body back on stdin collapses the diff to empty", async () => {
+    // Proves the fixture bodies above genuinely differ, rather than the diff being non-empty by accident.
+    const own = locateFence(CANONICAL)!.body;
+    const h = harness({ readNote: scriptedReads(CANONICAL, CANONICAL, CANONICAL), readBody: async () => own });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", "--at", AT, ...BODY_FLAG], h.deps)).toBe(0);
+    expect(envelope(h.out).value!.diff).toBe("");
+    expect(h.writes).toEqual([]); // idempotence: a byte no-op writes nothing at all
+  });
+});
+
+describe("2.7 AC #1 — 2.2's region oracles re-run over a --body - apply, UNCHANGED", () => {
+  // ⚠ THIS IS THE WHOLE SAFETY ARGUMENT (⚠️-4 / NK-4 rule 5). SM-C2's object is the REGION — which bytes
+  // are reachable — and `--body -` changes only where the bytes in an ALREADY-SANCTIONED region come
+  // from. If one of these needed relaxing, the implementation would have widened the region.
+  const GROW = "title: Primer\nsummary: A much much longer summary than before\nstatus: live\nextra: one\n";
+  const SHRINK = "title: P\n";
+
+  function expectDelimiterFraming(markdown: string): void {
+    const f = locateFence(markdown)!;
+    expect(f).not.toBeNull();
+    const prefix = markdown.slice(0, f.bodyStart);
+    expect(/(\r\n|\r|\n)$/.test(prefix)).toBe(true);
+    expect(/^[ \t]*`{3,}nk-[a-z]+[ \t]*$/.test(prefix.split(/\r\n|\r|\n/).at(-2)!)).toBe(true);
+    expect(/^[ \t]*`{3,}[ \t]*(\r\n|\r|\n|$)/.test(markdown.slice(f.bodyEnd))).toBe(true);
+  }
+
+  test("a GROWING stdin body still leaves a SECOND fence byte-identical", async () => {
+    const two = ["---", "nk-type: card", "---", "", "```nk-card", "title: Primer", "status: live", "```", "", "between", "", "```nk-card", "second: 2", "```", "", "tail"].join("\n");
+    const h = harness({ readNote: scriptedReads(two, two, "unused"), readBody: async () => GROW });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, ...BODY_FLAG], h.deps)).toBe(1); // row 9
+    const written = h.writes[0]![1];
+    expect(written).toContain("```nk-card\nsecond: 2\n```\n\ntail"); // untouched, though the first grew
+    expect(locateFence(written)!.body).toBe(composeBody(parseFenceBody(GROW)));
+    expect(written.length).toBeGreaterThan(two.length); // the growth is real, not a theory
+    expectDelimiterFraming(written);
+  });
+
+  test("a SHRINKING stdin body keeps the framing and the prose either side", async () => {
+    const h = harness({ readNote: scriptedReads(CANONICAL, CANONICAL, "unused"), readBody: async () => SHRINK });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, ...BODY_FLAG], h.deps)).toBe(1); // row 9
+    const written = h.writes[0]![1];
+    expect(written.length).toBeLessThan(CANONICAL.length);
+    expectDelimiterFraming(written);
+    expect(written.startsWith("---\nnk-type: card\n---\n\n")).toBe(true);
+    expect(written.slice(locateFence(written)!.blockEnd)).toBe("\nprose after");
+  });
+
+  test("a CRLF note: prose keeps CRLF byte-for-byte while the stdin body lands LF-only", async () => {
+    const crlf = ["---", "nk-type: card", "---", "", "```nk-card", "title:   Primer", "status: live", "```", "", "prose"].join("\r\n");
+    const h = harness({ readNote: scriptedReads(crlf, crlf, "unused"), readBody: async () => "title: T\r\nstatus: draft\r\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, ...BODY_FLAG], h.deps)).toBe(1); // row 9
+    expect(h.writes[0]![1]).toBe(
+      "---\r\nnk-type: card\r\n---\r\n\r\n```nk-card\r\ntitle: T\nstatus: draft\n```\r\n\r\nprose",
+    );
+  });
+
+  test("the codec's output round-trips OUT of the written file", async () => {
+    const body = "title: Round\nstatus: trip\n";
+    const h = harness({ readNote: scriptedReads(CANONICAL, CANONICAL, "unused"), readBody: async () => body });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, ...BODY_FLAG], h.deps)).toBe(1);
+    const f = locateFence(h.writes[0]![1])!;
+    expect(f.type).toBe("card"); // the info string came from the NOTE, never from stdin
+    expect(f.body).toBe(composeBody(parseFenceBody(body)));
+  });
+});
+
+describe("2.7 AC #4 — the preview and the write agree, WITHIN one --body - run", () => {
+  // 🔴 A WITHIN-ONE-RUN ASSERTION, and that is forced rather than stylistic: there is no `--dry-run`
+  // flag (dry-run is the ABSENCE of `--apply`), so a "`--body -` dry-run" is `render <note> --body -`,
+  // which AC #2 row 3 refuses with a usage 2. The two-run comparison is unbuildable; the property it was
+  // reaching for — two printers drifting from one plan — is this one, and this one can fire.
+  const BODY = "title: Previewed\nsummary: Once\nstatus: live\n";
+
+  test("--json: the envelope's proposed side is the fence body read back after the write", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nk-27-preview-"));
+    const note = join(dir, "n.md");
+    writeFileSync(note, CANONICAL);
+    try {
+      const out: string[] = [];
+      const deps: NotekitApplyDeps = {
+        log: (l) => out.push(l), err: () => {}, now: () => AT,
+        loadRegistry: async () => REGISTRY, readBody: async () => BODY,
+      };
+      expect(await runNotekitApply(["render", note, ...CONFIG, "--json", "--at", AT, ...BODY_FLAG], deps)).toBe(0);
+      const env = envelope(out);
+      const readBack = locateFence(readFileSync(note, "utf-8"))!.body;
+      // The diff's proposed side is `serializeFenceBody(fields)`; the note carries `composeBody` of the
+      // same fields — the ONE newline the contract adds is the whole difference, and it is asserted.
+      expect(readBack).toBe(composeBody(parseFenceBody(BODY)));
+      expect(String(env.value!.diff)).toContain("title: Previewed");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("human mode: the preview block printed BEFORE the write matches the bytes on disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nk-27-preview-h-"));
+    const note = join(dir, "n.md");
+    writeFileSync(note, CANONICAL);
+    try {
+      const out: string[] = [];
+      const deps: NotekitApplyDeps = {
+        log: (l) => out.push(l), err: () => {}, now: () => AT,
+        loadRegistry: async () => REGISTRY, readBody: async () => BODY,
+      };
+      expect(await runNotekitApply(["render", note, ...CONFIG, "--at", AT, ...BODY_FLAG], deps)).toBe(0);
+      const readBack = locateFence(readFileSync(note, "utf-8"))!.body;
+      // The preview is printed first and the result line last — provenance and ORDER, both asserted.
+      expect(out.length).toBeGreaterThan(1);
+      expect(out.at(-1)).toContain("✓ wrote");
+      expect(out.slice(0, -1).join("\n")).toContain("title: Previewed");
+      expect(readBack).toBe(composeBody(parseFenceBody(BODY)));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── AC #3 — the four E1-A3 input classes, on the STDIN BYTES ─────────────────────────────────────
+
+describe("2.7 AC #3 — the four input classes, measured at 983c5fc and asserted here", () => {
+  /** Run an apply with `body` on stdin against a canonical note; return the envelope + the writes. */
+  async function applyBody(body: string): Promise<{ code: number; h: ReturnType<typeof harness> }> {
+    const h = harness({ readNote: scriptedReads(CANONICAL, CANONICAL, CANONICAL), readBody: async () => body });
+    const code = await runNotekitApply(["render", "n.md", ...CONFIG, "--json", "--at", AT, ...BODY_FLAG], h.deps);
+    return { code, h };
+  }
+
+  test("(a) EMPTY — `{}` fields ⇒ nk-missing-field/title, exit 1, note byte-identical", async () => {
+    expect(parseFenceBody("")).toEqual({});
+    const { code, h } = await applyBody("");
+    expect(code).toBe(1);
+    expect(envelope(h.out).error).toMatchObject({ code: "nk-missing-field", field: "title" });
+    expect(h.writes).toEqual([]);
+  });
+
+  test("(b) NON-RECORD — an array literal and colonless prose both parse to `{}`", async () => {
+    expect(parseFenceBody("[1,2,3]")).toEqual({});
+    expect(parseFenceBody("just some prose with no colons")).toEqual({});
+    for (const body of ["[1,2,3]", "just some prose with no colons"]) {
+      const { code, h } = await applyBody(body);
+      expect(code).toBe(1);
+      expect(h.writes).toEqual([]);
+    }
+  });
+
+  test("🔴 (b) JSON on stdin MANGLES to one bogus field rather than being rejected", async () => {
+    // The mistake this pins: an agent pipes a RenderSpec (the `--spec -` habit NK-8 rule 4 rejects on
+    // the write path). Nothing corrupt lands — it still fails at `validate` — but the failure names
+    // `title`, not "you piped JSON", so the behaviour is pinned rather than discovered in the field.
+    const mangled = parseFenceBody('{"title":"T","role":"r"}');
+    expect(Object.keys(mangled)).toEqual(['{"title"']);
+    expect(mangled['{"title"']).toBe('"T","role":"r"}');
+    expect(Object.prototype.hasOwnProperty.call(mangled, "title")).toBe(false);
+
+    const { code, h } = await applyBody('{"title":"T","role":"r"}');
+    expect(code).toBe(1);
+    expect(envelope(h.out).error).toMatchObject({ code: "nk-missing-field", field: "title" });
+    expect(h.writes).toEqual([]);
+  });
+
+  test("(c) HOLED/SPARSE — the parse DENSIFIES, so the emitted line has no hole and no literal", async () => {
+    expect(parseFenceBody("tags: [a, , b]")).toEqual({ tags: ["a", "b"] });
+    expect(serializeFenceBody(parseFenceBody("tags: [a, , b]"))).toBe("tags: [a, b]");
+
+    const body = "title: Holes\ntags: [a, , b]\n";
+    const h = harness({ readNote: scriptedReads(CANONICAL, CANONICAL, "unused"), readBody: async () => body });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, ...BODY_FLAG], h.deps)).toBe(1); // row 9
+    const written = h.writes[0]![1];
+    expect(written).toContain("tags: [a, b]");
+    expect(written).not.toContain("undefined");
+    expect(written).not.toContain("null");
+  });
+
+  test("(c) …and a GENUINELY holed array is UNREACHABLE from stdin — so it is a unit case", () => {
+    // A CLI fixture for this could not fire: `parseFenceBody` densifies at parse. Asserted against
+    // `serializeFenceBody` directly instead of writing a test that cannot fail.
+    const holed: string[] = ["a"];
+    holed[3] = "d";
+    expect(serializeFenceBody({ tags: holed })).toBe("tags: [a, , , d]");
+    expect(serializeFenceBody({ tags: holed })).not.toContain("undefined");
+  });
+
+  test("🔴 (d) PROTOTYPE-CHAIN names all four SURVIVE as own keys and round-trip to the note", async () => {
+    const body = "title: Proto\nconstructor: x\ntoString: y\nvalueOf: z\n__proto__: w\n";
+    const fields = parseFenceBody(body);
+    expect(Object.getOwnPropertyNames(fields)).toEqual(["title", "constructor", "toString", "valueOf", "__proto__"]);
+    expect(Object.getPrototypeOf(fields)).toBeNull(); // `Object.create(null)` — the reason they survive
+
+    const h = harness({ readNote: scriptedReads(CANONICAL, CANONICAL, "unused"), readBody: async () => body });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, ...BODY_FLAG], h.deps)).toBe(1); // row 9
+    const written = locateFence(h.writes[0]![1])!.body;
+    for (const line of ["constructor: x", "toString: y", "valueOf: z", "__proto__: w"]) {
+      expect(written).toContain(line);
+    }
+  });
+
+  test("🔴 (d) THE ASYMMETRY — stdin PRESERVES `__proto__`, frontmatter EATS it", () => {
+    // Both halves in ONE test, so a future "unify the two codecs" refactor has to confront it rather
+    // than discover it. `parseFenceBody` builds `Object.create(null)`; `parseFrontmatter` builds a plain
+    // `{}`, so a `__proto__:` line there hits the prototype SETTER and the key vanishes.
+    const viaStdin = parseFenceBody("__proto__: w");
+    expect(Object.prototype.hasOwnProperty.call(viaStdin, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(viaStdin)).toBeNull();
+
+    const viaFrontmatter = parseFrontmatter("---\n__proto__: w\n---\n");
+    expect(Object.prototype.hasOwnProperty.call(viaFrontmatter, "__proto__")).toBe(false);
+    expect(Object.getPrototypeOf(viaFrontmatter)).not.toBeNull();
+  });
+
+  test("declared normalizations on the stdin path: CRLF, duplicate key, array index, empty value", () => {
+    expect(parseFenceBody("title: T\r\nrole: r\r\n")).toEqual({ title: "T", role: "r" }); // LF-only fields
+    expect(parseFenceBody("title: A\ntitle: B")).toEqual({ title: "B" });                 // LAST wins
+    expect(parseFenceBody("0: zero\ntitle: T")).toEqual({ title: "T" });                  // index key dropped
+    expect(parseFenceBody("role:")).toEqual({ role: "" });
+    expect(serializeFenceBody(parseFenceBody("role:"))).toBe("role: ");                   // and re-parses the same
+    expect(parseFenceBody(serializeFenceBody(parseFenceBody("role:")))).toEqual({ role: "" });
+  });
+});
+
+// ── AC #4 — routing never comes from stdin, and every failure is typed with no write ─────────────
+
+describe("2.7 AC #4 — the info string is NEVER taken from stdin", () => {
+  test("🔴 an `nk-type:` line inside the stdin body does NOT move the fence's info string", async () => {
+    const body = "title: Routed\nnk-type: primer\nstatus: live\n";
+    const h = harness({ readNote: scriptedReads(CANONICAL, CANONICAL, "unused"), readBody: async () => body });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, ...BODY_FLAG], h.deps)).toBe(1); // row 9
+    const written = h.writes[0]![1];
+    expect(locateFence(written)!.type).toBe("card"); // the NOTE's fence, unmoved
+    expect(written).toContain("```nk-card");
+    expect(written).not.toContain("```nk-primer");
+    // ⚠ AND THE OBSERVED FATE OF THE STRAY KEY, RECORDED RATHER THAN ASSUMED. The transform path applies
+    // NO rubric projection (that is the author path's job) — `parseFenceBody` output goes through
+    // whole — so the key SURVIVES into the fence body. It is inert there: NK-1.8 rule 2 pins routing to
+    // the info string, which the assertions above show did not move.
+    expect(locateFence(written)!.body).toContain("nk-type: primer");
+  });
+});
+
+describe("2.7 AC #4 — typed failures under --body -, every one leaving the note byte-identical", () => {
+  test("an unreadable note is still nk-note-unreadable, and stdin never reaches a write", async () => {
+    const h = harness({ readNote: () => null, readBody: async () => "title: T\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", ...BODY_FLAG], h.deps)).toBe(1);
+    expect(envelope(h.out).error).toMatchObject({ code: "nk-note-unreadable" });
+    expect(h.writes).toEqual([]);
+  });
+
+  test("a note with no `nk-type:` opt-in is still nk-no-opt-in", async () => {
+    const h = harness({ readNote: () => "```nk-card\ntitle: T\n```\n", readBody: async () => "title: T\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", ...BODY_FLAG], h.deps)).toBe(1);
+    expect(envelope(h.out).error).toMatchObject({ code: "nk-no-opt-in" });
+    expect(h.writes).toEqual([]);
+  });
+
+  test("an unregistered fence type is still nk-unknown-type", async () => {
+    const note = "---\nnk-type: card\n---\n\n```nk-unknown\ntitle: T\n```\n";
+    const h = harness({ readNote: () => note, readBody: async () => "title: T\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", ...BODY_FLAG], h.deps)).toBe(1);
+    expect(envelope(h.out).error).toMatchObject({ code: "nk-unknown-type" });
+    expect(h.writes).toEqual([]);
+  });
+
+  test("a fenceless note with nothing to seed is still nk-no-fence", async () => {
+    const h = harness({ readNote: () => "---\nnk-type: card\n---\n\nprose\n", readBody: async () => "" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", ...BODY_FLAG], h.deps)).toBe(1);
+    expect(envelope(h.out).error).toMatchObject({ code: "nk-no-fence" });
+    expect(h.writes).toEqual([]);
+  });
+
+  test("NO NEW WRITE ERROR CODE — the union is still 2.2's three", () => {
+    // `nk-body-without-apply` is a usage `2` that lives as a literal in `main.ts`'s stderr text, never
+    // in `NotekitWriteErrorCode`. If a second code appears here, the story has left its scope.
+    const src = stripStringsAndComments(readFileSync(join(import.meta.dir, "notekit-write.ts"), "utf-8"));
+    const union = src.slice(src.indexOf("NotekitWriteErrorCode"), src.indexOf("assertNever"));
+    expect(union.match(/nk-[a-z-]+/g) ?? []).toEqual([]); // the codes are inside masked STRING literals…
+    const raw = readFileSync(join(import.meta.dir, "notekit-write.ts"), "utf-8");
+    const decl = raw.slice(raw.indexOf("export type NotekitWriteErrorCode"), raw.indexOf("/** Every effect injectable"));
+    expect(decl.match(/"nk-[a-z-]+"/g)).toEqual(['"nk-note-changed"', '"nk-write-failed"', '"nk-write-unverified"']);
+    expect(decl).not.toContain("nk-body-without-apply");
+  });
+});
+
+// ── ⚠️-2's ruled branch — a FENCELESS note honours --body -, terminating at createFence ──────────
+
+describe("2.7 ⚠️-2 (RULED) — a fenceless note honours --body -, and the terminal is createFence", () => {
+  const FENCELESS = ["---", "nk-type: card", "title: From frontmatter", "summary: Derived", "---", "", "prose"].join("\n");
+
+  test("the created fence's body is the STDIN body, not the frontmatter derivation", async () => {
+    const body = "title: From stdin\nsummary: Authored\nstatus: draft\n";
+    const h = harness({ readNote: scriptedReads(FENCELESS, FENCELESS, "unused"), readBody: async () => body });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--at", AT, ...BODY_FLAG], h.deps)).toBe(1); // row 9
+    const written = h.writes[0]![1];
+    const fence = locateFence(written)!;
+    expect(fence.body).toBe(composeBody(parseFenceBody(body)));
+    expect(fence.body).toContain("title: From stdin");
+    expect(fence.body).not.toContain("From frontmatter"); // the derivation did NOT supply the fields
+  });
+
+  test("routing STILL never comes from stdin — the created fence's type is the frontmatter opt-in", async () => {
+    const body = "title: T\nnk-type: primer\n";
+    const h = harness({ readNote: scriptedReads(FENCELESS, FENCELESS, "unused"), readBody: async () => body });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--at", AT, ...BODY_FLAG], h.deps)).toBe(1);
+    expect(locateFence(h.writes[0]![1])!.type).toBe("card");
+  });
+
+  test("the prose outside the created block is byte-identical, and the block is the ONE structural add", async () => {
+    const body = "title: T\n";
+    const h = harness({ readNote: scriptedReads(FENCELESS, FENCELESS, "unused"), readBody: async () => body });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--at", AT, ...BODY_FLAG], h.deps)).toBe(1);
+    const written = h.writes[0]![1];
+    const f = locateFence(written)!;
+    // ⚠ THE SUBTRACTION LEAVES THE PRE-NOTE PLUS TWO `\n`, and that is 2.5's declared framing rather
+    // than a defect of this story: `createFence` inserts the block with a blank line either side, and
+    // `[blockStart, blockEnd)` excludes those separators. 2.7 changes no region logic — it only supplies
+    // the block's BODY — so this is 2.5's own measured shape, re-asserted under a stdin body.
+    expect(written.slice(0, f.blockStart) + written.slice(f.blockEnd)).toBe(
+      `${FENCELESS.slice(0, FENCELESS.indexOf("\n\nprose"))}\n\n\n\nprose`,
+    );
+    expect(written.match(/^```nk-[a-z]+$/gm)!.length).toBe(1); // exactly ONE fence, never two
+  });
+
+  test("the gap advisory is measured against the FINAL fields, not the frontmatter", async () => {
+    // The reroute this story owes: with a stdin body the frontmatter is no longer the field source, so a
+    // frontmatter-keyed advisory would name keys the written fence does not reflect. `summary` is
+    // answered by the frontmatter and OMITTED by the stdin body — so it must be reported as a gap.
+    const h = harness({ readNote: scriptedReads(FENCELESS, FENCELESS, "unused"), readBody: async () => "title: T\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", "--at", AT, ...BODY_FLAG], h.deps)).toBe(1);
+    // The row-9 failure envelope carries no value, so the advisory is read off the preview run instead.
+    const p = harness({ readNote: () => FENCELESS });
+    await runNotekitRead(["render", "n.md", ...CONFIG, "--json", "--at", AT], p.deps);
+    expect(JSON.parse(p.out[0]!).value.gaps).toEqual(["status"]); // frontmatter answers title + summary
+  });
+
+  test("…and with the SAME note the stdin body's own omissions are what get reported", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nk-27-seed-"));
+    const note = join(dir, "n.md");
+    writeFileSync(note, FENCELESS);
+    try {
+      const out: string[] = [];
+      const deps: NotekitApplyDeps = {
+        log: (l) => out.push(l), err: () => {}, now: () => AT,
+        loadRegistry: async () => REGISTRY, readBody: async () => "title: T\n",
+      };
+      expect(await runNotekitApply(["render", note, ...CONFIG, "--json", "--at", AT, ...BODY_FLAG], deps)).toBe(0);
+      // `summary` AND `status` are both gaps now: the stdin body answered neither.
+      expect(envelope(out).value!.gaps).toEqual(["summary", "status"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an EMPTY stdin body on a fenceless note has nothing to seed from ⇒ nk-no-fence, no write", async () => {
+    // Condition 3 is evaluated over the FINAL fields. Loud, and no fence is created from nothing.
+    const h = harness({ readNote: () => FENCELESS, readBody: async () => "" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", ...BODY_FLAG], h.deps)).toBe(1);
+    expect(envelope(h.out).error).toMatchObject({ code: "nk-no-fence" });
+    expect(h.writes).toEqual([]);
   });
 });

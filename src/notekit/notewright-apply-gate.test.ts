@@ -118,7 +118,24 @@ const READ_CODES = [
   "nk-missing-field", "nk-unknown-version",
 ];
 const APPLY_CODES = ["nk-note-changed", "nk-write-failed", "nk-write-unverified"];
-const NINE_CODES = [...READ_CODES, ...APPLY_CODES];
+
+/**
+ * Story 2.7's addition — the TENTH code, and the one that is not an exit-`1` envelope code.
+ *
+ * ⚠ IT LIVES ON THE EXIT-`2` SIDE, as a greppable literal in the CLI's stderr text: `--body -` without
+ * `--apply` is decidable from argv before any file is read, so the run never reaches the pipeline that
+ * builds an envelope (NK-7 rule 3's decidability split). It is listed here because this file's scan
+ * asks "is every `nk-` token in the body a DECLARED code or a declared non-code token", and the apply
+ * body legitimately names it — not because it joins the nine a consumer branches on.
+ */
+const USAGE_CODES = ["nk-body-without-apply"];
+
+/**
+ * The closed set of `nk-` tokens the apply body may carry as CODES. Nine at Story 2.4, ten at 2.7.
+ * ⚠ EXTENDED, NEVER RELAXED TO A WILDCARD — see `NON_CODE_TOKENS` for why a `nk-[a-z-]+` sweep reddens
+ * against a correct file.
+ */
+const TEN_CODES = [...READ_CODES, ...APPLY_CODES, ...USAGE_CODES];
 
 /**
  * `nk-` tokens the apply body may legitimately carry that are NOT error codes.
@@ -1113,14 +1130,42 @@ describe("apply gate (d) — the split IS the gate, and the gated body handles a
 
   test("AC #5 — the apply body names all six read-path codes too: 6 + 3 = 9", () => {
     for (const code of READ_CODES) expect(applyText).toContain(code);
-    expect(NINE_CODES.length).toBe(9);
-    expect(new Set(NINE_CODES).size).toBe(9);   // nine DISTINCT codes, not a list with a duplicate
+    expect([...READ_CODES, ...APPLY_CODES].length).toBe(9);
+    // …and Story 2.7 takes the DECLARED set to ten by adding the one usage-side code. Asserted as a
+    // count so a silent eleventh cannot ride in on the scan below.
+    expect(TEN_CODES.length).toBe(10);
+    expect(new Set(TEN_CODES).size).toBe(10);   // ten DISTINCT codes, not a list with a duplicate
+  });
+
+  test("AC #5 (2.7) — the apply body names the tenth code; the agent and the preview name none of it", () => {
+    for (const code of USAGE_CODES) {
+      expect(applyText).toContain(code);
+      // 2.3 AC #6 caps the agent body at its SIX read-path codes; naming an apply-surface code there
+      // turns that gate red. The preview skill is read-only and carries none either.
+      expect(agentText).not.toContain(code);
+      expect(previewText).not.toContain(code);
+    }
+    // …and it is documented on the exit-`2` side, never as a row in the exit-`1` envelope table.
+    const table = applyText.slice(applyText.indexOf("| `error.code` |"), applyText.indexOf("Exit `2` is"));
+    expect(table).not.toContain("nk-body-without-apply");
+  });
+
+  test("AC #5 (2.7) — the sanctioned invocation now carries `--body -`, and the read-only one does not", () => {
+    const shell = applyText.split("\n").filter((l) => l.trim().startsWith("std "));
+    const write = shell.filter((l) => l.includes("notekit render") && l.includes(APPLY_FLAG));
+    const readOnly = shell.filter((l) => l.includes("notekit render") && !l.includes(APPLY_FLAG));
+    expect(write).toHaveLength(1);
+    expect(readOnly).toHaveLength(1);
+    expect(write[0]).toContain("--body -");
+    // The preview must NOT sprout the channel: `--body -` without `--apply` is a usage 2 by NK-8 rule 2,
+    // so a read-only line carrying it would be a documented invocation that cannot run.
+    expect(readOnly[0]).not.toContain("--body");
   });
 
   test("AC #5 — every `nk-` token in the apply body is a declared code or a declared non-code token", () => {
     // ⚠ SCOPED, NOT A WILDCARD SWEEP. See `NON_CODE_TOKENS`: a naive scan would flag correct prose.
     // Both populations are explicit, so an unknown token still has nowhere to hide.
-    const known = new Set([...NINE_CODES, ...NON_CODE_TOKENS]);
+    const known = new Set([...TEN_CODES, ...NON_CODE_TOKENS]);
     const stray = [...new Set(nkTokens(applyText))].filter((t) => !known.has(t));
     expect(stray).toEqual([]);
   });
@@ -1360,7 +1405,7 @@ describe("apply gate (d) — the split IS the gate, and the gated body handles a
   });
 
   test("COUNTERFACTUAL 5b — a tenth `nk-` code smuggled into the apply body is caught", () => {
-    const known = new Set([...NINE_CODES, ...NON_CODE_TOKENS]);
+    const known = new Set([...TEN_CODES, ...NON_CODE_TOKENS]);
     const mutated = `${applyText}\n| \`nk-write-partial\` | invented | — |\n`;
     const stray = [...new Set(nkTokens(mutated))].filter((t) => !known.has(t));
     expect(stray).toEqual(["nk-write-partial"]);
@@ -1637,9 +1682,18 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
     // path reddens, which is the opposite of the property. `core-html.ts` is a real sibling no story in
     // this epic touches, and it sits inside the same directory, so the near-miss the assertion is about
     // is preserved exactly.
-    const unlisted = porcelainPaths("?? src/notekit/core-html.ts\0 M src/cli/main.ts\0")
+    // ⚠ AND IT MOVED AGAIN AT STORY 2.7, FOR THE SAME REASON AND WITH THE SAME CLAIM. The second
+    // fixture path was `src/cli/main.ts`, which 2.7 legitimately allowlists — this test would then have
+    // asserted a LISTED path reddens. `notekit-deploy.ts` replaces it: a real `src/cli/notekit-*.ts`
+    // sibling that no Epic-2 story touches, so it is an even closer near-miss than the one it replaces.
+    // That this example has now had to move twice is the honest cost of an allowlist that grows.
+    const unlisted = porcelainPaths("?? src/notekit/core-html.ts\0 M src/cli/notekit-deploy.ts\0")
       .filter((p) => !ALLOWLIST.includes(p));
-    expect(unlisted).toEqual(["src/notekit/core-html.ts", "src/cli/main.ts"]);
+    expect(unlisted).toEqual(["src/notekit/core-html.ts", "src/cli/notekit-deploy.ts"]);
+    // Both fixture paths are real files, so the near-miss is about a genuine sibling rather than a
+    // name nothing could ever produce.
+    expect(existsSync(join(REPO, "src", "notekit", "core-html.ts"))).toBe(true);
+    expect(existsSync(join(REPO, "src", "cli", "notekit-deploy.ts"))).toBe(true);
     // A prefix pattern would have waved the first one straight through — which is why there is none.
     expect(ALLOWLIST.every((p) => p.endsWith(".ts") && !p.includes("*"))).toBe(true);
   });

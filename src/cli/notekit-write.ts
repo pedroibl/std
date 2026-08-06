@@ -55,6 +55,143 @@ export interface NotekitApplyDeps extends NotekitReadDeps {
    * would be guarding dead code. `notekit-write.test.ts` drives the default against a tmp dir.
    */
   writeNote?: (path: string, content: string) => void;
+  /**
+   * The `--body -` channel's stdin read (Story 2.7). Defaults to `readStdinText`, and THE DEFAULT IS
+   * EXERCISED BY THE SUITE through a real piped subprocess — a fully-injected reader would leave the
+   * timeout and listener-detach discipline below guarding dead code.
+   *
+   * ⚠ A NEW MEMBER, NOT A RENAME OF `readStdin`. `NotekitReadDeps.readStdin` returns PARSED JSON for
+   * `validate --spec -`; this one returns raw TEXT and distinguishes `""` from `null`. Two contracts,
+   * two members — reusing one name is how a JSON reader ends up on the text path.
+   */
+  readBody?: () => Promise<string | null>;
+}
+
+/**
+ * The hang-guard, in milliseconds. ⚠ A HANG-GUARD, NOT A THROUGHPUT BUDGET, and the difference is the
+ * failure mode: the race is against the stream's `end`, so a producer that has not finished within it
+ * resolves `null` and the run exits `2` — a refusal of a body that was on its way. Acceptable here,
+ * because a fence body is a handful of `key: value` lines from a local heredoc and the alternative (no
+ * timeout) is a CLI that hangs forever when `--body -` is typed at a terminal with nothing piped. A
+ * caller needing more passes `deps.readBody`; a `--body-timeout` flag would be a surface widening for a
+ * hypothetical.
+ *
+ * ⚠ HARDCODED WITH ITS CITATION rather than deep-imported. It matches `DEFAULT_STDIN_TIMEOUT_MS`
+ * (`src/stdio/read.ts:25`, *"generous … so a slow harness under load does not race to a false `null`"*),
+ * but `src/stdio/index.ts:4` exports only `readStdinJson` — reaching that const means importing a
+ * module's private surface across a slice boundary for one integer.
+ */
+const STDIN_TIMEOUT_MS = 1000;
+
+/**
+ * Read the process's own stdin fully as TEXT (Story 2.7, NK-8 rule 1). Resolves the accumulated string —
+ * `""` for a readable-but-empty stream, which is a legitimate (if invalid) fence body — or `null` ONLY on
+ * timeout or a stream error, which is the unreadable case.
+ *
+ * 🔴 DELIBERATELY NOT `stdio.readStdinJson`, AND THIS IS A SOURCE FACT RATHER THAN A PREFERENCE. That
+ * reader `JSON.parse`s (`src/stdio/read.ts:62`) and collapses **empty** (`:59-60`), **malformed** (`:64`)
+ * and **timeout** (`:85`) into ONE `null`. A fence body is text (`title: T`, not JSON), and this caller
+ * must tell `""` from "nothing": a readable-but-empty body is a real body that reaches the codec and
+ * fails loud at `validate` with `nk-missing-field`, while an unreadable stdin is a usage error. One
+ * `null` cannot carry both.
+ *
+ * ⚠ IT LIVES HERE, NOT IN `src/stdio/`, ON FOUR FACTS (story ⚠️-3): that slice declares itself
+ * JSON-scoped and exports exactly one symbol (`src/stdio/index.ts:1-4`); it carries an explicit
+ * anti-speculation posture (AD-9.4 Rule 1.3, `read.ts:19-22`); `"./stdio"` is a PUBLISHED subpath, so an
+ * addition there is a public-API change to `@pedroibl/std` made for one internal caller; and D2's Rule
+ * of Three is unmet with one caller.
+ * **THE PROMOTION TRIGGER IS NAMED AND DATED: Epic 3 Story 3.5** (`notekit new <path> --type <t>
+ * --body -`, NK-9) is the SECOND caller of a text stdin read. When 3.5 lands, move this to `src/stdio/`
+ * and refactor `readJsonFromStream` to compose it, so the race discipline has one home. Do not write a
+ * third copy.
+ */
+export function readStdinText(timeoutMs = STDIN_TIMEOUT_MS): Promise<string | null> {
+  return readTextFromStream(process.stdin, timeoutMs);
+}
+
+
+/**
+ * The stream-injected core of `readStdinText`, split out so it is testable against a mock `Readable`
+ * without touching the real `process.stdin` — the same split `readJsonFromStream` makes for the JSON
+ * twin, and for the same reason.
+ *
+ * 🔴 THE RACE DISCIPLINE IS `readJsonFromStream`'s (`src/stdio/read.ts:47-91`), CLONED: one `settled`
+ * guard so the FIRST of `{end, timeout, error}` wins, `clearTimeout`, and — not decoration — DETACH all
+ * three listeners and `pause()` the stream on resolution. That reader's own comment (`:69-73`) records
+ * why: a flowing `process.stdin` left attached keeps the event loop ref'd, so a CLI that RETURNS a code
+ * rather than `process.exit`ing hangs. `main.ts` returns codes and only the bin exits
+ * (`if (import.meta.main)`), so this CLI is exactly that caller. Do not "simplify" to `Bun.stdin.text()`.
+ *
+ * 🔴 AND `onEnd` IS `finish(data)` — THE ACCUMULATED STRING, VERBATIM, EMPTY OR NOT. "Clone it minus the
+ * parse" is TWO deletions, not one: the JSON twin's `onEnd` opens with `const text = data.trim(); if
+ * (!text) return finish(null);` BEFORE the parse, so a clone that drops only `JSON.parse` keeps the
+ * empty-collapse and an empty stdin resolves `null` — re-creating the exact "cannot tell `''` from
+ * nothing" defect this reader exists to avoid, and making a readable-but-empty body untestable. `null`
+ * comes from the timeout and the `error` listener and from NOWHERE ELSE.
+ *
+ * ⚠ AND IT DOES NOT TRIM THE PAYLOAD, for a second reason beyond the collapse: trimming eats a body's
+ * leading indentation and its trailing newline, and `composeBody` owns the newline contract. Whitespace
+ * normalization belongs to `parseFenceBody`'s eight declared rules, not to a reader. The reader hands
+ * over bytes.
+ */
+export function readTextFromStream(
+  stream: NodeJS.ReadableStream,
+  timeoutMs: number = STDIN_TIMEOUT_MS,
+): Promise<string | null> {
+  return new Promise<string | null>((resolve) => {
+    let settled = false;
+    let data = "";
+
+    const onData = (chunk: Buffer | string): void => {
+      data += typeof chunk === "string" ? chunk : chunk.toString();
+    };
+    const onEnd = (): void => finish(data); // ← the WHOLE body of the clone's divergence
+    const onError = (): void => finish(null);
+
+    const finish = (value: string | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stream.removeListener("data", onData);
+      stream.removeListener("end", onEnd);
+      stream.removeListener("error", onError);
+      if (typeof stream.pause === "function") stream.pause();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+
+    stream.on("data", onData);
+    stream.on("end", onEnd);
+    stream.on("error", onError);
+  });
+}
+
+/**
+ * Is `--body` present in EITHER argv form? (Story 2.7, NK-8 rule 2's "stdin is read only when the flag
+ * is present".)
+ *
+ * 🔴 `hasFlag` ALONE CANNOT ANSWER THIS, and using it alone is a silent no-op rather than a wrong
+ * answer. `hasFlag` is `args.includes("--" + name)` (`src/core/args.ts`) — the BARE form only — so under
+ * the estate's standard value-flag idiom (`hasFlag(a,n) ? flagValue(a,n) : default`) an `--body=-` reads
+ * as ABSENT, no stdin is read, and the run degrades into a plain `render --apply`: a normalizing
+ * round-trip that writes the note's own fence back and exits `0`. The caller asked for enrichment and
+ * got a no-op at success.
+ * ⚠ And `flagValue` alone cannot answer it either: a trailing `--body` returns `undefined`,
+ * indistinguishable from absent. NEITHER READER IS SUFFICIENT ALONE; THE DISJUNCTION IS.
+ *
+ * ⚠ THE TRAP GENERALIZES, which is why it is worth a sentence here: `hasFlag` is a correct presence test
+ * only for `arity: "bool"`. Every other value flag in the estate hides it because a missed `--k=v`
+ * merely falls back to a DEFAULT. `--body` has no default, so the same bug becomes a silent no-op — the
+ * next value flag with no default will hit this wall.
+ *
+ * 🔴 ONE DEFINITION, TWO CALL SITES. `main.ts`'s guards and `runNotekitApply` both need it; two copies of
+ * a two-form disjunction is precisely how one of them later gets "simplified" back to `hasFlag`. It is a
+ * shared PREDICATE rather than a threaded boolean because 2.2 pins `runNotekitApply(argv, deps)` —
+ * a third parameter would change a sibling's signature and edit its tests, and smuggling it into `deps`
+ * would conflate a parsed-argv fact with the injection seam that tests replace with throwing doubles.
+ */
+export function bodyFromStdinRequested(argv: string[]): boolean {
+  return hasFlag(argv, "body") || argv.some((a) => a.startsWith("--body="));
 }
 
 /** A future code that ships without a branch is a COMPILE error, not a silent fall-through. */
@@ -132,8 +269,36 @@ export async function runNotekitApply(
   const readBack = deps.readNote ?? readIfExists;
 
   try {
+    // ── 0. the `--body -` enrichment channel, read BEFORE the plan (Story 2.7, NK-8 rules 1-2) ────
+    // ⚠ STDIN IS READ ONLY WHEN THE FLAG IS PRESENT. No `isTTY` probe, no speculative read at module
+    // load, no "read it and ignore it if unused" — `notekit-write.test.ts` asserts the negative with a
+    // `readBody` double that THROWS, which proves nothing was even attempted rather than merely that
+    // nothing was written.
+    // ⚠ THE PREDICATE IS THE SHARED TWO-FORM ONE, never a local bare-form read: that form is blind to
+    // the equals spelling and would degrade this flag into a silent no-op at exit `0`. The single-read
+    // gate in `main.test.ts` greps for the reader call WITHOUT masking comments, so naming the banned
+    // form literally here would turn that gate red against correct code — hence the paraphrase.
+    let body: string | undefined;
+    if (bodyFromStdinRequested(argv)) {
+      const read = await (deps.readBody ?? readStdinText)();
+      if (read === null) {
+        // A RUNTIME usage `2`, inherited rather than re-decided: an unreadable stdin is already 2.1's
+        // verdict for `validate --spec -`. The line goes to stderr and NOTHING goes to stdout — not
+        // even under `--json`, because the run never reached the pipeline that produces an envelope.
+        // ⚠ `""` IS NOT THIS BRANCH. A readable-but-empty stream is a real body that proceeds to the
+        // codec and fails loud at `validate`; only a timeout or a stream error resolves `null`.
+        err("std notekit render: cannot read the fence body from stdin (timed out or the stream errored)");
+        return 2;
+      }
+      body = read;
+    }
+
     // ── 1. the plan, computed ONCE by the read surface and shared with the preview ────────────────
-    const outcome = await renderPlan(argv, deps, err);
+    // ⚠ `body` IS PASSED THROUGH AS-IS. Never `body || undefined`: that maps a readable-but-empty `""`
+    // to "no override" and silently restores the note's own fence, turning a loud refusal into a
+    // successful no-op. The `null` branch above already returned, so the type here is `string |
+    // undefined` and tsc carries the distinction.
+    const outcome = await renderPlan(argv, deps, err, body);
     if (outcome.kind === "usage") return 2; // row 1 — the line is already on stderr
     if (outcome.kind === "error") {
       emit({ ok: false, error: outcome.error }, json, log, err);

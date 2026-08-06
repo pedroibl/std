@@ -922,6 +922,17 @@ export const WORKING_TREE_ALLOWLIST = [
   "src/notekit/edge/renderer-count.test.ts",
   "src/notekit/catalog-templates.test.ts",
   "src/notekit/edge/dispatch.ts",
+  // ⚠ AMENDMENT 5, Story 2.7 (the `--body -` enrichment channel). FOUR exact paths appended, three of
+  // which were already listed by earlier stories and are named here only in the story's own File List.
+  // The genuinely new entries are the two `main.*` files — 2.7 is the first notekit story to touch the
+  // entrypoint's guards AND its help oracle in the same change — plus `surface.ts` for the one `--body`
+  // FlagSpec and `notekit-read.test.ts` for the VALUE_FLAGS widening the declaration forces.
+  // This EXTENDS the enumeration; it does not relax it. A prefix like `src/cli/` would silently permit
+  // every future file in the directory, which is the failure this list exists to prevent, inverted.
+  "src/cli/main.ts",
+  "src/cli/main.test.ts",
+  "src/cli/surface.ts",
+  "src/cli/notekit-read.test.ts",
 ];
 
 describe("notewright dispatch — AC #4c: nothing under src/ or scripts/ moved", () => {

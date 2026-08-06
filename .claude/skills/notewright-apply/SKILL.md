@@ -113,13 +113,36 @@ stale:
 ```bash
 std notekit capabilities --config "$1" --json
 std notekit render "$0" --config "$1" --json
-std notekit render "$0" --config "$1" --apply --json
+std notekit render "$0" --config "$1" --apply --json --body -
 ```
 
 The second command is the read-only preview and writes nothing. The third is the write: it replaces only
 the fenced region and leaves every other byte of the note identical — that is a property of the tool's
 code path, not of your care, which is why the write is safe to authorize at all. You add no other
 command, you run no fourth attempt, and you edit no file yourself.
+
+## What you write on stdin, and what you must never write there
+
+`--body -` is the one channel your proposed values travel through, and `-` is its only value: there is no
+`--body <path>`, no `--set key=value`, and no `--spec -` on this surface. What you pipe is a **fence
+body** — the same `key: value` text the tool itself emits, one field per line:
+
+```
+title: The note's title
+summary: One line
+status: live
+```
+
+**Never JSON, and never a RenderSpec.** That mistake does not fail cleanly, and knowing how it fails is
+why it is written here: a piped `{"title":"T","role":"r"}` is read by the fence codec as a single field
+whose key is the literal `{"title"` — the run then refuses at validation with `nk-missing-field` on
+`title`, which names the note as the problem when the problem was your payload. Nothing corrupt lands,
+but the message will point you at the wrong thing, so check the shape of what you are piping before you
+read the refusal as a fact about the note.
+
+An **empty** stdin is a real (and invalid) body, not an absence: it parses to no fields and refuses at
+`nk-missing-field`. The fence's own type is never taken from what you pipe — routing comes from the
+note's fence, so an `nk-type:` line in your body is inert content, not a redirect.
 
 A finished run puts four things in front of the human: the fenced diff the read-only run proposed, shown
 before the write went out; the exact fenced diff the tool applied; the tool's own confirmation that the
@@ -131,8 +154,9 @@ without having first shown the proposed one skipped its own first half.
 
 Exit `1` is a result you read. The payload on stdout is `{"ok":false,"error":{...}}` and the field you
 branch on is `error.code` — never a field called kind, never the message prose, never a substring you
-matched by eye. On this surface the set is **nine**: the six the read path can produce, plus three that
-exist only because this run writes.
+matched by eye. On this surface the exit-`1` set is **nine**: the six the read path can produce, plus
+three that exist only because this run writes. A tenth code, `nk-body-without-apply`, exists on the
+exit-`2` side and is never an envelope — see below.
 
 | `error.code` | Means | Note state |
 |---|---|---|
@@ -157,6 +181,12 @@ Exit `2` is **not** a result you branch on. It means the invocation itself was m
 never reached the tool's pipeline — there is no envelope, only usage text on stderr. Quote the stderr
 text and stop. A `2` is a bug in how you were called, and guessing a repair for it is how a wrong path
 becomes a confident wrong write.
+
+One `2` names itself, and it is the tenth code on this surface: **`nk-body-without-apply`**, printed as a
+literal token in the stderr text when `--body -` is given without `--apply`. It is a `2` rather than an
+envelope precisely because it is decidable from the command line before any file is read — so it is a
+caller-construction bug in the deterministic dispatch, not a condition you handle. Quote it and stop; do
+not retry with a different flag arrangement.
 
 **Anything you do not recognise is unrecognised — report the raw payload and stop.** That covers, and
 you should treat each of these identically: a stdout payload that is **not an object** at all; a `code`

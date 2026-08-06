@@ -477,6 +477,7 @@ notekit render options:
   --config <path>   the caller-local note-type registry to read (required — std bakes in no registry)
   --at <iso>        stamp the card with this timestamp instead of the clock, making the output byte-reproducible
   --apply           actually execute the plan. WITHOUT IT NOTHING MUTATES (dry-run is the default)
+  --body -          read the fence body from stdin instead of the note's own fence. Requires --apply
   --json            emit the machine-readable ledger; it is then the only thing on stdout
 
 notekit validate options:
@@ -498,6 +499,10 @@ dashkit verify options:
 flags:
   -h, --help        show this help`;
 
+/** Story 2.7's one added row, named once so both delta tests reverse the SAME literal. */
+const BODY_ROW =
+  "  --body -          read the fence body from stdin instead of the note's own fence. Requires --apply";
+
 describe("HELP — byte-identity oracle (3.1 AC2)", () => {
   // Self-check on the TRANSCRIPTION first: a copy-paste slip would freeze the wrong bytes and then pass
   // the toBe below forever. `.length` is UTF-16 units, NOT bytes — the gap is the multi-byte characters
@@ -509,10 +514,15 @@ describe("HELP — byte-identity oracle (3.1 AC2)", () => {
   // `--apply` row had falsified it, and `renderHelp` prints both strings in one output. Twelve fewer
   // characters, same line count: 3048/3060/54 → 3036/3048/54. Both numbers re-measured off the shipped
   // constant, never transcribed from the diff.
+  //
+  // ⚠ RE-FROZEN AGAIN AT STORY 2.7, for its ONE `--body -` row inside `notekit render options:`:
+  // 3036/3048/54 → 3137/3149/55. All three re-measured off the shipped constant. The delta test below
+  // is what makes this re-freeze honest — a blind re-freeze at any of these sites is how a byte-identity
+  // oracle stops being one.
   test("the frozen literal is the one that was measured", () => {
-    expect(FROZEN_HELP.length).toBe(3036);
-    expect(Buffer.byteLength(FROZEN_HELP)).toBe(3048);
-    expect(FROZEN_HELP.split("\n").length).toBe(54);
+    expect(FROZEN_HELP.length).toBe(3137);
+    expect(Buffer.byteLength(FROZEN_HELP)).toBe(3149);
+    expect(FROZEN_HELP.split("\n").length).toBe(55);
   });
 
   test("HELP is byte-identical to the frozen text", () => {
@@ -609,15 +619,232 @@ describe("HELP — byte-identity oracle (3.1 AC2)", () => {
       "--config <path>",
       "--at <iso>",
       "--apply",
+      "--body -",
       "--json",
     ]);
 
+    // ⚠ THE REVERSAL NOW STRIPS 2.7'S ROW TOO, AND THE TARGET IS UNCHANGED. 2.1's measured 2949/2961/53
+    // is a FIXED POINT: each later story extends what is reversed, never what it lands on. Re-measuring
+    // the target to whatever the code now says would leave this asserting only that arithmetic works.
     const post21 = lines
-      .filter((l) => l !== APPLY_ROW)
+      .filter((l) => l !== APPLY_ROW && l !== BODY_ROW)
       .map((l) => (l === RENDER_ROW_NOW ? RENDER_ROW_2_1 : l))
       .join("\n");
     expect(post21.length).toBe(2949);
     expect(Buffer.byteLength(post21)).toBe(2961);
     expect(post21.split("\n").length).toBe(53);
+  });
+
+  // Story 2.7's own delta. The 3.1-baseline test above strips every notekit options block wholesale and
+  // therefore cannot see a change made INSIDE one; the post-2.1 test lands on a target three stories
+  // old. Neither answers "was 2.7's change EXACTLY one row?" — this does, by reversing only that row and
+  // landing on the post-2.6 freeze byte for byte.
+  test("the delta from the post-2.6 freeze is EXACTLY the one --body row", () => {
+    const lines = FROZEN_HELP.split("\n");
+    expect(lines.filter((l) => l === BODY_ROW)).toHaveLength(1); // one row, not two
+
+    // It sits inside `notekit render options:` — the block 2.1 created — and NOT in `commands:`: 2.7
+    // adds a flag, never a subcommand, so `HELP_OPTION_BLOCKS` does not move.
+    const header = lines.indexOf("notekit render options:");
+    const block = lines.slice(header + 1, lines.indexOf("", header));
+    expect(block).toContain(BODY_ROW);
+    expect(lines.filter((l) => l.startsWith("  notekit ")).join("\n")).not.toContain("--body");
+
+    // …and the row states the grammar it implements: `-` as the metavar, `--apply` as the precondition.
+    expect(BODY_ROW).toContain("--body -");
+    expect(BODY_ROW).toContain("Requires --apply");
+
+    const post26 = lines.filter((l) => l !== BODY_ROW).join("\n");
+    expect(post26.length).toBe(3036); // 2.6's measured numbers, reproduced exactly
+    expect(Buffer.byteLength(post26)).toBe(3048);
+    expect(post26.split("\n").length).toBe(54);
+  });
+});
+
+// ═══ STORY 2.7 — `--body -` through the REAL notekit arm (AC #2's nine rows) ══════════════════════
+
+describe("2.7 AC #2 — the --body grammar, through main.ts's notekit arm", () => {
+  /** A note whose fence is already CANONICAL, so any byte change is the stdin body's doing. */
+  function bodyFixture(): { dir: string; note: string; config: string; before: string } {
+    const dir = mkdtempSync(join(tmpdir(), "std-body-"));
+    const note = join(dir, "note.md");
+    const config = join(dir, "cfg.ts");
+    writeFileSync(
+      note,
+      ["---", "nk-type: card", "---", "", "```nk-card", "title: Primer", "```", "", "prose"].join("\n"),
+    );
+    writeFileSync(
+      config,
+      `const config = { noteTypes: { card: "t" }, templates: { t: { renderer: "nk-card", rubric: { kind: "card", titleField: "title", fields: [] } } } };\nexport default config;\n`,
+    );
+    return { dir, note, config, before: readFileSync(note, "utf-8") };
+  }
+
+  /** Run `std notekit …` capturing console.error, which the arm's guards write to directly. */
+  async function run(argv: string[]): Promise<{ code: number; errs: string[] }> {
+    const errs: string[] = [];
+    const realError = console.error;
+    console.error = (l: unknown) => errs.push(String(l));
+    try {
+      return { code: await runMain(argv, { log: () => {} }), errs };
+    } finally {
+      console.error = realError;
+    }
+  }
+
+  test("rows 1 and 2 — the SPACE and EQUALS forms are the same flag, and both reach the channel", async () => {
+    // 🔴 THE ASSERTION IS ON THE BYTES, not the exit code. Under a `hasFlag`-only presence test row 2
+    // reads as absent, no stdin is read, the note's own fence is written back — and the run STILL
+    // exits 0. Only the written body separates the correct implementation from the silent no-op.
+    for (const form of [["--body", "-"], ["--body=-"]]) {
+      const { dir, note, config, before } = bodyFixture();
+      const proc = Bun.spawn(
+        ["bun", join(import.meta.dir, "main.ts"), "notekit", "render", note, "--config", config, "--apply", ...form],
+        { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+      );
+      proc.stdin.write("title: Enriched\n");
+      await proc.stdin.end();
+      expect(await proc.exited).toBe(0);
+      const after = readFileSync(note, "utf-8");
+      expect(after).not.toBe(before);
+      expect(after).toContain("title: Enriched");
+      expect(after).not.toContain("title: Primer");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("row 3 — `--body -` WITHOUT --apply is nk-body-without-apply, usage 2, nothing written", async () => {
+    const { dir, note, config, before } = bodyFixture();
+    try {
+      const { code, errs } = await run(["notekit", "render", note, "--config", config, "--body", "-"]);
+      expect(code).toBe(2);
+      // ⚠ THE CODE NAME IS A GREPPABLE LITERAL IN THE STDERR TEXT. It is not machine-readable in an
+      // envelope, deliberately: a usage 2 is decidable from argv before any file is read, so the run
+      // never reaches the pipeline that produces one. Promoting it later is one line at one guard.
+      expect(errs.join("\n")).toContain("nk-body-without-apply");
+      expect(readFileSync(note, "utf-8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rows 4, 5 and 6 — ONE equality closes every non-`-` value", async () => {
+    const { dir, note, config, before } = bodyFixture();
+    try {
+      const bad = [
+        ["--body"],              // row 4 — trailing, no value (`flagValue` → undefined)
+        ["--body", "foo"],       // row 5 — a value that is not `-`
+        ["--body=./b.txt"],      // row 5 — the path surface NK-8 rule 3 refuses
+        ["--body="],             // row 5 — an empty value (`flagValue` → "")
+        ["--body", "--json"],    // row 6 — the space form takes the next token unconditionally
+      ];
+      for (const flag of bad) {
+        const { code, errs } = await run(["notekit", "render", note, "--config", config, "--apply", ...flag]);
+        expect(code).toBe(2);
+        expect(errs.join("\n")).toContain("--body accepts exactly one value");
+      }
+      expect(readFileSync(note, "utf-8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("row 7 — a MISPLACED --body is a usage 2 on every non-render verb, never a silent no-op", async () => {
+    const { code: v, errs: ve } = await run(["notekit", "validate", "--body", "-"]);
+    expect(v).toBe(2);
+    const { code: c } = await run(["notekit", "capabilities", "--body", "-"]);
+    expect(c).toBe(2);
+    // `deploy` is the one that would otherwise DEPLOY and return 0 on a flag it never parses.
+    const { code: d } = await run(["notekit", "deploy", "--body", "-", "--vault", "/no/such/vault"]);
+    expect(d).toBe(2);
+    const { code: b } = await run(["notekit", "bogus", "--body", "-"]);
+    expect(b).toBe(2);
+    expect(ve.join("\n")).toContain("--body is only valid on");
+  });
+
+  test("row 7 — …and the message names the flag that is actually misplaced", async () => {
+    const { errs: bodyErrs } = await run(["notekit", "validate", "--body", "-"]);
+    expect(bodyErrs.join("\n")).toContain("--body is only valid on");
+    expect(bodyErrs.join("\n")).not.toContain("--apply is only valid on");
+    const { errs: applyErrs } = await run(["notekit", "validate", "--apply"]);
+    expect(applyErrs.join("\n")).toContain("--apply is only valid on");
+  });
+
+  test("the guard's `apply || bodyPresent` half is load-bearing — deploy still falls through", async () => {
+    // Simplified to `rest[0] !== "render"` this would exit 2 for every non-render verb and kill the
+    // deploy delegate. Without either flag, deploy must still reach the deploy runner's own usage.
+    const { code, errs } = await run(["notekit", "deploy"]);
+    expect(code).toBe(2);
+    expect(errs.join("\n")).toContain("--vault");
+    expect(errs.join("\n")).not.toContain("is only valid on");
+  });
+
+  test("row 8 — no --body at all: stdin is NEVER read (2.2's behaviour, unchanged)", async () => {
+    // Driven through the real bin with stdin held OPEN and never ended. A CLI that read stdin
+    // unconditionally would block on the 1000ms hang-guard; this one must not touch it at all, so the
+    // run completes immediately on a stream that never ends.
+    const { dir, note, config } = bodyFixture();
+    try {
+      const started = Date.now();
+      const proc = Bun.spawn(
+        ["bun", join(import.meta.dir, "main.ts"), "notekit", "render", note, "--config", config, "--apply"],
+        { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+      );
+      expect(await proc.exited).toBe(0);
+      expect(Date.now() - started).toBeLessThan(900); // under the hang-guard, so it was never armed
+      expect(readFileSync(note, "utf-8")).toContain("title: Primer"); // the note's OWN fence, normalized
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("HELP declares --body under `notekit render options:`, with `-` as its whole grammar", () => {
+    expect(HELP).toContain("notekit render options:");
+    expect(HELP).toContain("--body -          read the fence body from stdin");
+    expect(HELP).toContain("Requires --apply");
+  });
+
+  test("🔴 the misordered form resolves the SAME <note>, because `body` is a VALUE_FLAGS member", async () => {
+    // ⚠ A DIVERGENCE FROM THE STORY'S TRACED PREDICTION, AND LIVE CODE GOVERNS. The story traced
+    // `positional(argv.slice(1))` — first non-`--` token — and concluded `render --body - --apply
+    // <note>` would read the literal `-` as the <note> and exit 1 with `nk-note-unreadable`. Story 2.1
+    // had already replaced `positional` with `notePositional`, a walker that skips a space-form value
+    // flag WITH its value, so once `body` joins VALUE_FLAGS both orderings resolve the same path. The
+    // story's declared "a file named `-` in cwd" residual disappears with it.
+    const { dir, note, config, before } = bodyFixture();
+    try {
+      const proc = Bun.spawn(
+        ["bun", join(import.meta.dir, "main.ts"), "notekit", "render", "--body", "-", "--apply", "--config", config, note],
+        { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+      );
+      proc.stdin.write("title: Misordered\n");
+      await proc.stdin.end();
+      expect(await proc.exited).toBe(0);
+      const after = readFileSync(note, "utf-8");
+      expect(after).not.toBe(before);
+      expect(after).toContain("title: Misordered");
+      expect(after).not.toContain("cannot read note");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("2.2's single-`--apply`-read gate is still at exactly one, and `--body` adds no second read", () => {
+    // ⚠ THE GLOB FORM, never a shell-expanded path list (2.5 AC #4's correction to 2.2 — `rg` honours
+    // an explicit path over a `-g '!…'` exclusion).
+    for (const [flag, expected] of [["apply", 1], ["body", 1]] as const) {
+      const proc = Bun.spawnSync({
+        cmd: [
+          "rg", "-n", `hasFlag\\([^)]*"${flag}"`, "src/",
+          "-g", "src/cli/main.ts", "-g", "src/cli/notekit-*.ts", "-g", "src/notekit/**/*.ts", "-g", "!*.test.ts",
+        ],
+        cwd: join(import.meta.dir, "..", ".."),
+        stdout: "pipe",
+      });
+      const hits = proc.stdout.toString().trim().split("\n").filter(Boolean);
+      expect(hits).toHaveLength(expected);
+      // …and the ONE `body` read lives inside the shared predicate, not in a caller.
+      if (flag === "body") expect(hits[0]).toContain("notekit-write.ts");
+    }
   });
 });
