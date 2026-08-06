@@ -247,7 +247,7 @@ function nkTokens(text: string): string[] {
  * would mangle it into `/original.ts`. It is consumed explicitly here. Both halves are returned: a
  * rename touches the path it left as much as the path it landed on, and AC #4c is about files touched.
  */
-function porcelainPaths(stdout: string): string[] {
+export function porcelainPaths(stdout: string): string[] {
   const records = stdout.split("\0").filter((r) => r.length > 0);
   const out: string[] = [];
   for (let i = 0; i < records.length; i++) {

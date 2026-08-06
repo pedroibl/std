@@ -85,7 +85,7 @@ import { join } from "node:path";
 import { parseFrontmatter } from "../core";
 import { statMtime } from "../fsx";
 import { locateFence } from "./core-fence";
-import { probeKeySpelling } from "./notewright-dispatch.test";
+import { porcelainPaths, probeKeySpelling } from "./notewright-dispatch.test";
 
 // ── the three files under test ───────────────────────────────────────────────────────────────────
 // Resolved from `import.meta.dir`, never cwd: `bun test` inherits whatever directory it was launched
@@ -311,6 +311,20 @@ function resolveBinary(): string | null {
   }
 }
 
+/**
+ * Child-process bounds for every spawn in this file that is not `doctorVerdict`.
+ *
+ * ⚠ SAME FINDING AS `DOCTOR_SPAWN_TIMEOUT_MS`, ONE LAYER WIDER. Review 2026-08-06 established that a
+ * per-test timeout is NOT a bound on a child: bun's `test()` third argument reaps the whole process
+ * group, so a hung spawn fails an unrelated assertion elsewhere instead of reporting its own timeout.
+ * That fix was applied to ONE helper and the other four spawn sites kept the gap — found in review of
+ * PR #86. The pairing rule is the same: the CHILD's bound sits BELOW the test's, so the child dies
+ * first and the failure names the spawn that hung.
+ */
+const CLI_SPAWN_TIMEOUT_MS = 30_000;
+/** The per-test bound for any test spawning a child, kept above `*_SPAWN_TIMEOUT_MS`. */
+const SPAWNING_TEST_TIMEOUT_MS = 60_000;
+
 /** A cold `std` subprocess through THIS checkout. */
 function runCli(args: string[]): { exitCode: number; stdout: string; stderr: string } {
   const proc = Bun.spawnSync({
@@ -318,6 +332,10 @@ function runCli(args: string[]): { exitCode: number; stdout: string; stderr: str
     cwd: REPO,
     stdout: "pipe",
     stderr: "pipe",
+    timeout: CLI_SPAWN_TIMEOUT_MS,
+    // stdin closed, never inherited: a child blocking on the runner's stdin hangs forever and looks
+    // identical to a slow one — the same reasoning `doctorVerdict` spells out.
+    stdin: "ignore",
   });
   return {
     exitCode: proc.exitCode,
@@ -727,15 +745,15 @@ describe("apply gate (b) — the gate key is still spelled the way the INSTALLED
       expect(true).toBe(true);
       return;
     }
-    const v = Bun.spawnSync({ cmd: [bin, "--version"], stdout: "pipe" }).stdout.toString().trim();
+    const v = Bun.spawnSync({ cmd: [bin, "--version"], stdout: "pipe", stdin: "ignore", timeout: CLI_SPAWN_TIMEOUT_MS }).stdout.toString().trim();
     if (!v.startsWith(MEASURED_AT)) {
       console.warn(`[apply-gate b] installed ${v} ≠ measured ${MEASURED_AT} — re-checking anchors`);
     }
-    const strs = Bun.spawnSync({ cmd: ["strings", "-a", bin], stdout: "pipe" }).stdout.toString();
+    const strs = Bun.spawnSync({ cmd: ["strings", "-a", bin], stdout: "pipe", stdin: "ignore", timeout: CLI_SPAWN_TIMEOUT_MS }).stdout.toString();
     for (const anchor of [GATE_KEY, "userTypedThisTurn", ...DENY_ANCHORS]) {
       expect(strs).toContain(anchor);
     }
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   /**
    * The one schema line satisfying BOTH anchors.
@@ -744,7 +762,7 @@ describe("apply gate (b) — the gate key is still spelled the way the INSTALLED
    * description string and the 28,873-byte schema line — so taking the first is red by construction.
    */
   function schemaLines(bin: string): string[] {
-    const out = Bun.spawnSync({ cmd: ["strings", "-a", bin], stdout: "pipe", stderr: "pipe" });
+    const out = Bun.spawnSync({ cmd: ["strings", "-a", bin], stdout: "pipe", stderr: "pipe", stdin: "ignore", timeout: CLI_SPAWN_TIMEOUT_MS });
     return out.stdout
       .toString()
       .split("\n")
@@ -774,7 +792,7 @@ describe("apply gate (b) — the gate key is still spelled the way the INSTALLED
     // The inverse twin is alive too — the reason gate (a) asserts its ABSENCE rather than trusting that
     // nobody would reach for it.
     expect(probeKeySpelling(line, TWIN_KEY, "If false, hides the slash command from users")).toBe(true);
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   // ── COUNTERFACTUAL 3: THE LOAD-BEARING ONE ──
   test("COUNTERFACTUAL 3 — a renamed key is DETECTED; without this seam the probe is decoration", () => {
@@ -793,7 +811,7 @@ describe("apply gate (b) — the gate key is still spelled the way the INSTALLED
     expect(renamed).not.toBe(real);                                   // the mutant is not the original
     expect(probeKeySpelling(real, GATE_KEY, GATE_ANCHOR)).toBe(true);  // live: found
     expect(probeKeySpelling(renamed, GATE_KEY, GATE_ANCHOR)).toBe(false); // renamed: caught
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test("COUNTERFACTUAL 3b — a vanished description is caught too, not only a renamed key", () => {
     // The other half of the expiry mode: the key survives, the feature's prose moves. Pure input, so it
@@ -824,12 +842,12 @@ describe("apply gate (g) — the harness still HAS the machinery the deny rule r
     }
     // ⚠ FIXED-STRING SEARCH, NOT A REGEX: neither anchor carries a metacharacter today, and reading them
     // as patterns is a needless way to go red on an escaping change rather than on the regression.
-    const strings = Bun.spawnSync({ cmd: ["strings", "-a", bin], stdout: "pipe", stderr: "pipe" })
+    const strings = Bun.spawnSync({ cmd: ["strings", "-a", bin], stdout: "pipe", stderr: "pipe", stdin: "ignore", timeout: CLI_SPAWN_TIMEOUT_MS })
       .stdout.toString();
     expect(strings.length).toBeGreaterThan(1000);   // the probe read SOMETHING; an empty haystack is red
     // ⚠ PRESENCE, NEVER THE COUNTS. Both stood at 3 occurrences at 2.1.222; counts churn per build.
     expect(probeAnchorsPresent(strings, DENY_ANCHORS)).toBe(true);
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   // ── COUNTERFACTUAL 7: the lexical half's seam ──
   test("COUNTERFACTUAL 7 — a withdrawn or renamed anchor is DETECTED", () => {
@@ -842,7 +860,7 @@ describe("apply gate (g) — the harness still HAS the machinery the deny rule r
       expect(true).toBe(true);
       return;
     }
-    const real = Bun.spawnSync({ cmd: ["strings", "-a", bin], stdout: "pipe", stderr: "pipe" })
+    const real = Bun.spawnSync({ cmd: ["strings", "-a", bin], stdout: "pipe", stderr: "pipe", stdin: "ignore", timeout: CLI_SPAWN_TIMEOUT_MS })
       .stdout.toString();
     const renamed = real.replaceAll(DENY_ANCHORS[0]!, "Skill execution blocked by policy");
     expect(renamed).not.toBe(real);                              // the mutant is not the original
@@ -850,7 +868,7 @@ describe("apply gate (g) — the harness still HAS the machinery the deny rule r
     expect(probeAnchorsPresent(renamed, DENY_ANCHORS)).toBe(false); // withdrawn: caught
     // …and the OTHER anchor vanishing is caught too, so this is not a one-string gate wearing a plural.
     expect(probeAnchorsPresent(real.replaceAll(DENY_ANCHORS[1]!, "dmi"), DENY_ANCHORS)).toBe(false);
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test("COUNTERFACTUAL 7b — the probe is not a constant: it answers true and false on pure input", () => {
     // Runs with or without the binary. `every` on an empty anchor list would be vacuously true, which is
@@ -1306,7 +1324,7 @@ describe("apply gate (e) — preview leaves the fixture byte-identical; apply do
     } finally {
       rmSync(f.dir, { recursive: true, force: true });
     }
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test("SM-2 — the preview run leaves every byte, the listing and every mtime identical", () => {
     const f = makeFixture();
@@ -1321,7 +1339,7 @@ describe("apply gate (e) — preview leaves the fixture byte-identical; apply do
     } finally {
       rmSync(f.dir, { recursive: true, force: true });
     }
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test("the preview's STDOUT carries the HTML and a NON-EMPTY fenced diff", () => {
     // A fingerprint-only test would pass on a `render` that printed NOTHING, while the epic's AC #1
@@ -1340,7 +1358,7 @@ describe("apply gate (e) — preview leaves the fixture byte-identical; apply do
     } finally {
       rmSync(f.dir, { recursive: true, force: true });
     }
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test("NON-VACUITY — the apply run DOES change the fixture, and only inside the fence", () => {
     const f = makeFixture();
@@ -1387,7 +1405,7 @@ describe("apply gate (e) — preview leaves the fixture byte-identical; apply do
     } finally {
       rmSync(f.dir, { recursive: true, force: true });
     }
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 });
 
 // ═══ AC #6 — nothing outside this story's enumerated paths moved ══════════════════════════════════
@@ -1403,21 +1421,12 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
     "src/notekit/notewright-apply-gate.test.ts", // this file
   ];
 
-  /** `git status --porcelain -z` paths. A rename emits TWO records; the second carries no status. */
-  function porcelainPaths(stdout: string): string[] {
-    const records = stdout.split("\0").filter((r) => r.length > 0);
-    const out: string[] = [];
-    for (let i = 0; i < records.length; i++) {
-      const record = records[i]!;
-      const status = record.slice(0, 2);
-      out.push(record.slice(3).trim());
-      if (status.includes("R") || status.includes("C")) {
-        const origin = records[++i];
-        if (origin !== undefined) out.push(origin.trim());
-      }
-    }
-    return out;
-  }
+  // `porcelainPaths` is IMPORTED, not redefined here — see the header's rule against a copied probe.
+  // It was a byte-for-byte copy until review 2026-08-06: this file already imports `probeKeySpelling`
+  // from the same module, and the header argues at length that a copy gives one claim two owners and
+  // rots the day one side is corrected. That is not decorative here — the rename/copy branch is the
+  // fragile part, both gates read the same `git status --porcelain -z` output, and a fix to one copy
+  // would have left the other mis-parsing rename records while staying green.
 
   test("AC #6 — no file under src/ or scripts/ moved beyond the two enumerated paths", () => {
     // ⚠ THE WORKING TREE, never `git diff <base>..HEAD -- src/` — a committed-history range returns
