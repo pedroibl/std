@@ -83,24 +83,43 @@ describe("SM-C1 — src/notekit ships exactly one renderer", () => {
     // anticipated (a class method, an object literal member) fails LOUDLY as an unreconciled
     // annotation instead of passing silently. A scan that cannot see a form is a scan that is green
     // for it.
+    // ⚠ `HTML\w*Element`, NOT `HTMLElement` — also MEASURED. `Renderer` returns `HTMLElement`, and
+    // every `HTMLDivElement`/`HTMLSpanElement`/… IS one, so a renderer annotated with a SUBTYPE is
+    // registrable in `RENDERERS` and typechecks fine. Pinned to the exact string `HTMLElement`, this
+    // scan left `function renderTimelineDom(spec): HTMLDivElement` at 4 pass / 0 fail — a second
+    // evasion, in the same class as the arrow form and found the same way, by planting it.
+    const EL = String.raw`HTML\w*Element`;
     const NAMED_FORMS = [
-      /function ([A-Za-z0-9_]+)\s*\([^)]*\)\s*:\s*HTMLElement/g, // function decls
-      /(?:const|let|var)\s+([A-Za-z0-9_]+)[^=\n]*=\s*(?:async\s*)?\([^)]*\)\s*:\s*HTMLElement/g, // arrow consts
+      new RegExp(String.raw`function ([A-Za-z0-9_]+)\s*\([^)]*\)\s*:\s*${EL}`, "g"), // function decls
+      new RegExp(
+        String.raw`(?:const|let|var)\s+([A-Za-z0-9_]+)[^=\n]*=\s*(?:async\s*)?\([^)]*\)\s*:\s*${EL}`,
+        "g",
+      ), // arrow consts
     ];
 
     const found = new Set<string>();
     let annotations = 0;
     for (const file of sliceSources()) {
       const src = readFileSync(file, "utf8");
-      // Return-type position only: `): HTMLElement`. A parameter or field typed `HTMLElement`
+      // Return-type position only: `): HTML*Element`. A parameter or field typed with an element
       // (`container: HTMLElement`, `element: HTMLElement`) is not a function returning one.
-      annotations += (src.match(/\)\s*:\s*HTMLElement/g) ?? []).length;
+      annotations += (src.match(new RegExp(String.raw`\)\s*:\s*${EL}`, "g")) ?? []).length;
       for (const re of NAMED_FORMS) for (const m of src.matchAll(re)) found.add(m[1]!);
     }
 
     expect([...found].sort()).toEqual(["build", "nkTreeToDom", "noticeElement", "renderCardDom"]);
-    // …and nothing returns an HTMLElement through a form this scan cannot name.
+    // …and nothing returns an element through a form this scan cannot name.
     expect(annotations).toBe(found.size);
+
+    // 🔴 THE ONE GAP, STATED RATHER THAN LEFT FOR SOMEONE TO FIND. An UNANNOTATED function whose
+    // return type is merely inferred is invisible here — measured, it stays green. That is a closed
+    // boundary rather than a hole, because of how it composes with (a): an unannotated renderer that
+    // IS registered reddens (a) (any key beyond `nk-card`), and one that is NEITHER registered NOR
+    // annotated cannot be reached as a renderer at all — it is dead code, not a second renderer. So
+    // the pair (a)+(b) is closed for everything that can actually function as one. Verified by
+    // planting all six forms: function decl, arrow const, object-literal method, `HTMLDivElement`
+    // subtype, and a renderer in a NEW file (the walk is recursive) all redden; only the unannotated
+    // one does not, and it is covered by (a) the moment it becomes reachable.
   });
 
   test("(c) `Rubric.kind` and `RenderSpec.kind` are both the unwidened literal `\"card\"`", () => {
