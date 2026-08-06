@@ -903,6 +903,27 @@ describe("notewright dispatch — gate (d): an unfilled positional is DETECTED, 
   });
 });
 
+export const WORKING_TREE_ALLOWLIST = [
+  "src/notekit/notewright-dispatch.test.ts",
+  "src/notekit/notewright-apply-gate.test.ts",
+  "src/notekit/core-fence.ts",
+  "src/notekit/core-fence.test.ts",
+  "src/notekit/index.ts",
+  "src/cli/notekit-read.ts",
+  "src/cli/notekit-write.ts",
+  "src/cli/notekit-write.test.ts",
+  // ⚠ AMENDMENT 3, Story 2.5 review follow-up (cross-vendor F2). The insertion offset moved into
+  // `core` as `parseFrontmatterBlock`, so the fields and the block END come from ONE match — a
+  // caller-side second pattern silently wrecked a note with a glued closing delimiter.
+  "src/core/parse.ts",
+  "src/core/parse.test.ts",
+  "src/core/index.ts",
+  // Story 2.6 (the loom-catalog payoff demo) — see AMENDMENT 4 above.
+  "src/notekit/edge/renderer-count.test.ts",
+  "src/notekit/catalog-templates.test.ts",
+  "src/notekit/edge/dispatch.ts",
+];
+
 describe("notewright dispatch — AC #4c: nothing under src/ or scripts/ moved", () => {
   /**
    * The working-tree allowlist. ⚠ EXTEND, NEVER REPLACE, and never widen to a prefix — Stories 2.4,
@@ -918,22 +939,12 @@ describe("notewright dispatch — AC #4c: nothing under src/ or scripts/ moved",
   // (+ its tests), exports it from the barrel, and forks row 4 across the two CLI surfaces (+ the write
   // tests). Again an EXTENSION and not a relaxation: an unlisted dirty path under `src/` or `scripts/`
   // still reddens, and none of these is a prefix.
-  const WORKING_TREE_ALLOWLIST = [
-    "src/notekit/notewright-dispatch.test.ts",
-    "src/notekit/notewright-apply-gate.test.ts",
-    "src/notekit/core-fence.ts",
-    "src/notekit/core-fence.test.ts",
-    "src/notekit/index.ts",
-    "src/cli/notekit-read.ts",
-    "src/cli/notekit-write.ts",
-    "src/cli/notekit-write.test.ts",
-    // ⚠ AMENDMENT 3, Story 2.5 review follow-up (cross-vendor F2). The insertion offset moved into
-    // `core` as `parseFrontmatterBlock`, so the fields and the block END come from ONE match — a
-    // caller-side second pattern silently wrecked a note with a glued closing delimiter.
-    "src/core/parse.ts",
-    "src/core/parse.test.ts",
-    "src/core/index.ts",
-  ];
+  // ⚠ AMENDMENT 4, Story 2.6. THREE exact paths appended — two new `*.test.ts` (the SM-C1 renderer scan
+  // and the catalog-template projections) plus ONE token in `edge/dispatch.ts`: `export` on `RENDERERS`,
+  // so the scan ENUMERATES the renderer table instead of regex-scraping its source text. 2.6 adds three
+  // templates to the VAULT's config and no note-type literal to `src/`, which is why nothing else here
+  // moves. An EXTENSION again, and again not a prefix.
+
 
   test("COUNTERFACTUAL 12 — a rename parses to BOTH its paths, not to `old -> new`", () => {
     // Constructed from REAL `-z` output (probed 2026-08-06 against a scratch repo), so the shape is
