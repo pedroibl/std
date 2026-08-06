@@ -72,14 +72,35 @@ describe("SM-C1 — src/notekit ships exactly one renderer", () => {
     // ⚠ A SET, NOT A COUNT. A count stays green if someone deletes `noticeElement` and adds a renderer.
     // When a legitimate fifth DOM helper is added later, the story that adds it extends this set with a
     // reason — that friction is the feature, not an obstacle to route around.
+    //
+    // 🔴 TWO DECLARATION FORMS, AND A TOTAL THAT MUST RECONCILE — because the single-form version of
+    // this scan DID NOT BITE. Measured: `export const renderTimelineDom = (spec: RenderSpec):
+    // HTMLElement => …` planted in `nkcard.ts` left this test 4-pass/0-fail. A `function`-only regex
+    // is blind to the arrow form, which is the same smuggled-renderer class the test exists to catch
+    // and one keystroke away from the form it does catch. So both forms are matched AND the count of
+    // named symbols is reconciled against the total number of `): HTMLElement` return annotations in
+    // the slice. That reconciliation is the load-bearing half: a THIRD declaration form nobody
+    // anticipated (a class method, an object literal member) fails LOUDLY as an unreconciled
+    // annotation instead of passing silently. A scan that cannot see a form is a scan that is green
+    // for it.
+    const NAMED_FORMS = [
+      /function ([A-Za-z0-9_]+)\s*\([^)]*\)\s*:\s*HTMLElement/g, // function decls
+      /(?:const|let|var)\s+([A-Za-z0-9_]+)[^=\n]*=\s*(?:async\s*)?\([^)]*\)\s*:\s*HTMLElement/g, // arrow consts
+    ];
+
     const found = new Set<string>();
+    let annotations = 0;
     for (const file of sliceSources()) {
       const src = readFileSync(file, "utf8");
-      for (const m of src.matchAll(/function ([A-Za-z0-9_]+)\([^)]*\)\s*:\s*HTMLElement/g)) {
-        found.add(m[1]!);
-      }
+      // Return-type position only: `): HTMLElement`. A parameter or field typed `HTMLElement`
+      // (`container: HTMLElement`, `element: HTMLElement`) is not a function returning one.
+      annotations += (src.match(/\)\s*:\s*HTMLElement/g) ?? []).length;
+      for (const re of NAMED_FORMS) for (const m of src.matchAll(re)) found.add(m[1]!);
     }
+
     expect([...found].sort()).toEqual(["build", "nkTreeToDom", "noticeElement", "renderCardDom"]);
+    // …and nothing returns an HTMLElement through a form this scan cannot name.
+    expect(annotations).toBe(found.size);
   });
 
   test("(c) `Rubric.kind` and `RenderSpec.kind` are both the unwidened literal `\"card\"`", () => {
