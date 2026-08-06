@@ -39,7 +39,13 @@ export type Renderer = (spec: RenderSpec) => HTMLElement;
  * primer/protocol/pattern note types are three TEMPLATES over this one renderer, which is what the
  * registry's middle level is for.
  */
-const RENDERERS: Readonly<Record<RendererId, Renderer>> = {
+// ⚠ EXPORTED FOR ONE READER: `renderer-count.test.ts`, the SM-C1 scan. The alternative was a gate that
+// regex-scrapes this object literal out of the source text, which would silently change what it counts
+// on a reformat or a computed key — an unfailable gate. Enumeration cannot drift. The token costs
+// nothing at the package surface because the test imports it from `./dispatch` DIRECTLY; re-exporting it
+// through `src/notekit/index.ts` would drag this DOM-typed file into the root program and fail TS2304
+// (see the header).
+export const RENDERERS: Readonly<Record<RendererId, Renderer>> = {
   "nk-card": renderCardDom,
 };
 

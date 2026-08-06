@@ -918,6 +918,11 @@ describe("notewright dispatch — AC #4c: nothing under src/ or scripts/ moved",
   // (+ its tests), exports it from the barrel, and forks row 4 across the two CLI surfaces (+ the write
   // tests). Again an EXTENSION and not a relaxation: an unlisted dirty path under `src/` or `scripts/`
   // still reddens, and none of these is a prefix.
+  // ⚠ AMENDMENT 4, Story 2.6. THREE exact paths appended — two new `*.test.ts` (the SM-C1 renderer scan
+  // and the catalog-template projections) plus ONE token in `edge/dispatch.ts`: `export` on `RENDERERS`,
+  // so the scan ENUMERATES the renderer table instead of regex-scraping its source text. 2.6 adds three
+  // templates to the VAULT's config and no note-type literal to `src/`, which is why nothing else here
+  // moves. An EXTENSION again, and again not a prefix.
   const WORKING_TREE_ALLOWLIST = [
     "src/notekit/notewright-dispatch.test.ts",
     "src/notekit/notewright-apply-gate.test.ts",
@@ -933,6 +938,10 @@ describe("notewright dispatch — AC #4c: nothing under src/ or scripts/ moved",
     "src/core/parse.ts",
     "src/core/parse.test.ts",
     "src/core/index.ts",
+    // Story 2.6 (the loom-catalog payoff demo) — see AMENDMENT 4 above.
+    "src/notekit/edge/renderer-count.test.ts",
+    "src/notekit/catalog-templates.test.ts",
+    "src/notekit/edge/dispatch.ts",
   ];
 
   test("COUNTERFACTUAL 12 — a rename parses to BOTH its paths, not to `old -> new`", () => {

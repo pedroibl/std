@@ -1552,6 +1552,13 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
     "src/core/parse.ts",
     "src/core/parse.test.ts",
     "src/core/index.ts",
+    // Story 2.6 (the loom-catalog payoff demo) — two new `*.test.ts` and ONE `export` token on
+    // `RENDERERS` so the SM-C1 scan enumerates the renderer table rather than regex-scraping it. Its
+    // three templates are three entries in the VAULT's `notekit.config.ts`, outside every `src/**`
+    // scan by construction, which is why the slice gains no source file and no note-type literal.
+    "src/notekit/edge/renderer-count.test.ts",
+    "src/notekit/catalog-templates.test.ts",
+    "src/notekit/edge/dispatch.ts",
   ];
 
   // `porcelainPaths` is IMPORTED, not redefined here — see the header's rule against a copied probe.
