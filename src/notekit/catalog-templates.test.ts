@@ -259,6 +259,11 @@ export default NOTEKIT_CONFIG;
     // Without this the assertion above is a claim about one config file rather than about the
     // generator. Here the registry really loses `pattern`, and the catalog has to lose it too.
     const dropped = FIXTURE.replace(` pattern: "catalog-pattern"`, "");
+    // ⚠ THE MUTATION IS ASSERTED, NOT ASSUMED. This `replace` depends on the fixture's exact
+    // whitespace; a reformat above would make it a no-op. The counterfactual is fail-SAFE either way
+    // (a no-op leaves four types and the set assertion goes red), but red for the wrong reason is a
+    // half-hour of confusion later. This line names it immediately.
+    expect(dropped).not.toBe(FIXTURE);
     const catalog = capabilitiesFor(dropped);
     const types = new Set(catalog.noteTypes.map((t) => t.nkType));
 
