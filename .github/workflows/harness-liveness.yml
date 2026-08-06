@@ -138,14 +138,27 @@ jobs:
             exit 1
           fi
 
-          echo "── 2. NEGATIVE: no probe anywhere skipped ──"
-          # ⚠ TAG-SHAPED, NOT PHRASE-SHAPED. The previous greps were coupled to exact wording and already
-          # had a live landmine: apply-gate says "SKIP: \`claude\` is not on PATH" while dispatch says
-          # "SKIP: no \`claude\` on PATH" — same condition, different sentence, and only one was matched.
-          # Matching the bracket tag plus "SKIP:" catches every skip in both files regardless of wording,
-          # and cannot be defeated by someone rephrasing a message.
-          if grep -nE '\[(apply-gate|notewright-dispatch)[^]]*\] SKIP:' probe-output.txt; then
-            echo "::error::a probe SKIPPED on the one path where skipping must be impossible."
+          echo "── 2. NEGATIVE: no LIVENESS probe skipped ──"
+          # ⚠ WORDING-INDEPENDENT BUT NOT TAG-INDEPENDENT, and the difference cost a false RED. The
+          # previous greps were coupled to exact phrasing and had a live landmine (apply-gate says
+          # "SKIP: \`claude\` is not on PATH", dispatch says "SKIP: no \`claude\` on PATH" — same
+          # condition, different sentence, one matched). Matching the bracket tag fixed that and went one
+          # step too far: `[apply-gate AC#6] SKIP:` is a story-scoped working-tree assertion which
+          # CORRECTLY has no subject on `main`, and the canary red-flagged its own legitimate skip.
+          #
+          # So: match the LIVENESS tags specifically — gate (b), gate (g) and their counterfactual
+          # suffixes, plus dispatch's. Those are the probes for which a skip here is impossible by
+          # construction. A non-liveness skip in the same file is not this check's business.
+          #   in scope : [apply-gate b] [apply-gate b/CF3] [apply-gate g] [apply-gate g/CF7]
+          #              [apply-gate g/non-vacuity] [apply-gate g/blind-spot] [notewright-dispatch]
+          #   excluded : [apply-gate AC#6]  — story-scoped, legitimately subject-less on main
+          # ⚠ THE CLASS INCLUDES DIGITS. A first cut used [a-zA-Z-]+ and silently missed `b/CF3` and
+          # `g/CF7` — two counterfactual probes whose skips would have gone undetected, in the very check
+          # written to detect skips. Caught by tabulating the pattern against ALL SEVEN real tags instead
+          # of reading it; enumerate the inputs when a regex is the thing standing between you and a
+          # silent green.
+          if grep -nE '\[(apply-gate [bg](/[a-zA-Z0-9-]+)?|notewright-dispatch)\] SKIP:' probe-output.txt; then
+            echo "::error::a LIVENESS probe SKIPPED on the one path where skipping must be impossible."
             echo "::error::The lines above name which. This is the canary's entire purpose."
             exit 1
           fi
