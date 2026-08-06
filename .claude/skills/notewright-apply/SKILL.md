@@ -52,6 +52,26 @@ declares a different set of types renders the note wrongly while looking entirel
 surface that is not a wrong preview — it is a wrong write. A missing path stops the run; there is no
 fallback.
 
+## Stop here if the two slots look like the preview surface's three
+
+This surface takes **two** positionals — note, then config. The preview surface takes **three** — mode,
+then note, then config. The two layouts are not interchangeable, and a caller carrying the preview habit
+across shifts every slot by one: the mode word lands in the note slot and the note lands in the config
+slot. Both are strings, so nothing downstream necessarily complains — the run previews and then writes,
+against the wrong path, looking entirely successful.
+
+Two mechanical checks, before any command:
+
+- **`$0` must end in `.md`.** A note is a markdown file. If `$0` is a bare word such as `transform` or
+  `preview`, or carries no `.md` suffix at all, the slots were filled by the other surface's layout.
+- **`$1` must not end in `.md`.** The registry is a config module, not a note. A `.md` value here means
+  the note landed one slot late.
+
+If either check fails, print exactly the usage line above and run nothing at all. Do not repair the
+guess by shuffling the values yourself — a caller who used the wrong layout may have meant something you
+cannot recover, and re-deriving intent on a write surface is precisely the judgement this skill exists to
+keep away from a model.
+
 ## The preview is the first half of THIS run — you do not inherit one
 
 You inherit nothing. This body and the two paths above are everything that reached you, so a preview
@@ -91,9 +111,9 @@ types exist — never restate a list of type names, because the registry is gene
 stale:
 
 ```bash
-std notekit capabilities --config $1 --json
-std notekit render $0 --config $1 --json
-std notekit render $0 --config $1 --apply --json
+std notekit capabilities --config "$1" --json
+std notekit render "$0" --config "$1" --json
+std notekit render "$0" --config "$1" --apply --json
 ```
 
 The second command is the read-only preview and writes nothing. The third is the write: it replaces only

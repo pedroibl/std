@@ -564,13 +564,27 @@ describe("notewright dispatch — gate (c): content assertions", () => {
     expect(shellLines(sed).map((l) => l.split(/\s+/)[0])).toContain("sed");
   });
 
-  test("AC #4d — the apply flag appears nowhere in either file", () => {
+  test("AC #4d — the apply flag reaches the preview SKILL never, and the agent only to forbid itself", () => {
     // Same invariant as 2.2's "no default that enables it", one layer up: 2.2 ensures the flag has no
-    // default that turns it on; 2.3 ensures the agent surface never types it. The path that AUTHORIZES
-    // reaching it is Story 2.4's, named here only to say who owns it.
+    // default that turns it on; 2.3 ensures no ungated surface types it.
     const flag = "--" + "apply"; // split so this file's own list does not trip a future whole-tree scan
-    expect(agentText).not.toContain(flag);
+
+    // The preview SKILL keeps the absolute zero. It is model-invocable, so the flag must not reach it.
     expect(skillText).not.toContain(flag);
+
+    // ⚠ THE AGENT HALF WAS AMENDED 2026-08-06 (review of 2.4). The blanket zero was wrong in a way that
+    // took building 2.4 to see: the agent is the EXECUTOR, and forbidding it the flag left it unable to
+    // state the one rule that matters ("never write `--apply` yourself"). 2.4 reconciled it instead with
+    // a general posture clause — "that posture was authorized by the human who typed it" — which asserts
+    // something a forked run CANNOT verify, and which a model-authored spawn prompt satisfies exactly as
+    // well as a human one. A vague rule on a write path is worse than a specific one, so the specific one
+    // is now permitted and the vague one is banned by name.
+    const forbids = /never write `--apply` yourself/.test(agentText);
+    expect(forbids).toBe(true);
+    // Every occurrence in the agent must sit in the prohibition, never in a runnable command block.
+    for (const line of shellLines(agentText)) expect(line).not.toContain(flag);
+    // …and the superseded authorization-by-inference wording must not come back.
+    expect(agentText).not.toMatch(/authorized by the human who typed it/);
   });
 
   test("AC #5 — no `nk-`-prefixed note-type literal in either file", () => {

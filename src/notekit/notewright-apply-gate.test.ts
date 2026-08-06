@@ -59,9 +59,14 @@
 //
 // ⚠ IMPORTING `probeKeySpelling` FROM A `.test.ts` FILE ALSO PULLS IN THAT FILE'S TESTS — but it does
 // NOT double-count them, and the difference matters enough to state precisely rather than guess at.
-// Measured 2026-08-06 at bun 1.3.14: this file ALONE reports 104 tests (its own 40 + 2.3's 64); this file
-// and `notewright-dispatch.test.ts` as TWO explicit entries also report 104, not 168; and the full-suite
-// delta from adding this file is exactly +40. Bun's module registry evaluates the imported module once
+// Measured 2026-08-06 at bun 1.3.14, RE-MEASURED after the review pass the same day: this file ALONE
+// reports 124 tests (its own 60 + 2.3's 64); this file and `notewright-dispatch.test.ts` as TWO explicit
+// entries also report 124, not 188. ⚠ THE EARLIER FIGURES HERE — 104, own 40, delta +40 — WERE STALE and
+// are recorded rather than deleted, because how they went stale is the point: they were true at the first
+// commit, the file then grew in `8514ccf` (+428 lines) and `081b184` (+136) with the numbers left alone,
+// and a file whose posture is "measured, not assumed" carried a headline measurement that no longer
+// reproduced. Re-measure these two numbers whenever this file grows; do not carry them forward by hand.
+// Bun's module registry evaluates the imported module once
 // and attributes its tests to whichever entry loaded it first, so the import yields a SUPERSET run when
 // this file is run alone, never a duplicated suite. The practical consequence is only this: running this
 // gate on its own also runs 2.3's, which is harmless.
@@ -137,6 +142,23 @@ const APPLY_FLAG = "--" + "apply";
 // leaves the human slash path working.
 const SETTINGS = join(REPO, ".claude", "settings.json");
 
+/**
+ * Every marker that makes a surface WRITE-CLASS, not just the apply flag.
+ *
+ * ⚠ AMENDED 2026-08-06 after review. This was `countOf(text, APPLY_FLAG) > 0` — a one-literal heuristic —
+ * while the comment beside the rule-6 loop claimed it would bind `--body -` (NK-8 r6) and `notekit new`
+ * (NK-9 r5) "the day it is authored, with nobody remembering to add it to a list here". It would not have.
+ * `notekit new` contains no `--apply`, so a correctly-denied `notekit new` surface would have classified
+ * NON-write-class and then hit the second loop, which asserts non-write-class surfaces are NOT denied —
+ * i.e. doing the right thing would have turned this suite red. The list is now explicit and its
+ * incompleteness is honest: this is a marker set that must be extended when a new write verb ships, and
+ * the count pin below is what makes a new surface visible rather than absorbed.
+ *
+ * (`--body -` is listed for completeness, not necessity: every form Story 2.7 authors also carries
+ * `--apply`, so it would already classify. `notekit new` is the one that genuinely would not.)
+ */
+const WRITE_MARKERS = [APPLY_FLAG, "notekit new", "--body -"] as const;
+
 /** The exact deny entry. ⚠ A WHOLE LITERAL, never a `notewright-apply` substring sweep — that would go
  *  green on a comment, on an `allow` entry, or on the bare tool name, none of which is the rule. */
 const DENY_ENTRY = "Skill(notewright-apply)";
@@ -174,6 +196,28 @@ function nkTokens(text: string): string[] {
 /** Occurrences of a literal — a count, not a boolean, because the split is 0 / 0 / ≥1. */
 function countOf(text: string, needle: string): number {
   return text.split(needle).length - 1;
+}
+
+/**
+ * One `###` section's body, from its heading to the next heading of the same-or-shallower depth.
+ *
+ * ⚠ SAME REASON `orderedSteps` EXISTS: a whole-file scan cannot see WHERE a token sits, and here position
+ * is the claim. The agent file is permitted to name the apply flag in exactly one section — the one that
+ * forbids the agent from writing it. A `toContain` over the whole file would be satisfied by the flag
+ * appearing anywhere, including in a command block, which is the state this assertion exists to catch.
+ * Returns "" when the heading is absent, so a renamed section reddens rather than silently matching "".
+ */
+function sectionOf(text: string, heading: string): string {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((l) => /^#{2,6}\s/.test(l) && l.replace(/^#+\s*/, "").trim() === heading);
+  if (start === -1) return "";
+  const depth = (lines[start]!.match(/^#+/) ?? [""])[0].length;
+  const rest = lines.slice(start + 1);
+  const endRel = rest.findIndex((l) => {
+    const m = l.match(/^#+/);
+    return m !== null && m[0].length <= depth && /^#{2,6}\s/.test(l);
+  });
+  return (endRel === -1 ? rest : rest.slice(0, endRel)).join("\n");
 }
 
 /**
@@ -331,7 +375,7 @@ function skillSurfaces(): Surface[] {
       dir,
       name: typeof name === "string" ? name : "",
       text,
-      writeClass: countOf(text, APPLY_FLAG) > 0,
+      writeClass: WRITE_MARKERS.some((m) => countOf(text, m) > 0),
     };
   });
 }
@@ -348,7 +392,21 @@ type DoctorVerdict = { ran: boolean; skipped: string[]; raw: string };
  * takes ~0.7-1.5s idle and crosses 5s under full-suite load. The allowance buys wall-clock only; every
  * assertion below is unchanged, and a doctor run that genuinely produces no output is still RED.
  */
+/**
+ * The harness build every "measured" annotation in this file was taken against.
+ *
+ * ⚠ THIS IS PROVENANCE, NOT A PIN — and it is deliberately NOT rewritten when the installed build moves.
+ * Found in review 2026-08-06: the file said "2.1.222" seven times while the installed binary was 2.1.223,
+ * and a file whose central thesis is *undetectable upstream drift* had drifted without noticing. The
+ * dishonest repair is a find-and-replace, which would claim measurements that were never re-taken. The
+ * honest one is below: keep the provenance truthful, and make the divergence itself something a test
+ * looks at rather than something a reader has to spot.
+ */
+const MEASURED_AT = "2.1.222";
+
 const DOCTOR_TIMEOUT_MS = 60_000;
+/** The CHILD's own bound — strictly below the per-test one, so the spawn dies before the runner reaps it. */
+const DOCTOR_SPAWN_TIMEOUT_MS = 30_000;
 
 /**
  * Gate (g)'s BEHAVIOURAL step: hand a settings file to the harness's OWN permission-rule parser and read
@@ -381,6 +439,16 @@ function doctorVerdict(bin: string, settingsJson: string): DoctorVerdict {
       cwd: dir,
       stdout: "pipe",
       stderr: "pipe",
+      // ⚠ THE CHILD GETS ITS OWN TIMEOUT, and `DOCTOR_TIMEOUT_MS` alone was never one. Found in review
+      // 2026-08-06: that constant is bun's PER-TEST timeout (the third argument to `test()`), so a doctor
+      // that hangs was not bounded at all — it ran until bun SIGTERMed the whole process group, which is
+      // the exact failure the record claimed to have fixed, moved from 5s to 60s rather than closed. The
+      // spawn needs its own bound, set below the test's so the child dies first and the assertion reports
+      // a timeout instead of the runner killing unrelated files alongside it.
+      timeout: DOCTOR_SPAWN_TIMEOUT_MS,
+      // …and stdin is closed, never inherited: a child that blocks on the runner's stdin hangs forever
+      // and looks identical to a slow one.
+      stdin: "ignore",
       // ⚠ AN EXPLICIT MINIMAL ENV, NEVER `{...process.env}`. Bun runs every test file in ONE process, so
       // a `process.env` spread inherits whatever an earlier file mutated — measured: with the spread,
       // these three assertions passed when this file ran alone and failed under the full suite, because
@@ -573,8 +641,15 @@ describe("apply gate (f) — the committed permission boundary exists and names 
     // clone with no setup step. Parking an inert list beside a load-bearing one invites the reader to
     // assume both are live.
     const settings = readSettings();
-    expect(Object.keys(settings)).toEqual(["permissions"]);
-    expect(Object.keys(settings.permissions ?? {})).toEqual(["deny"]);
+    // ⚠ THE ASSERTION IS "NO `allow`", NOT "NOTHING ELSE EVER". Amended 2026-08-06 after review: the
+    // order-sensitive whole-key-set form froze the repo's PROJECT-WIDE settings file from a notekit test.
+    // Adding `$schema`, a `hooks` block or an `env` var — none of which has anything to do with notekit —
+    // reddened this suite, and a red with no defect behind it is the documented precondition for someone
+    // deleting the gate. What actually matters is what the comment below says: an inert `allow` list must
+    // not sit beside the live `deny` one. That is asserted directly now, and unrelated keys are free.
+    expect(Object.hasOwn(settings, "permissions")).toBe(true);
+    expect(Object.hasOwn(settings.permissions ?? {}, "allow")).toBe(false);
+    expect(Object.hasOwn(settings.permissions ?? {}, "deny")).toBe(true);
     expect(Object.hasOwn(settings.permissions ?? {}, "allow")).toBe(false);
   });
 
@@ -639,6 +714,29 @@ describe("apply gate (f) — the committed permission boundary exists and names 
 // The ONLY gate that consults an external binary, and the only one that may SKIP.
 
 describe("apply gate (b) — the gate key is still spelled the way the INSTALLED harness spells it", () => {
+  test("the installed build may move past MEASURED_AT — but not past the anchors it was measured on", () => {
+    // ⚠ WHAT THIS IS FOR. Every "measured" note in this file was taken at MEASURED_AT; the installed
+    // build moved to 2.1.223 without anything noticing, in a file whose whole subject is drift nobody
+    // notices. This does NOT fail on a version bump — that would redden on every harness update and buy
+    // nothing. It fails when a bump takes one of the three primitives with it, which is the event the
+    // annotations actually depend on. On a bump the version is REPORTED, so the drift is visible in the
+    // run rather than only in a comment nobody re-reads.
+    const bin = resolveBinary();
+    if (bin === null) {
+      console.warn("[apply-gate b] SKIP: `claude` is not on PATH — version/anchor drift unverified");
+      expect(true).toBe(true);
+      return;
+    }
+    const v = Bun.spawnSync({ cmd: [bin, "--version"], stdout: "pipe" }).stdout.toString().trim();
+    if (!v.startsWith(MEASURED_AT)) {
+      console.warn(`[apply-gate b] installed ${v} ≠ measured ${MEASURED_AT} — re-checking anchors`);
+    }
+    const strs = Bun.spawnSync({ cmd: ["strings", "-a", bin], stdout: "pipe" }).stdout.toString();
+    for (const anchor of [GATE_KEY, "userTypedThisTurn", ...DENY_ANCHORS]) {
+      expect(strs).toContain(anchor);
+    }
+  });
+
   /**
    * The one schema line satisfying BOTH anchors.
    *
@@ -828,12 +926,27 @@ describe("apply gate (d) — the split IS the gate, and the gated body handles a
     expect(countOf(applyText, GATE_KEY)).toBe(1);
   });
 
-  test("AC #2 — the apply flag is named ONLY on the gated surface: 0 / 0 / ≥1", () => {
-    // A gated surface that never names the flag it gates is a gate over nothing. The two zeroes are
-    // 2.3's AC #4d, re-asserted here as a regression: 2.4 must not have leaked the flag sideways.
+  test("AC #2 — the apply flag is named ONLY on the gated surface and the executor's own prohibition", () => {
+    // A gated surface that never names the flag it gates is a gate over nothing. The PREVIEW zero is
+    // 2.3's AC #4d and stays absolute: that surface is model-invocable, so the flag must not reach it.
     expect(countOf(previewText, APPLY_FLAG)).toBe(0);
-    expect(countOf(agentText, APPLY_FLAG)).toBe(0);
     expect(countOf(applyText, APPLY_FLAG)).toBeGreaterThanOrEqual(1);
+
+    // ⚠ THE AGENT ZERO WAS WRONG AND IS NOW SCOPED. Amended 2026-08-06 after review: the agent is the
+    // EXECUTOR, not an invocation surface, and forbidding it the flag outright made its only honest
+    // contract unwritable. It was reconciled instead by a general clause ("the posture was authorized by
+    // the human who typed it") — which asserts something a forked run cannot verify, and which a
+    // model-authored spawn prompt satisfies exactly as well as a human one. Naming the flag is what lets
+    // the prohibition be SPECIFIC ("you never write `--apply` yourself") instead of a posture inference.
+    // So the flag is permitted here ONLY inside the posture section, and only alongside that prohibition.
+    const posture = sectionOf(agentText, "The posture is the invocation's, never yours");
+    expect(posture).not.toBe("");
+    expect(countOf(agentText, APPLY_FLAG)).toBe(countOf(posture, APPLY_FLAG));
+    expect(countOf(posture, APPLY_FLAG)).toBeGreaterThanOrEqual(1);
+
+    // The prohibition itself, and the ban on inferring authorization — both load-bearing, both asserted.
+    expect(posture).toMatch(/never write `--apply` yourself/);
+    expect(posture).toMatch(/[Dd]o not reason about who authorized/);
   });
 
   test("AC #2 — the estate has exactly three notewright-facing surfaces: 2 skills + 1 agent", () => {
@@ -915,9 +1028,17 @@ describe("apply gate (d) — the split IS the gate, and the gated body handles a
       const parts = l.split(/\s+/);
       const at = parts.indexOf("--config");
       expect(at).toBeGreaterThan(-1);
-      expect(parts[at + 1]).toBe("$1");       // substituted, never a `<config>` placeholder
+      // ⚠ QUOTED, and the quotes are now REQUIRED rather than tolerated. Amended 2026-08-06 after review:
+      // the bare `$0`/`$1` forms word-split on a path containing spaces and hand extra argv to a WRITE
+      // command; a leading-dash path becomes a flag. The body also says to run its commands exactly as
+      // written, so a careful agent would not have added quotes the body omitted.
+      expect(parts[at + 1]).toBe('"$1"');      // substituted AND quoted, never a `<config>` placeholder
     }
     expect(applyText).not.toContain("--config <config>");
+    // Neither positional may appear unquoted in a runnable line — that is the whole of the fix above.
+    for (const l of shell) {
+      expect(l).not.toMatch(/(?<!")\$[01](?!")/);
+    }
     // Every command it shows is a `std` command — it shells the CLI and edits nothing itself.
     expect(shell.some((l) => l.includes("notekit capabilities"))).toBe(true);
     expect(shell.some((l) => l.includes(`notekit render`) && l.includes(APPLY_FLAG))).toBe(true);
@@ -1152,6 +1273,41 @@ describe("apply gate (e) — preview leaves the fixture byte-identical; apply do
     return { dir, note, cfg, decoy };
   }
 
+  test("SM-2 — …and the same holds on the `--json` shape the SKILL actually runs", () => {
+    // ⚠ THE SHAPE GAP THIS CLOSES. Found in review 2026-08-06: every gate (e) assertion ran the CLI
+    // WITHOUT `--json`, while all three commands the apply body authors carry it. So the gate proved
+    // "preview leaves bytes identical; apply does not" on a code path the gated surface never takes, and
+    // any divergence on the JSON path — envelope, exit handling, the `error.code` the agent branches on —
+    // sat outside the only gate claiming to cover it.
+    const f = makeFixture();
+    try {
+      const before = fingerprint(f.dir);
+      const preview = runCli(["notekit", "render", f.note, "--config", f.cfg, "--at", ISO, "--json"]);
+      expect(preview.exitCode).toBe(0);
+      const mid = fingerprint(f.dir);
+      expect(mid.listing).toEqual(before.listing);
+      expect(mid.bytes).toEqual(before.bytes);
+      expect(mid.mtime).toEqual(before.mtime);
+      // The envelope the agent is told to branch on is really there, and really says it wrote nothing.
+      const env = JSON.parse(preview.stdout) as { ok: boolean; value?: Record<string, unknown> };
+      expect(env.ok).toBe(true);
+      expect(env.value?.written).not.toBe(true);
+
+      // …and the apply run on the SAME shape does change the note, so the pair is a contrast, not a
+      // matched pair of no-ops that would pass if the writer were removed entirely.
+      const applied = runCli(["notekit", "render", f.note, "--config", f.cfg, "--at", ISO, APPLY_FLAG, "--json"]);
+      expect(applied.exitCode).toBe(0);
+      const after = fingerprint(f.dir);
+      expect(after.listing).toEqual(before.listing);   // no file created or removed
+      expect(after.bytes).not.toEqual(before.bytes);   // …but the note's bytes moved
+      const wrote = JSON.parse(applied.stdout) as { ok: boolean; value?: Record<string, unknown> };
+      expect(wrote.ok).toBe(true);
+      expect(wrote.value?.written).toBe(true);
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
   test("SM-2 — the preview run leaves every byte, the listing and every mtime identical", () => {
     const f = makeFixture();
     try {
@@ -1278,6 +1434,32 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
     expect(paths.filter((p) => !ALLOWLIST.includes(p))).toEqual([]);
   });
 
+  test("AC #6 — …and the same holds for what this branch COMMITTED, not only its working tree", () => {
+    // ⚠ THE COMPANION THE ORIGINAL WAS MISSING. Found in review 2026-08-06: the working-tree form above
+    // is vacuous the moment the work is committed — `git status` returns nothing on a clean tree, so the
+    // assertion becomes `expect([]).toEqual([])` and passes whatever the commits touched. The comment
+    // beside it rejected `git diff <base>..HEAD` for being vacuous PRE-commit and was right; the answer
+    // is both forms, not either. Together they bite in both states, which is what the claim needs.
+    const base = Bun.spawnSync({ cmd: ["git", "merge-base", "main", "HEAD"], cwd: REPO, stdout: "pipe" });
+    if (base.exitCode !== 0) {
+      console.warn("[apply-gate AC#6] SKIP: no `main` to diff against — committed-range check unverified");
+      expect(true).toBe(true);
+      return;
+    }
+    const merge = base.stdout.toString().trim();
+    const proc = Bun.spawnSync({
+      cmd: ["git", "diff", "--name-only", "-z", `${merge}..HEAD`, "--", "src/", "scripts/"],
+      cwd: REPO,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(proc.exitCode).toBe(0);
+    const changed = proc.stdout.toString().split("\0").filter((p) => p !== "");
+    expect(changed.filter((p) => !ALLOWLIST.includes(p))).toEqual([]);
+    // …and it is not vacuous the other way either: this branch really did commit under `src/`.
+    expect(changed.length).toBeGreaterThan(0);
+  });
+
   test("AC #6 — the allowlist is exact paths, and an UNLISTED dirty path still reddens", () => {
     // The proof that the amendment widened nothing: a path under `src/` that is not enumerated is a
     // finding, whatever its name and however close it sits to a listed one.
@@ -1291,9 +1473,13 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
   test("AC #6 — this story adds no `src/**` SOURCE file: the notekit non-test count is unchanged", () => {
     // Its one new `src/` file is a `*.test.ts`, which is why the six `check:*` gates should report
     // counts identical to the post-2.3 tree.
-    const nonTest = readdirSync(join(REPO, "src", "notekit"))
+    // ⚠ RECURSIVE. Amended 2026-08-06 after review: the non-recursive listing counted 7 and never saw the
+    // 5 sources under `src/notekit/edge/`, so a new source file added THERE left the count at 7 and this
+    // assertion passed. The directory it was blindest to is the one the edge slice actually lives in.
+    const nonTest = readdirSync(join(REPO, "src", "notekit"), { recursive: true })
+      .map(String)
       .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
-    expect(nonTest.length).toBe(7);
+    expect(nonTest.length).toBe(12);
     expect(existsSync(join(REPO, "src", "notekit", "notewright-apply-gate.ts"))).toBe(false);
   });
 });
