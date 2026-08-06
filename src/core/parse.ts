@@ -40,33 +40,86 @@ function unquote(s: string): string {
   return s;
 }
 
+/** The one pattern that decides where a leading frontmatter block starts and ends. */
+const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
+
 /**
- * Parse a leading YAML frontmatter block (`---` … `---`) into a flat record. Returns `{}` when there
- * is no block. Tolerates both LF and CRLF line endings. Each line splits on its FIRST `:` (so a value
- * may contain colons); an `[a, b]` value becomes a `string[]`, and surrounding quotes are stripped
- * from scalars and array elements. Lines without a key are skipped. Only this flat array/quote
- * heuristic — richer YAML (quoted commas inside arrays, nesting) stays in the caller.
+ * A leading frontmatter block: its parsed fields, and where it ends in the source.
+ *
+ * `end` is the offset just past the closing delimiter's LINE TERMINATOR — i.e. the offset a caller
+ * inserts at to land immediately after the block — and `0` when there is no block at all.
  */
-export function parseFrontmatter(text: string): Record<string, string | string[]> {
-  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!match) return {};
-  const result: Record<string, string | string[]> = {};
-  for (const line of match[1].split(/\r?\n/)) {
+export type FrontmatterBlock = {
+  fields: Record<string, string | string[]>;
+  end: number;
+};
+
+/**
+ * Parse a leading YAML frontmatter block AND report where it ends, from ONE match.
+ *
+ * 🔴 THE `end` HALF EXISTS BECAUSE A SECOND REGEX FOR IT IS A CORRUPTION BUG, NOT A DUPLICATION NIT.
+ * A caller that inserts text "after the frontmatter" needs the block's end, and computing it with its
+ * own pattern means two notions of where frontmatter stops. Measured on
+ * `"---\ntitle: Hello\nnk-type: card\n---EXTRA prose\n"` against a caller-side
+ * `/^---\r?\n[\s\S]*?\r?\n---[ \t]*(\r\n|\r|\n|$)/` — which looks equivalent and is not:
+ *
+ *   this parser  → `{title, nk-type}`   (a block, with an opt-in in it)
+ *   that pattern → NO MATCH, offset `0` (no block at all)
+ *
+ * The caller then inserted at `0`, putting its content BEFORE the opening `---`. The note stopped
+ * being frontmatter-led, `parseFrontmatter` on the result returned `{}`, and the opt-in the note
+ * carried was silently gone — while every other check still passed. One match, one answer, no gap.
+ *
+ * ⚠ THE CLOSING DELIMITER IS THE WHOLE LINE, glue included. This parser already treats
+ * `---EXTRA prose` as the closing delimiter (the body capture stops at `\n---`), so `end` runs past
+ * that entire line rather than past the three dashes. Inserting mid-line would split a line the note's
+ * author wrote; inserting after it preserves every byte and still lands outside the block.
+ *
+ * Returns `{}` and `0` when there is no block. Tolerates LF, CRLF and lone CR line endings. Each line
+ * splits on its FIRST `:` (so a value may contain colons); an `[a, b]` value becomes a `string[]`, and
+ * surrounding quotes are stripped from scalars and array elements. Lines without a key are skipped.
+ * Only this flat array/quote heuristic — richer YAML (quoted commas inside arrays, nesting) stays in
+ * the caller.
+ */
+export function parseFrontmatterBlock(text: string): FrontmatterBlock {
+  const match = FRONTMATTER.exec(text);
+  if (!match) return { fields: {}, end: 0 };
+
+  // Walk from the closing `---` to the end of its line, then past that line's terminator.
+  let end = match[0].length;
+  while (end < text.length && text[end] !== "\n" && text[end] !== "\r") end++;
+  if (text[end] === "\r") end += text[end + 1] === "\n" ? 2 : 1;
+  else if (text[end] === "\n") end += 1;
+
+  const fields: Record<string, string | string[]> = {};
+  for (const line of match[1]!.split(/\r?\n/)) {
     const colon = line.indexOf(":");
     if (colon <= 0) continue; // no key → skip
     const key = line.slice(0, colon).trim();
     const raw = line.slice(colon + 1).trim();
     if (raw.startsWith("[") && raw.endsWith("]")) {
-      result[key] = raw
+      fields[key] = raw
         .slice(1, -1)
         .split(",")
         .map((s) => unquote(s.trim()))
         .filter((s) => s.length > 0);
     } else {
-      result[key] = unquote(raw);
+      fields[key] = unquote(raw);
     }
   }
-  return result;
+  return { fields, end };
+}
+
+/**
+ * Parse a leading YAML frontmatter block (`---` … `---`) into a flat record. Returns `{}` when there
+ * is no block.
+ *
+ * The fields half of {@link parseFrontmatterBlock}, kept as the name every existing caller uses. A
+ * caller that also needs to know where the block ENDS must take the block form — never a second
+ * pattern of its own. See that function for what a second pattern cost.
+ */
+export function parseFrontmatter(text: string): Record<string, string | string[]> {
+  return parseFrontmatterBlock(text).fields;
 }
 
 /**

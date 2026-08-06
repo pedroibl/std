@@ -914,9 +914,25 @@ describe("notewright dispatch — AC #4c: nothing under src/ or scripts/ moved",
   // scan the moment it exists. This EXTENDS the enumeration and does not relax it: an unlisted dirty path
   // under `src/` or `scripts/` still reddens. It is deliberately NOT a prefix like `src/notekit/notewright-*`
   // — a permissive pattern is how this assertion would stop being a gate.
+  // ⚠ AMENDMENT 2, Story 2.5. SIX exact paths appended — author mode adds `createFence` to the codec
+  // (+ its tests), exports it from the barrel, and forks row 4 across the two CLI surfaces (+ the write
+  // tests). Again an EXTENSION and not a relaxation: an unlisted dirty path under `src/` or `scripts/`
+  // still reddens, and none of these is a prefix.
   const WORKING_TREE_ALLOWLIST = [
     "src/notekit/notewright-dispatch.test.ts",
     "src/notekit/notewright-apply-gate.test.ts",
+    "src/notekit/core-fence.ts",
+    "src/notekit/core-fence.test.ts",
+    "src/notekit/index.ts",
+    "src/cli/notekit-read.ts",
+    "src/cli/notekit-write.ts",
+    "src/cli/notekit-write.test.ts",
+    // ⚠ AMENDMENT 3, Story 2.5 review follow-up (cross-vendor F2). The insertion offset moved into
+    // `core` as `parseFrontmatterBlock`, so the fields and the block END come from ONE match — a
+    // caller-side second pattern silently wrecked a note with a glued closing delimiter.
+    "src/core/parse.ts",
+    "src/core/parse.test.ts",
+    "src/core/index.ts",
   ];
 
   test("COUNTERFACTUAL 12 — a rename parses to BOTH its paths, not to `old -> new`", () => {

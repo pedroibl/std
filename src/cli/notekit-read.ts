@@ -32,11 +32,12 @@ import {
   dispatchAsync,
   flagValue,
   hasFlag,
-  parseFrontmatter,
+  parseFrontmatterBlock,
   slugify,
 } from "../core/index";
 import {
   capabilities,
+  createFence,
   locateFence,
   noteToRenderSpec,
   parseFenceBody,
@@ -49,6 +50,7 @@ import {
   type NoteTypeRegistry,
   type RenderSpec,
   type RenderSpecErrorCode,
+  type Rubric,
 } from "../notekit/index";
 import { readStdinJson } from "../stdio/index";
 
@@ -164,11 +166,17 @@ function humanValue(value: unknown): string {
 
   if (typeof record.html === "string") {
     const diff = typeof record.diff === "string" ? record.diff : "";
+    // ⚠ THE GAP ADVISORY IS RENDERED FROM THE SAME `gaps` ARRAY THE JSON ENVELOPE CARRIES, in the ONE
+    // printer — this is where FR-9's "reports the gap in the preview" is observable, and nothing in
+    // `core` will produce it. An exit code alone tells the human nothing about WHICH field to add. A
+    // second printer for the human form is exactly how the two modes would drift.
+    const gaps = Array.isArray(record.gaps) ? record.gaps.map(String) : [];
+    const advisory = gaps.length === 0 ? "" : `\n\n${gaps.map((k) => `⚠ no value for '${k}'`).join("\n")}`;
     // The diff's EMPTINESS is the FR-16 parity signal — reported here, never enforced. Enforcement is
     // `notekit lint`, Story 3.1.
     return diff.length === 0
-      ? `${record.html}\n\n✓ fence body is canonical (FR16 parity holds)`
-      : `${record.html}\n\n${diff}`;
+      ? `${record.html}\n\n✓ fence body is canonical (FR16 parity holds)${advisory}`
+      : `${record.html}\n\n${diff}${advisory}`;
   }
 
   if (Array.isArray(record.noteTypes)) {
@@ -318,8 +326,203 @@ export type RenderPlan = {
  */
 export type PlanOutcome =
   | { kind: "plan"; plan: RenderPlan }
+  /** Story 2.5 — an opted-in note with no fence, and a fence that can be seeded from its frontmatter. */
+  | { kind: "seed"; seed: SeedPlan }
   | { kind: "usage" }
   | { kind: "error"; error: unknown };
+
+// ── author mode: the frontmatter → fence derivation (Story 2.5) ─────────────────────────────────
+
+/**
+ * The rubric's keys, in render order: the title first, then every declared field. The ONE notion of
+ * "what this note type wants" — the derivation projects the fields and collects the gaps in ONE pass
+ * over it, so a derived record and its gap report can never disagree about what was being looked for.
+ *
+ * ⚠ THE GUARD IS A RUNTIME GUARD, NOT A COMPILER ONE. The rubric arrives from `resolveTemplate` over a
+ * `--config` module the CLI `await import`s, so tsc's `Rubric` type is a claim about a value it never
+ * saw. Two skips are applied here rather than at each caller:
+ *
+ *   `nk-type` — the OPT-IN SIGNAL. NK-1.8 rule 2 pins routing to the fence INFO STRING, so writing it
+ *   into the body duplicates the signal into a region the dispatcher never reads and pollutes the
+ *   rubric field set. A naïve `serializeFenceBody(parseFrontmatter(text))` does exactly that.
+ *
+ *   the EMPTY key — an FR-16 requirement, not tidiness. `parseFrontmatter` KEEPS a trim-empty key (a
+ *   ` : orphan` line yields `""`); `parseFenceBody` SKIPS it. So an empty key riding through would
+ *   serialize to `: orphan`, which the parser then drops — `serialize(parse(body)) !== body` on a fence
+ *   this story just created, failing Story 3.1's parity gate. The rubric projection means only a rubric
+ *   key can reach the output, so an empty one is a malformed caller-local config, and skipping is the
+ *   codec's own answer for a line it cannot represent (normalization rule 2).
+ */
+function rubricKeys(rubric: Rubric): string[] {
+  if (rubric === null || typeof rubric !== "object" || !Array.isArray(rubric.fields)) {
+    throw new Error("nk-derive: rubric must be an object with a fields array");
+  }
+  const wanted = [rubric.titleField, ...rubric.fields.map((field) => field.key)];
+  return wanted.filter((key) => key !== OPT_IN_KEY && key !== "");
+}
+
+/**
+ * 🔴 THE ONE PLACE FRONTMATTER INFLUENCES WHAT A FENCE SAYS (NK-1.8 rule 3). Everything downstream is
+ * the render path unchanged: `noteToRenderSpec(fields, rubric, injected)` → `validate` →
+ * `renderCardHtml`. A second frontmatter read in the render or write path forks the seam rule 1 exists
+ * to keep single — "`core` never reads frontmatter for card field VALUES".
+ *
+ * ⚠ IT TAKES THE PARSED RECORD, NOT THE MARKDOWN, and that is what makes AC #1's gate reach its stated
+ * value rather than a softened one. The first shape took `markdown: string` and parsed it here — which
+ * put a SECOND `parseFrontmatter(` call in the slice beside `renderPlan`'s opt-in read, and the gate
+ * was then written to accept two "because the opt-in read is sanctioned". It is sanctioned, but that
+ * was never the argument: `renderPlan` already holds the whole record when it checks the opt-in, so
+ * threading it costs nothing and the slice reads frontmatter EXACTLY ONCE. A projection over a record
+ * is also the more honest signature — nothing about this function needs note text.
+ *
+ * ⚠ IT LIVES AT THE EDGE, AND THAT IS A SOURCE CONSTRAINT RATHER THAN TASTE. `core-fence.ts` states its
+ * own scope in terms: the lines inside the fence, NEVER the note's YAML frontmatter, and
+ * `parseFrontmatter` "stays the CALLER's tool … outside core". NK-1.8 rule 3 puts only
+ * `serializeFenceBody` in `core`; the frontmatter read and the rubric projection are the caller's.
+ * Promoting it would mean rewriting that SCOPE paragraph a second time and dragging a `src/core/parse`
+ * import into the pure notekit half.
+ *
+ * ⚠ AND IT LIVES IN THIS FILE RATHER THAN `notekit-write.ts`, WHERE THE STORY PLACED IT — because the
+ * story's own reason for the write side ("it has exactly one caller") is false in the shipped design.
+ * The author-mode PREVIEW is a read-surface path and the WRITE is a write-surface path, so it has two,
+ * and THE DEPENDENCY RUNS ONE WAY (`notekit-write.ts` → this file). Composing the block in both places
+ * is exactly the preview/write drift NK-4 rule 3 forbids. This is 2.2's own `errorText` ruling applied
+ * a second time: shared by both halves of one contract ⇒ one owner, in the lower module. It carries
+ * ZERO write tokens, so 2.1's AC #4 gate over this file is unaffected. `notekit-write.ts` re-exports it
+ * so 2.2's imports keep resolving unedited.
+ *
+ * ⚠ THE TWO CODECS ARE NOT INTERCHANGEABLE, though they return the same TypeScript type — which is what
+ * makes `serializeFenceBody(parseFrontmatter(text))` typecheck perfectly and be wrong five ways. Two of
+ * the five are closed in `rubricKeys`; the other three are INHERITED and DECLARED, because "fixing"
+ * them here would break parity rather than restore it:
+ *   1. `parseFrontmatter` STRIPS surrounding quotes; `parseFenceBody` does not (rule 6). So
+ *      `title: "Some: Thing"` derives to `title: Some: Thing`, which re-parses whole (only the first
+ *      `:` splits — rule 7) and is CORRECT. But `name: '[a, b]'` unquotes to the literal `[a, b]`,
+ *      which the fence codec reads back as a TWO-ELEMENT LIST — a type change the round trip cannot
+ *      see. Re-quoting on the way out would make the body non-canonical and break FR-16 parity, which
+ *      Story 3.1 enforces, so the limit is declared rather than papered over.
+ *   2. `serializeFenceBody` drops array-index keys (rule 8) while `parseFrontmatter` keeps them, so a
+ *      frontmatter `1:` derives to nothing. Inherited behaviour, one layer down.
+ *   3. `parseFrontmatter` builds a PLAIN `{}` where `parseFenceBody` builds `Object.create(null)`, so a
+ *      `__proto__:` line hits the prototype SETTER and the key VANISHES, while `fm["toString"]`
+ *      resolves to an inherited FUNCTION on a record that never carried the key. Every read below is
+ *      therefore `hasOwnProperty` — a `if (!fm[k])` required-field check passes on `toString` and fails
+ *      on `__proto__`, both wrong.
+ *
+ * The output is `Object.create(null)` deliberately, mirroring `parseFenceBody`, so a derived record and
+ * a parsed one behave identically downstream. A plain `{}` would reintroduce hazard 3 one layer later
+ * and harder to see.
+ */
+export function deriveFenceFields(
+  frontmatter: Record<string, string | string[]>,
+  rubric: Rubric,
+): DerivedFields {
+  const wanted = rubricKeys(rubric);
+  const fields: FenceFields = Object.create(null);
+  const gaps: string[] = [];
+  for (const key of wanted) {
+    if (!Object.prototype.hasOwnProperty.call(frontmatter, key)) {
+      gaps.push(key);
+      continue;
+    }
+    // ⚠ THE CAST IS UNSOUND AND KEEPS ITS GUARD FOR A RUNTIME REASON. `parseFrontmatter`'s return type
+    // says `string | string[]`, but the record is a plain `{}` and the value came from arbitrary note
+    // text; the `hasOwnProperty` check above is what makes the read sound. Do not delete it because
+    // tsc is happy — tsc never saw the note.
+    const value = frontmatter[key] as string | string[];
+    // PRESENT-BUT-EMPTY is a gap on the same footing as absent: the human still has to fill it in, and
+    // `validate` will not tell them — a non-title empty is `ok:true` with `value: ""`. It is still
+    // DERIVED, because omitting it would change what the card renders (no row versus an empty row).
+    if (value === "") gaps.push(key);
+    fields[key] = value;
+  }
+  return { fields, gaps };
+}
+
+/**
+ * The derivation's two outputs, from ONE frontmatter read.
+ *
+ * 🔴 THE GAPS RIDE THE SAME PASS AS THE FIELDS, AND THAT IS THE POINT. A separate `rubricGaps(markdown,
+ * rubric)` was the first shape and it re-read the frontmatter — a SECOND read in the very path AC #1
+ * exists to keep single, planted by the function whose job was to keep it single. It also gave "the
+ * rubric's keys" two notions that could drift on the first edit to either. One pass, one read, one
+ * notion.
+ *
+ * ⚠ `gaps` IS AN ADVISORY, NEVER A REFUSAL, and the PRD pins that: "a field absent in the note is
+ * omitted gracefully, not rendered as `undefined`" (FR-5). `validate` agrees by construction — it
+ * rejects only a missing or empty TITLE (`requireNonEmptyString`); an absent non-title rubric key
+ * yields no row and an empty one yields an empty row, both `ok:true`. So this is where FR-9's "reports
+ * the gap in the preview" actually lives; nothing in `core` will produce it, and it never changes an
+ * exit code.
+ */
+export type DerivedFields = { fields: FenceFields; gaps: string[] };
+
+/**
+ * 🔴 THE NEWLINE CONTRACT, IN ONE FUNCTION. Getting it wrong destroys the fence on EVERY apply.
+ *
+ * The two sides do not meet: a located body CARRIES its trailing newline whenever it is non-empty
+ * (`locateFence`'s `[bodyStart, bodyEnd)` excludes both delimiter LINES, and a line owns its own
+ * terminator), while `serializeFenceBody` is a `.join("\n")` and emits NONE. Splicing raw codec output
+ * therefore glues the closing ``` onto the last `key: value` line, and the fence stops being a fence —
+ * the epic's headline promise, inverted.
+ *
+ * The empty case must stay `""` and not `"\n"`: an empty record has to splice back to
+ * `bodyStart === bodyEnd`, i.e. to a fence whose two delimiter lines are adjacent.
+ *
+ * ⚠ IT MOVED HERE AT STORY 2.5, FROM `notekit-write.ts`, FOR THE REASON 2.2 STATED WHEN IT PUT IT
+ * THERE — "it has exactly one caller". It now has two: the author-mode preview (this file) composes
+ * the proposed block, and the write composes the bytes it lands. One contract, two halves, dependency
+ * running one way ⇒ ONE owner, in the lower module. A second copy is precisely how a preview and the
+ * write that follows it drift, which is what NK-4 rule 3 forbids. `notekit-write.ts` RE-EXPORTS it, so
+ * every 2.2 import and every 2.2 test resolves unedited — the additive proof that this is a move and
+ * not a rewrite. It is EXPORTED for the same reason 2.2 exported it: an inline expression inside the
+ * write sequence would be untestable, and would leave the negative case (raw output breaks the fence)
+ * with nothing to call.
+ */
+export function composeBody(fields: FenceFields): string {
+  if (typeof fields !== "object" || fields === null || Array.isArray(fields)) {
+    // (d) of the four input classes: a non-object never reaches the codec. The writer's only source of
+    // fields is `parseFenceBody` output or `deriveFenceFields` output, both records — so this cannot
+    // fire from the CLI, and it FAILS LOUD rather than emitting text if a later caller hands it
+    // something else.
+    throw new Error(`nk-fence compose: fields must be a record, got ${describeNonRecord(fields)}`);
+  }
+  const serialized = serializeFenceBody(fields);
+  return serialized === "" ? "" : `${serialized}\n`;
+}
+
+/** A readable name for whatever was handed to `composeBody` in place of a record. */
+function describeNonRecord(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  return typeof value;
+}
+
+/** An nk-fence OPENING line, anywhere in the note — the check `locateFence`'s `null` cannot make. */
+const FENCE_OPENING_LINE = /^[ \t]*`{3,}[ \t]*nk-[a-z]+[ \t]*$/m;
+
+/**
+ * Everything author mode computes for a note that opted in and has no fence — the proposed block, the
+ * spec it was validated against, and the rubric gaps the human still has to fill in.
+ *
+ * ONE COMPUTATION, TWO CALLERS, exactly as `RenderPlan` is: `render` previews it and `render --apply`
+ * creates from it. `block` is the bytes both of them use — the preview prints it and the write inserts
+ * it — so they cannot disagree.
+ */
+export type SeedPlan = {
+  notePath: string;
+  noteText: string;
+  /** The authored info-string type — `card`, not `nk-card`. */
+  type: string;
+  fields: FenceFields;
+  spec: RenderSpec;
+  html: string;
+  /** The WHOLE proposed block, delimiters included: there is no current body to diff against. */
+  block: string;
+  insertAt: number;
+  /** Rubric keys the note leaves absent or empty. Information, never a refusal (FR-5). */
+  gaps: string[];
+};
 
 /**
  * Compute the render plan: rows 1–6 of the exit table, in order, without printing a single result.
@@ -327,6 +530,11 @@ export type PlanOutcome =
  * Extracted from `runRender` at Story 2.2 with NO behaviour change — the usage lines, the codes, the
  * messages and the ORDER of the checks are 2.1's, byte for byte, and 2.1's tests staying green
  * UNEDITED is the proof of that.
+ *
+ * ⚠ STORY 2.5 NARROWED ROW 4 AND ADDED NO ROW. `locateFence → null` used to be one outcome; it is now
+ * a fork whose refusal arm keeps 2.1's code, message and exit VERBATIM. See `seedPlan` for the three
+ * conditions that have to hold before the other arm is taken, and why each one is a refusal rather
+ * than an invention.
  */
 export async function renderPlan(
   argv: string[],
@@ -358,7 +566,13 @@ export async function renderPlan(
 
   // PRESENCE of a non-empty `nk-type` string, nothing more — the routing type comes from the fence, so
   // a disagreement between the two is not an error (NK-1.8 rule 2, the edge's `hasOptIn` rule).
-  const frontmatter = parseFrontmatter(source);
+  //
+  // 🔴 THE SLICE'S ONLY FRONTMATTER READ. The record threads from here to the opt-in check AND to
+  // `deriveFenceFields`; the block's `end` threads to the insertion point. Every other notion of "what
+  // the frontmatter says" or "where it stops" is derived from THIS ONE MATCH — a second read is what
+  // AC #1 forbids, and a second end-of-block pattern is what silently wrecked a note (see
+  // `parseFrontmatterBlock`).
+  const { fields: frontmatter, end: frontmatterEnd } = parseFrontmatterBlock(source);
   const optIn = Object.prototype.hasOwnProperty.call(frontmatter, OPT_IN_KEY)
     ? frontmatter[OPT_IN_KEY]
     : undefined;
@@ -372,8 +586,32 @@ export async function renderPlan(
 
   const fence = locateFence(source);
   if (fence === null) {
-    // row 4
-    return { kind: "error", error: { code: "nk-no-fence", message: "note has no nk-fence" } };
+    // row 4 — FORKED at Story 2.5. `seedPlan` returns `null` for every case that is NOT authorable,
+    // and each of those falls through to 2.1's refusal below, byte for byte.
+    const seed = seedPlan(
+      notePath,
+      source,
+      optIn,
+      frontmatter,
+      frontmatterEnd,
+      registry,
+      at.value ?? deps.now?.() ?? new Date().toISOString(),
+    );
+    if (seed !== null) return seed;
+    // ⚠ THE MESSAGE DISTINGUISHES THE TWO REFUSAL ARMS; THE CODE DOES NOT, DELIBERATELY. A second code
+    // would be a widening SM-C2 counts against, and 2.3's/2.4's error-code inventories pin the count.
+    // But "note has no nk-fence" alone is a dead end for the arm author mode declined: the reader needs
+    // to know whether the note is malformed or simply has nothing to seed from. Message text is not in
+    // any sibling's inventory, so this costs nothing and answers the question.
+    return {
+      kind: "error",
+      error: {
+        code: "nk-no-fence",
+        message: FENCE_OPENING_LINE.test(source)
+          ? "note has no nk-fence — an opening delimiter is present but never closed, so nothing was created over it"
+          : "note has no nk-fence, and its frontmatter answers no key of the note type's rubric — nothing to seed one from",
+      },
+    };
   }
 
   const template = resolveTemplate(fence.type, registry);
@@ -418,6 +656,131 @@ export async function renderPlan(
 }
 
 /**
+ * AUTHOR MODE — seed a fence for an opted-in note that has none (FR-8 half ii, NK-1.8 rule 3, NK-4
+ * rule 2's one allowed structural add). Returns `null` when the note is NOT authorable, and every
+ * `null` falls through to 2.1's `nk-no-fence` refusal unchanged.
+ *
+ * ⚠ THERE IS NO FLAG, AND THAT IS A CONSEQUENCE RATHER THAN A FLOURISH. A `--create`/`--author` flag
+ * is a `SURFACE` edit, a `FROZEN_HELP` re-freeze, and a write-surface widening SM-C2 counts against —
+ * and Story 2.4's gated apply surface pins the literal command a human types, which already reaches
+ * here. Author mode is selected by the NOTE'S STATE.
+ *
+ * THREE CONDITIONS, EACH A REFUSAL WHEN IT FAILS:
+ *
+ *   1. 🔴 THE NOTE CARRIES NO nk-FENCE OPENING LINE AT ALL. `locateFence` returns `null` for "no fence"
+ *      AND for "an UNTERMINATED fence", and it cannot tell the caller which. Creating a second fence in
+ *      a note that already has an unterminated opening run would produce two opening delimiters and no
+ *      matching close — CORRUPTION, from the one operation this epic allows to add structure. So the
+ *      check is made independently, on the raw text, and an unterminated fence stays `nk-no-fence`.
+ *
+ *   2. THE OPT-IN TYPE RESOLVES TO A REGISTERED TEMPLATE. There is no fence, so the routing type is
+ *      being AUTHORED, and its value is the `nk-type:` frontmatter — the ONE place that is true (in the
+ *      transform path the routing type is the fence info string, NK-1.8 rule 2). An unregistered type
+ *      is `nk-unknown-type`, 2.1's row 5 code unchanged, NOT an invented rubric and NOT a default
+ *      template: NFR5 generates the capabilities catalog from THIS registry, so a type absent from it
+ *      is one notewright was never told about.
+ *
+ *   3. ⚠ THE FRONTMATTER ANSWERS AT LEAST ONE RUBRIC KEY. A note whose frontmatter carries nothing the
+ *      rubric asks for has NOTHING TO SEED FROM, so there is no fence to author and the honest verdict
+ *      is 2.1's `nk-no-fence` — unchanged, including for the bare `---\nnk-type: card\n---` note that
+ *      2.1's and 2.2's own row-4 fixtures use, which is why both stay green UNEDITED.
+ *      ⚠ THIS CONDITION IS A DECISION THIS STORY MAKES BECAUSE NO SOURCE MAKES ONE, and it is the
+ *      thing that lets row 4 fork at all: the story's stated trigger ("no fence + opt-in present")
+ *      matches those sibling fixtures exactly, so taking it literally would have flipped two sibling
+ *      regressions the story requires to stay green. Emptiness of the derivation is the natural
+ *      discriminator — author mode exists to carry frontmatter INTO a fence, and here there is none to
+ *      carry. It is NOT a required-field check: a note that answers one key and gaps the rest IS
+ *      authored, with the gaps reported (AC #6 row iii), and a note that answers a non-title key but
+ *      gaps the TITLE is authored and then REFUSED by `validate` (row 6) — which is what makes the
+ *      validate-before-write ordering observable at all.
+ *
+ * THE ORDER IS PINNED and it is the ordering proof: derive → `noteToRenderSpec` → `validate` → only on
+ * `ok:true` → compose → `createFence`. Nothing is composed before the spec is validated, so a note
+ * whose title is missing or empty exits `1` through row 6 with the note byte-identical — no fence was
+ * created. If `validate` ran after the write, that note would carry a fence.
+ */
+function seedPlan(
+  notePath: string,
+  source: string,
+  optIn: string,
+  frontmatter: Record<string, string | string[]>,
+  frontmatterEnd: number,
+  registry: NoteTypeRegistry,
+  generatedAt: string,
+): PlanOutcome | null {
+  if (FENCE_OPENING_LINE.test(source)) return null; // 1 — unterminated fence: refuse, never create
+
+  const template = resolveTemplate(optIn, registry);
+  if (template === null) {
+    // 2 — row 5's code, on the authored type rather than a located one
+    return {
+      kind: "error",
+      error: { code: "nk-unknown-type", message: `no template registered for '${optIn}'` },
+    };
+  }
+
+  const { fields, gaps } = deriveFenceFields(frontmatter, template.rubric);
+  if (Object.keys(fields).length === 0) return null; // 3 — nothing to seed from
+
+  const spec = noteToRenderSpec(fields, template.rubric, {
+    id: `nk-${slugify(basename(notePath))}`,
+    generatedAt,
+  });
+
+  const checked = validate(spec);
+  if (!checked.ok) {
+    // row 6 — the RenderSpecError VERBATIM, BEFORE anything is composed. This is the ordering proof.
+    return { kind: "error", error: checked.error };
+  }
+
+  // THE INSERTION POINT IS THE PARSER'S OWN BLOCK END, threaded from the one match `renderPlan` made.
+  // It is never recomputed here: a caller-side pattern for "where the frontmatter stops" disagreed with
+  // the parser on a glued closing delimiter and put the fence BEFORE the opening `---`, destroying the
+  // opt-in on a note every other check had passed. See `parseFrontmatterBlock`.
+  const insertAt = frontmatterEnd;
+  const seeded = createFence(source, optIn, composeBody(fields), insertAt);
+  const located = locateFence(seeded)!;
+
+  return {
+    kind: "seed",
+    seed: {
+      notePath,
+      noteText: source,
+      type: optIn,
+      fields,
+      spec: checked.value,
+      html: renderCardHtml(checked.value),
+      // The block is read back OUT of the seeded note through `locateFence` rather than re-assembled
+      // from its parts, so the bytes the preview prints are the bytes the note will carry — one
+      // computation, and an off-by-one in the framing shows up in the preview instead of on disk.
+      block: seeded.slice(located.blockStart, located.blockEnd),
+      insertAt,
+      gaps,
+    },
+  };
+}
+
+/**
+ * The author-mode payload, in the ONE shape both output modes render from (the rule 2.1 applies to
+ * `capabilities` and 2.2 applies to its diff). `diff` carries the whole proposed block — 2.2's
+ * transform preview diffs the current body against its canonical form, and that diff is meaningless
+ * here because the "before" side is empty. `gaps` is the only key 2.2's payload did not have, and it
+ * is ADDITIVE: no new code, no new flag, no new envelope variant. Without it, FR-9's "reports the gap
+ * in the preview" is unsatisfiable under `--json`, where NK-7 rule 2 makes the envelope the only thing
+ * on stdout.
+ */
+export function seedValue(seed: SeedPlan, written?: boolean): Record<string, unknown> {
+  const value: Record<string, unknown> = {
+    html: seed.html,
+    diff: seed.block,
+    spec: seed.spec,
+    gaps: seed.gaps,
+  };
+  if (written !== undefined) value.written = written;
+  return value;
+}
+
+/**
  * `render <note>` — preview a note as an nk-card and report the round-trip diff. Writes nothing.
  *
  * SEVEN ROWS, THREE RETURNS — the two counts are different things and the docblock used to conflate
@@ -440,6 +803,14 @@ async function runRender(argv: string[], deps: NotekitReadDeps): Promise<number>
   if (outcome.kind === "error") {
     emit({ ok: false, error: outcome.error }, json, log, err);
     return 1; // rows 2–6
+  }
+
+  // AUTHOR MODE, PREVIEW ONLY (Story 2.5, AC #4). `--apply` is opt-in and this path is not it: the
+  // vault is byte-untouched, and this function holds no writer to touch it with. The preview shows the
+  // WHOLE proposed block because there is no current body to diff against.
+  if (outcome.kind === "seed") {
+    emit({ ok: true, value: seedValue(outcome.seed) }, json, log, err);
+    return 0; // row 7
   }
 
   const { html, diff, spec } = outcome.plan;

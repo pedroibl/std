@@ -3,9 +3,23 @@ import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { composeBody, runNotekitApply, type NotekitApplyDeps } from "./notekit-write";
+import {
+  composeBody,
+  deriveFenceFields,
+  runNotekitApply,
+  type NotekitApplyDeps,
+} from "./notekit-write";
 import { errorText, runNotekitRead } from "./notekit-read";
-import { locateFence, parseFenceBody, serializeFenceBody, type FenceFields } from "../notekit/index";
+import {
+  createFence,
+  locateFence,
+  noteToRenderSpec,
+  parseFenceBody,
+  serializeFenceBody,
+  validate,
+  type FenceFields,
+} from "../notekit/index";
+import { parseFrontmatter } from "../core/index";
 import { statMtime } from "../fsx";
 import { stripStringsAndComments } from "../../scripts/lib/specifiers";
 
@@ -680,5 +694,864 @@ describe("AC #4 — nothing writes without --apply", () => {
     expect(stripStringsAndComments(`// notekit-write.ts is mentioned, not imported\n`)).not.toContain(
       "notekit-write",
     );
+  });
+});
+
+// ═══ Story 2.5 — Task 2: deriveFenceFields, the ONE frontmatter→fence derivation ══════════════════
+
+describe("deriveFenceFields — the rubric projection (AC #1)", () => {
+  const RUBRIC = {
+    kind: "card" as const,
+    titleField: "title",
+    fields: [{ key: "role" }, { key: "org", label: "ORG" }],
+  };
+
+  /** Build a note from frontmatter lines. Prose is irrelevant to the derivation and stays constant. */
+  function note(...fm: string[]): string {
+    return ["---", ...fm, "---", "", "Prose."].join("\n");
+  }
+
+  test("the output key set is EXACTLY the rubric's keys ∩ the frontmatter's own keys", () => {
+    const { fields } = deriveFenceFields(parseFrontmatter(note("title: T", "role: r", "org: o", "stray: s")), RUBRIC);
+    expect(Object.keys(fields)).toEqual(["title", "role", "org"]);
+    expect(fields).toEqual({ title: "T", role: "r", org: "o" });
+    // `stray` is in the frontmatter and NOT in the rubric — the projection drops it.
+    expect(Object.prototype.hasOwnProperty.call(fields, "stray")).toBe(false);
+  });
+
+  test("a rubric key absent from the frontmatter yields NO key at all — not an empty one", () => {
+    const { fields } = deriveFenceFields(parseFrontmatter(note("title: T")), RUBRIC);
+    expect(Object.keys(fields)).toEqual(["title"]);
+    // The distinction matters downstream: `noteToRenderSpec` omits an absent key (no row) and writes
+    // an EMPTY row for a present-but-empty one. Conflating them changes what the card renders.
+    expect(Object.prototype.hasOwnProperty.call(fields, "role")).toBe(false);
+  });
+
+  test("⚠ `nk-type` NEVER reaches the fence body, even when the rubric names it", () => {
+    // It is the OPT-IN SIGNAL, and NK-1.8 rule 2 pins routing to the fence INFO STRING. A naïve
+    // `serializeFenceBody(parseFrontmatter(text))` writes `nk-type: card` into the body, duplicating
+    // the signal into a region the dispatcher never reads and polluting the rubric field set.
+    const withOptIn = note("title: T", "nk-type: card", "role: r");
+    expect(Object.keys(deriveFenceFields(parseFrontmatter(withOptIn), RUBRIC).fields)).toEqual(["title", "role"]);
+
+    const pathological = { kind: "card" as const, titleField: "nk-type", fields: [{ key: "nk-type" }] };
+    expect(deriveFenceFields(parseFrontmatter(withOptIn), pathological).fields).toEqual({});
+    expect(serializeFenceBody(deriveFenceFields(parseFrontmatter(withOptIn), pathological).fields)).toBe("");
+  });
+
+  test("an empty rubric key is SKIPPED — ⚠️-3 row 5, and FR-16 parity is why", () => {
+    // `parseFrontmatter` KEEPS a trim-empty key (` : orphan` → `""`); `parseFenceBody` SKIPS it. So an
+    // empty key derived through would serialize to `: orphan`, which the parser then drops —
+    // `serialize(parse(body)) !== body` on a fence this story just created, failing Story 3.1's gate.
+    const orphan = note("title: T", " : orphan");
+    const empties = { kind: "card" as const, titleField: "", fields: [{ key: "" }, { key: "title" }] };
+    expect(Object.keys(deriveFenceFields(parseFrontmatter(orphan), empties).fields)).toEqual(["title"]);
+  });
+
+  test("COUNTERFACTUAL — WITHOUT the empty-key skip, FR-16 parity is FALSE on the created body", () => {
+    // The skip is not decorative. This is what the body would be if the empty key rode through.
+    const unskipped: FenceFields = { "": "orphan", title: "T" };
+    const body = `${serializeFenceBody(unskipped)}\n`;
+    expect(body).toBe(": orphan\ntitle: T\n");
+    expect(`${serializeFenceBody(parseFenceBody(body))}\n`).not.toBe(body); // parity FALSE
+    // …and with the skip, parity holds.
+    const { fields: skipped } = deriveFenceFields(parseFrontmatter(note("title: T", " : orphan")), {
+      kind: "card" as const, titleField: "", fields: [{ key: "" }, { key: "title" }],
+    });
+    const good = `${serializeFenceBody(skipped)}\n`;
+    expect(`${serializeFenceBody(parseFenceBody(good))}\n`).toBe(good);
+  });
+
+  describe("🔴 THE TWO CODECS DISAGREE ON QUOTES — the silent-corruption risk, both cases shipped", () => {
+    test("a colon-bearing quoted scalar SURVIVES the round trip", () => {
+      // `parseFrontmatter` strips the quotes; `parseFenceBody` re-reads the literal, and only the
+      // FIRST colon splits (rule 7) — so the value comes back whole.
+      const { fields } = deriveFenceFields(parseFrontmatter(note('title: "Some: Thing"')), RUBRIC);
+      expect(fields).toEqual({ title: "Some: Thing" });
+      const body = `${serializeFenceBody(fields)}\n`;
+      expect(body).toBe("title: Some: Thing\n");
+      expect(parseFenceBody(body)).toEqual({ title: "Some: Thing" });
+    });
+
+    test("⚠ A DECLARED LIMIT — a quoted bracket-string becomes a LIST, a type change the trip cannot see", () => {
+      // `parseFrontmatter` unquotes `'[a, b]'` to the literal string `[a, b]`; `parseFenceBody` then
+      // reads that back as a two-element list. It is NOT "fixed" by re-quoting on the way out — that
+      // would make the fence body non-canonical and break FR-16 parity, which Story 3.1 enforces.
+      const { fields } = deriveFenceFields(parseFrontmatter(note("title: '[a, b]'")), RUBRIC);
+      expect(fields).toEqual({ title: "[a, b]" }); // still a STRING here
+      const body = `${serializeFenceBody(fields)}\n`;
+      expect(body).toBe("title: [a, b]\n");
+      expect(parseFenceBody(body)).toEqual({ title: ["a", "b"] }); // …a LIST on the way back
+    });
+  });
+
+  test("array-index keys VANISH one layer down, by design (rule 8) — inherited, not a bug here", () => {
+    const indexed = { kind: "card" as const, titleField: "title", fields: [{ key: "1" }] };
+    const { fields } = deriveFenceFields(parseFrontmatter(note("title: T", "1: one")), indexed);
+    expect(Object.prototype.hasOwnProperty.call(fields, "1")).toBe(true); // derive KEEPS it…
+    expect(serializeFenceBody(fields)).toBe("title: T"); // …and the codec drops it
+  });
+
+  describe("E1-A3 — the four input classes", () => {
+    test("(a) prototype-chain names — `__proto__` VANISHES at parse, ordinary names survive as data", () => {
+      // ⚠ `parseFrontmatter` builds a PLAIN `{}`, not `parseFenceBody`'s `Object.create(null)`. So a
+      // `__proto__:` line hits the prototype SETTER and the key never lands — a line the author wrote,
+      // silently eaten. This is why every read below is `hasOwnProperty`, never truthiness or `in`.
+      expect(Object.keys(parseFrontmatter("---\n__proto__: x\n---\n"))).toEqual([]);
+
+      const proto = { kind: "card" as const, titleField: "title", fields: [{ key: "__proto__" }] };
+      const { fields: derived } = deriveFenceFields(parseFrontmatter(note("title: T", "__proto__: x")), proto);
+      expect(Object.prototype.hasOwnProperty.call(derived, "__proto__")).toBe(false);
+
+      const inherited = { kind: "card" as const, titleField: "title", fields: [{ key: "toString" }, { key: "constructor" }, { key: "valueOf" }] };
+      // `toString` is NOT in the frontmatter — a truthiness check would find the inherited FUNCTION.
+      const { fields: noneWritten } = deriveFenceFields(parseFrontmatter(note("title: T")), inherited);
+      expect(Object.keys(noneWritten)).toEqual(["title"]);
+      // …and when they ARE written, they survive as ordinary own fields.
+      const { fields: written } = deriveFenceFields(parseFrontmatter(note("title: T", "constructor: c", "valueOf: v")), inherited);
+      expect(Object.keys(written)).toEqual(["title", "constructor", "valueOf"]);
+      // Read through an index rather than `written.constructor` — the property NAME collides with
+      // `Object`'s, and tsc resolves the dotted form to `Function` even on a null-prototype record.
+      expect(written["constructor"]).toBe("c");
+      expect(written["valueOf"]).toBe("v");
+    });
+
+    test("(a) the OUTPUT is null-prototype too, mirroring parseFenceBody", () => {
+      const { fields } = deriveFenceFields(parseFrontmatter(note("title: T")), RUBRIC);
+      expect(Object.getPrototypeOf(fields)).toBeNull();
+    });
+
+    test("(b) sparse/holed arrays — the derived list is DENSE, no undefined/null reaches the note", () => {
+      const tagged = { kind: "card" as const, titleField: "title", fields: [{ key: "tags" }] };
+      const { fields } = deriveFenceFields(parseFrontmatter(note("title: T", "tags: [a, , b]")), tagged);
+      expect(fields.tags).toEqual(["a", "b"]); // `parseFrontmatter` filters empties
+      const body = serializeFenceBody(fields);
+      expect(body).toContain("tags: [a, b]");
+      expect(body).not.toContain("undefined");
+      expect(body).not.toContain("null");
+      // …and `joinOwn`'s own-index behaviour on a HAND-BUILT holed array (which no note can produce).
+      const holed: string[] = ["a"]; holed[2] = "c";
+      expect(serializeFenceBody({ tags: holed })).toBe("tags: [a, , c]");
+    });
+
+    test("(c) an empty value derives to an empty field — reported as a gap, never a silent blank", () => {
+      const { fields } = deriveFenceFields(parseFrontmatter(note("title: T", "role:", "org: o")), RUBRIC);
+      expect(fields).toEqual({ title: "T", role: "", org: "o" });
+      // PRESENT-BUT-EMPTY is a gap on the same footing as absent — the human still has to fill it in,
+      // and `validate` will not tell them (a non-title empty is `ok:true`, value `""`).
+      expect(deriveFenceFields(parseFrontmatter(note("title: T", "role:", "org: o")), RUBRIC).gaps).toEqual(["role"]);
+    });
+
+    test("(d) non-objects — TOTAL on markdown, LOUD on a bad rubric", () => {
+      // Total on its `markdown: string` input: no `---` block ⇒ `parseFrontmatter` returns `{}`.
+      expect(deriveFenceFields(parseFrontmatter("just prose, no frontmatter\n"), RUBRIC).fields).toEqual({});
+      expect(deriveFenceFields(parseFrontmatter(""), RUBRIC).fields).toEqual({});
+      expect(deriveFenceFields(parseFrontmatter("---\n---\n"), RUBRIC).fields).toEqual({});
+
+      // ⚠ THE RUBRIC GUARD IS A RUNTIME GUARD, NOT A COMPILER ONE. The rubric arrives from
+      // `resolveTemplate` over a `--config` module the CLI `await import`s, so tsc's `Rubric` type is
+      // a claim about a value it never saw.
+      for (const bad of [null, 7, "str", [], undefined, { titleField: "t" }]) {
+        expect(() => deriveFenceFields(parseFrontmatter(note("title: T")), bad as never)).toThrow(
+          /rubric must be an object with a fields array/,
+        );
+      }
+    });
+  });
+
+  test("IDENTITY-FREE (D4/NFR3) — the derivation names no vault, no path and no note type", () => {
+    // 🔴 THIS GATE WAS VACUOUS WHEN FIRST SHIPPED, AND THE WAY IT FAILED IS THE LESSON. It opened
+    // `notekit-write.ts` and sliced from `indexOf("export function deriveFenceFields")`. Story 2.5
+    // MOVED that function to `notekit-read.ts`, so `indexOf` returned **-1**, `slice(-1)` yielded the
+    // file's last character — `"\n"` — and every banned-string check passed forever, on one newline.
+    // The suite reported green while guarding nothing. Found by cross-vendor review (grok, 2026-08-06,
+    // F1); it is the exact class the Epic-1 retrospective already recorded once.
+    //
+    // Two fixes, because pointing it at the right file is only half of it:
+    //   1. the slice is BOUNDED at the next top-level export, so it cannot silently swallow the module;
+    //   2. `start` is ASSERTED non-negative, so a future move reddens this test instead of neutering it.
+    const src = readFileSync(new URL("./notekit-read.ts", import.meta.url), "utf-8");
+    const start = src.indexOf("export function deriveFenceFields");
+    expect(start).toBeGreaterThan(-1);
+    const end = src.indexOf("\nexport ", start + 1);
+    expect(end).toBeGreaterThan(start);
+    const derivation = src.slice(start, end);
+    expect(derivation.length).toBeGreaterThan(200); // a slice too small to contain the function is not a scan
+
+    const BANNED = ["note-report", "zDrafts", "primer", "protocol", "pattern", "/Users/"];
+    for (const banned of BANNED) expect(derivation).not.toContain(banned);
+
+    // COUNTERFACTUAL — the scan bites on planted identity, which the -1 version could never have done.
+    for (const banned of BANNED) {
+      expect(`${derivation}\nconst home = "${banned}";`).toContain(banned);
+    }
+  });
+});
+
+describe("the gap advisory — ONE notion of `the rubric's keys`, not two (AC #6 row iii)", () => {
+  const RUBRIC = { kind: "card" as const, titleField: "title", fields: [{ key: "role" }, { key: "org" }] };
+  const note = (...fm: string[]) => ["---", ...fm, "---", "", "Prose."].join("\n");
+
+  test("a missing key and an EMPTY key are both gaps", () => {
+    expect(deriveFenceFields(parseFrontmatter(note("title: T", "role: r", "org: o")), RUBRIC).gaps).toEqual([]);
+    expect(deriveFenceFields(parseFrontmatter(note("title: T", "role: r")), RUBRIC).gaps).toEqual(["org"]);
+    expect(deriveFenceFields(parseFrontmatter(note("title: T", "role:", "org: o")), RUBRIC).gaps).toEqual(["role"]);
+    expect(deriveFenceFields(parseFrontmatter(note("prose: p")), RUBRIC).gaps).toEqual(["title", "role", "org"]);
+  });
+
+  test("the gap set and the derived key set are COMPLEMENTS over the rubric's keys", () => {
+    // This is the anti-drift property: two notions of "the rubric's keys" would let them disagree.
+    for (const fm of [["title: T"], ["title: T", "role: r"], ["role: r", "org: o"], ["title:", "org: o"]]) {
+      const md = note(...fm);
+      const { fields, gaps } = deriveFenceFields(parseFrontmatter(md), RUBRIC);
+      const derived = Object.keys(fields);
+      const wanted = ["title", "role", "org"];
+      // A key is either derived-and-non-empty, or a gap. An empty value is BOTH derived and a gap,
+      // which is exactly the (c) case — so gaps ⊇ (wanted \ derived), and their union covers `wanted`.
+      expect([...new Set([...derived, ...gaps])].sort()).toEqual(wanted.slice().sort());
+      expect(gaps.every((g) => wanted.includes(g))).toBe(true);
+    }
+  });
+
+  test("`nk-type` and an empty key are excluded from the gap set too — same skips, one owner", () => {
+    const weird = { kind: "card" as const, titleField: "", fields: [{ key: "nk-type" }, { key: "role" }] };
+    expect(deriveFenceFields(parseFrontmatter(note("nk-type: card")), weird).gaps).toEqual(["role"]);
+  });
+
+  test("`__proto__` is a GAP, not a silent success (AC #6)", () => {
+    // `fm["__proto__"]` is TRUTHY (the inherited prototype object) on a record that never carried the
+    // key, so only the `hasOwnProperty` read of AC #1(a) makes this detectable at all.
+    const proto = { kind: "card" as const, titleField: "title", fields: [{ key: "__proto__" }] };
+    expect(deriveFenceFields(parseFrontmatter(note("title: T", "__proto__: x")), proto).gaps).toEqual(["__proto__"]);
+    const asTitle = { kind: "card" as const, titleField: "__proto__", fields: [] };
+    expect(deriveFenceFields(parseFrontmatter(note("__proto__: x")), asTitle).gaps).toEqual(["__proto__"]);
+  });
+
+  test("a bad rubric fails LOUD here too — one guard, not two postures", () => {
+    for (const bad of [null, 7, "str", []]) {
+      expect(() => deriveFenceFields(parseFrontmatter(note("title: T")), bad as never)).toThrow(/rubric must be an object/);
+    }
+  });
+});
+
+// ═══ Story 2.5 — author mode: the one allowed structural add, end to end ══════════════════════════
+
+/**
+ * Author-mode fixtures. The rubric is 2.2's REGISTRY above — `title` (the titleField), `summary`,
+ * `status` — so these notes are read against the same registry every other test in this file uses.
+ */
+const SEEDABLE = "---\nnk-type: card\ntitle: Primer\nsummary: A thing\nstatus: live\n---\n\nProse the human wrote.\n";
+
+/**
+ * Deps for a PREVIEW run — the read surface, which is where the no-`--apply` path lives and which
+ * holds no writer at all. Kept separate from `harness` so a preview test cannot accidentally be handed
+ * a `writeNote` and prove nothing.
+ */
+function preview(note: string, out: string[]): NotekitApplyDeps {
+  return {
+    log: (l) => out.push(l),
+    err: () => {},
+    now: () => AT,
+    loadRegistry: async () => REGISTRY,
+    readNote: () => note,
+  };
+}
+
+/** The bytes `SEEDABLE` must become. Hand-written (oracle (d)): a human wrote these, not the offsets. */
+const SEEDED = [
+  "---",
+  "nk-type: card",
+  "title: Primer",
+  "summary: A thing",
+  "status: live",
+  "---",
+  "",
+  "```nk-card",
+  "title: Primer",
+  "summary: A thing",
+  "status: live",
+  "```",
+  "",
+  "",
+  "Prose the human wrote.",
+  "",
+].join("\n");
+
+describe("AC #2 — row 4 FORKS: create under author mode, refuse otherwise", () => {
+  test("the CREATE arm — an opted-in, fence-less, seedable note gets exactly one fence", async () => {
+    const h = harness({ readNote: scriptedReads(SEEDABLE, SEEDABLE, SEEDED) });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps)).toBe(0);
+    expect(h.writes).toHaveLength(1);
+    expect(h.writes[0]![1]).toBe(SEEDED);
+  });
+
+  test("…and the written note reads back through the LOCATOR, which is the oracle", async () => {
+    const h = harness({ readNote: scriptedReads(SEEDABLE, SEEDABLE, SEEDED) });
+    await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps);
+    const written = h.writes[0]![1];
+    const f = locateFence(written)!;
+    expect(f).not.toBeNull();
+    expect(f.type).toBe("card");
+    expect(parseFenceBody(f.body)).toEqual({ title: "Primer", summary: "A thing", status: "live" });
+    // Exactly ONE nk-fence in the note — a second opening line is the corruption this row guards.
+    expect(written.match(/^```nk-[a-z]+$/gm)!.length).toBe(1);
+    // FR-16 parity holds on the fence author mode just created.
+    expect(`${serializeFenceBody(parseFenceBody(f.body))}\n`).toBe(f.body);
+  });
+
+  test("⚠ `nk-type` is NOT written into the body, though it IS in the frontmatter", async () => {
+    const h = harness({ readNote: scriptedReads(SEEDABLE, SEEDABLE, SEEDED) });
+    await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps);
+    const f = locateFence(h.writes[0]![1])!;
+    expect(f.body).not.toContain("nk-type");
+    expect(Object.keys(parseFenceBody(f.body))).not.toContain("nk-type");
+  });
+
+  test("the REFUSE arm — an UNTERMINATED fence is never created over, and the note is untouched", async () => {
+    // `locateFence` returns `null` for "no fence" AND for "an unterminated fence" and cannot tell the
+    // caller which. Creating here would leave TWO opening runs and no matching close — corruption from
+    // the one operation this epic allows to add structure.
+    const torn = "---\nnk-type: card\ntitle: Primer\n---\n\n```nk-card\ntitle: Primer\n";
+    const h = harness({ readNote: () => torn });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--json"], h.deps)).toBe(1);
+    expect(envelope(h.out).error!.code).toBe("nk-no-fence");
+    expect(h.writes).toEqual([]);
+  });
+
+  test("the REFUSE arm — a note whose frontmatter answers NOTHING the rubric asks for", async () => {
+    // ⚠ THIS IS THE CONDITION THAT LETS ROW 4 FORK AT ALL, and it is why 2.1's and 2.2's own row-4
+    // fixtures stay green UNEDITED: their note is exactly this shape. Author mode carries frontmatter
+    // INTO a fence, and here there is none to carry — so `nk-no-fence` is the honest verdict, not an
+    // invented empty fence.
+    const h = harness({ readNote: () => "---\nnk-type: card\n---\n\njust prose\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--json"], h.deps)).toBe(1);
+    expect(envelope(h.out).error!.code).toBe("nk-no-fence");
+    expect(h.writes).toEqual([]);
+  });
+
+  test("the fence lands immediately after the frontmatter, before all prose", async () => {
+    const h = harness({ readNote: scriptedReads(SEEDABLE, SEEDABLE, SEEDED) });
+    await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps);
+    const written = h.writes[0]![1];
+    const f = locateFence(written)!;
+    // Everything before the block is the frontmatter and nothing else; the prose is all after it.
+    expect(written.slice(0, f.blockStart)).toBe("---\nnk-type: card\ntitle: Primer\nsummary: A thing\nstatus: live\n---\n\n");
+    expect(written.slice(f.blockEnd)).toContain("Prose the human wrote.");
+  });
+
+  test("2.2's TRANSFORM path is untouched — a note WITH a fence still splices, never creates", async () => {
+    const h = harness();  // the default `readNote` is MESSY, which has a fence
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps)).toBe(1);
+    // (row 7 — the scripted single-answer reader makes the re-read see the same bytes; the point here
+    // is only that the transform arm was taken, so no `gaps` key appears.)
+    const h2 = harness({ readNote: scriptedReads(MESSY, MESSY, MESSY_APPLIED) });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT, "--json"], h2.deps)).toBe(0);
+    expect(h2.writes[0]![1]).toBe(MESSY_APPLIED);
+    expect(envelope(h2.out).value).not.toHaveProperty("gaps");
+  });
+});
+
+describe("AC #3 — validation PRECEDES the write, and the absence of a fence is the proof", () => {
+  /**
+   * 🔴 THE FIXTURE IS A TITLE GAP, AND IT HAS TO BE. AC #6's table has the measurements: a missing or
+   * empty NON-title rubric key leaves `validate` at `ok:true`, so a fixture built on one writes the
+   * fence and exits 0 — the "no fence was created" assertion would be red for the right reason on the
+   * wrong grounds, or green forever once relaxed. `title` is the ONLY note-derivable input that
+   * reaches row 6. The name says so, so it is not silently edited away later.
+   */
+  const TITLE_GAP = "---\nnk-type: card\nsummary: A thing\nstatus: live\n---\n\nProse.\n";
+
+  test("author-mode-title-gap-refuses-before-write — absent title", async () => {
+    const h = harness({ readNote: () => TITLE_GAP });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--json", "--at", AT], h.deps)).toBe(1);
+    const env = envelope(h.out);
+    expect(env.ok).toBe(false);
+    expect(env.error!.code).toBe("nk-missing-field");
+    expect(env.error!.field).toBe("title");
+    // ⚠ `Result` is a DISCRIMINATED UNION — an `ok:false` envelope has NO `value` key at all, because
+    // nothing was planned. Do not assert `value.written === false` here; that is `undefined.written`
+    // and throws in the test rather than in the code.
+    expect(env).not.toHaveProperty("value");
+    // THE ORDERING PROOF, and the only assertion here that can fail: no fence was created.
+    expect(h.writes).toEqual([]);
+  });
+
+  test("author-mode-title-gap-refuses-before-write — present but EMPTY title", async () => {
+    const h = harness({ readNote: () => "---\nnk-type: card\ntitle:\nstatus: live\n---\n\nProse.\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--json", "--at", AT], h.deps)).toBe(1);
+    expect(envelope(h.out).error!.field).toBe("title");
+    expect(h.writes).toEqual([]);
+  });
+
+  test("…and the same refusal in the HUMAN output mode, note still untouched", async () => {
+    const h = harness({ readNote: () => TITLE_GAP });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps)).toBe(1);
+    expect(h.writes).toEqual([]);
+    expect(h.err.join("\n")).toContain("title");
+    expect(h.out).toEqual([]); // no preview was printed either — nothing was composed
+  });
+
+  test("COUNTERFACTUAL (E1-A6) — a validate that ran AFTER the compose would let a fence through", () => {
+    // Demonstrated on the pieces rather than by mutating the shipped order, because the shipped order
+    // is what the fixtures above assert. This is what the write WOULD have carried: `createFence`
+    // composes happily from a title-less record, so nothing but the ORDER stops it landing.
+    const { fields } = deriveFenceFields(parseFrontmatter(TITLE_GAP), REGISTRY.templates["catalog-card"]!.rubric);
+    expect(Object.keys(fields)).toEqual(["summary", "status"]); // no title — the gap
+    const wouldHaveBeen = createFence(TITLE_GAP, "card", composeBody(fields), 0);
+    expect(locateFence(wouldHaveBeen)).not.toBeNull(); // a fence WAS composable
+    // …and `validate` is what refuses it, which is why it runs first.
+    const spec = noteToRenderSpec(fields, REGISTRY.templates["catalog-card"]!.rubric, { id: "x", generatedAt: AT });
+    expect(validate(spec).ok).toBe(false);
+  });
+});
+
+describe("AC #4 — `--apply` is opt-in; the default path leaves the vault byte-untouched", () => {
+  // ⚠ THE NO-`--apply` PATH IS `runNotekitRead`, NOT `runNotekitApply`. `main.ts` holds the single
+  // `--apply` read and routes on it (2.2 AC #4), so `runNotekitApply` is BY DEFINITION the apply path
+  // and driving it flagless would test a call `main.ts` never makes. Getting this wrong is how a
+  // "writes nothing without --apply" assertion ends up proving the opposite of what it claims.
+  test("no `--apply` writes NOTHING, in both output modes, over every author fixture", async () => {
+    for (const note of [SEEDABLE, "---\nnk-type: card\ntitle: T\n---\n\nProse.\n"]) {
+      for (const extra of [[], ["--json"]]) {
+        const out: string[] = [];
+        const code = await runNotekitRead(["render", "n.md", ...CONFIG, "--at", AT, ...extra], {
+          log: (l) => out.push(l),
+          err: () => {},
+          loadRegistry: async () => REGISTRY,
+          readNote: () => note,
+        });
+        expect(code).toBe(0);
+        // The read surface holds NO writer at all — 2.1's AC #4 gate scans its source for sixteen fs
+        // tokens and finds none, which is the structural half of this claim.
+        expect(out).toHaveLength(1);
+      }
+    }
+  });
+
+  test("THE BEHAVIOURAL HALF — the preview path never even ATTEMPTS a write", async () => {
+    // The byte compare proves nothing landed; a throwing double proves nothing was ATTEMPTED. On the
+    // read surface there is no `writeNote` dep to throw from — the absence IS the proof — so the
+    // throwing double is aimed at the one entry point that has one, asserting it is not reached
+    // before `--apply` was passed.
+    const h = harness({
+      readNote: () => SEEDABLE,
+      writeNote: () => {
+        throw new Error("this writer must never be called");
+      },
+    });
+    // With `--apply`, the writer IS reached (and its throw becomes `nk-write-failed`, 2.2's row 8) —
+    // which is what makes the flagless case above a real distinction rather than a vacuous one.
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT, "--json"], h.deps)).toBe(1);
+    expect(envelope(h.out).error!.code).toBe("nk-write-failed");
+  });
+
+  test("the READ surface previews author mode too, and holds no writer at all", async () => {
+    const out: string[] = [];
+    const code = await runNotekitRead(["render", "n.md", ...CONFIG, "--at", AT, "--json"], {
+      log: (l) => out.push(l),
+      err: () => {},
+      loadRegistry: async () => REGISTRY,
+      readNote: () => SEEDABLE,
+    });
+    expect(code).toBe(0);
+    const env = JSON.parse(out[0]!) as { ok: boolean; value: Record<string, unknown> };
+    expect(env.ok).toBe(true);
+    expect(env.value).not.toHaveProperty("written"); // preview only — nothing was written to report
+  });
+
+  test("2.2's single-`--apply`-read gate stays at EXACTLY ONE, in main.ts", () => {
+    // The assertion is 2.2's, unchanged: `--apply` is read exactly once across the notekit surface, in
+    // `main.ts`, and every other consumer takes what routing already decided. 2.5 adds zero reads.
+    //
+    // ⚠ WALKED WITH `Bun.Glob`, NOT `rg`. 2.2 states this gate as a ripgrep command with a
+    // shell-expanded path list, which is broken twice over: `-g '!*.test.ts'` does not filter an
+    // explicitly-handed file (so the test files' own `--apply` fixtures count as reads), and the runner
+    // may have no ripgrep at all (measured — this exact gate failed in CI while green locally).
+    // A measurement correction, not a contract change. Record it so 2.2's copy gets the same fix.
+    const ROOT_DIR = join(import.meta.dir, "..", "..");
+    const APPLY_READ = /hasFlag\([^)]*"apply"/;
+    const hits: string[] = [];
+    for (const pattern of ["src/cli/main.ts", "src/cli/notekit-*.ts", "src/notekit/**/*.ts"]) {
+      for (const file of new Bun.Glob(pattern).scanSync({ cwd: ROOT_DIR })) {
+        if (file.endsWith(".test.ts")) continue;
+        // ⚠ RAW SOURCE, NOT MASKED — the opposite of AC #1's gate, and for a precise reason. There the
+        // thing counted is a CALL and the string literals are noise; here the string literal `"apply"`
+        // IS the thing counted, so `stripStringsAndComments` erases exactly what this looks for and the
+        // scan returns zero. (Measured: it did.) 2.2's original scanned raw too; only the walk changed.
+        if (APPLY_READ.test(readFileSync(join(ROOT_DIR, file), "utf-8"))) hits.push(file);
+      }
+    }
+    expect(hits).toEqual(["src/cli/main.ts"]);
+  });
+});
+
+describe("AC #5 — prose and fence are separable by a MECHANICAL property", () => {
+  test("THE SUBTRACTION — deleting [blockStart, blockEnd) leaves the pre-note plus two \\n", async () => {
+    // ⚠ CONTENT, not offsets. Creation inserts a whole block, so EVERY offset after the insertion
+    // point shifts — an "differs only between bodyStart and bodyEnd" assertion is FALSE BY
+    // CONSTRUCTION here. NK-4 rule 2 says the invariant lives on the fence AST, not on byte offsets.
+    const h = harness({ readNote: scriptedReads(SEEDABLE, SEEDABLE, SEEDED) });
+    await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps);
+    const written = h.writes[0]![1];
+    const f = locateFence(written)!;
+    const at = SEEDABLE.indexOf("\n\nProse") + 1; // just past the frontmatter block's closing `---\n`
+    expect(written.slice(0, f.blockStart) + written.slice(f.blockEnd)).toBe(
+      SEEDABLE.slice(0, at) + "\n" + "\n" + SEEDABLE.slice(at),
+    );
+  });
+
+  test("what a GREP sees: one whole-line opening delimiter, no prose sharing its line", async () => {
+    const h = harness({ readNote: scriptedReads(SEEDABLE, SEEDABLE, SEEDED) });
+    await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps);
+    const written = h.writes[0]![1];
+    expect(written.match(/^```nk-[a-z]+$/gm)).toHaveLength(1);
+    expect(locateFence(written)!.type).toMatch(/^[a-z]+$/);
+    // …and there is no SECOND fence after the first.
+    expect(locateFence(written.slice(locateFence(written)!.blockEnd))).toBeNull();
+  });
+
+  test("the prose is BYTE-IDENTICAL — author mode adds a fence and touches nothing else", async () => {
+    const h = harness({ readNote: scriptedReads(SEEDABLE, SEEDABLE, SEEDED) });
+    await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps);
+    const f = locateFence(h.writes[0]![1])!;
+    // Under this story's admitted scope the prose already exists and is human-authored, so Epic 2's
+    // "never risking prose" holds UNCHANGED and byte-provable — the same claim 2.2 makes.
+    expect(h.writes[0]![1].slice(f.blockEnd).trimStart()).toBe("Prose the human wrote.\n");
+  });
+});
+
+describe("AC #6 — the required-field gap, on EVERY gap path", () => {
+  const rubric = REGISTRY.templates["catalog-card"]!.rubric;
+
+  test("(i) an UNREGISTERED nk-type is a refusal, not an invented rubric", async () => {
+    // NFR5 generates the capabilities catalog from THIS registry, so a type absent from it is one
+    // notewright was never told about. The answer is `nk-unknown-type` and stop.
+    const h = harness({ readNote: () => "---\nnk-type: ledger\ntitle: T\n---\n\nProse.\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--json"], h.deps)).toBe(1);
+    expect(envelope(h.out).error!.code).toBe("nk-unknown-type");
+    expect(h.writes).toEqual([]);
+  });
+
+  test("(ii) the TITLE gap refuses with code AND field, and the note is byte-identical", async () => {
+    for (const note of [
+      "---\nnk-type: card\nsummary: s\n---\n\nProse.\n",
+      "---\nnk-type: card\ntitle:\nsummary: s\n---\n\nProse.\n",
+    ]) {
+      const h = harness({ readNote: () => note });
+      expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--json", "--at", AT], h.deps)).toBe(1);
+      const env = envelope(h.out);
+      expect(env.error!.code).toBe("nk-missing-field");
+      // ⚠ `code` ALONE IS NOT A DISCRIMINATOR — row (iv) carries the same code with a `fields[n].value`
+      // path. Asserting the exact path is what tells the two apart.
+      expect(env.error!.field).toBe("title");
+      expect(h.writes).toEqual([]);
+    }
+  });
+
+  test("(iii) a NON-title gap is an ADVISORY: exit 0, fence created, key omitted, name in the report", async () => {
+    // 🔴 THIS IS WHERE FR-9 ACTUALLY LIVES, and it is a PREVIEW assertion rather than an exit code.
+    // Turning it into an exit 1 would contradict the PRD ("a field absent in the note is omitted
+    // gracefully") and refuse notes the product is specified to accept.
+    const gapped = "---\nnk-type: card\ntitle: Primer\nstatus: live\n---\n\nProse.\n"; // no `summary`
+    const h = harness({ readNote: scriptedReads(gapped, gapped, null) });
+    const code = await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--json", "--at", AT], h.deps);
+    // The write is reported unverified (the scripted reader returns null on read-back), but the point
+    // here is what was COMPOSED, and that the gap did not change the decision to compose it.
+    expect(h.writes).toHaveLength(1);
+    const f = locateFence(h.writes[0]![1])!;
+    expect(Object.keys(parseFenceBody(f.body))).toEqual(["title", "status"]); // `summary` omitted
+    expect(f.body).not.toContain("summary");
+    expect(code).not.toBe(2);
+  });
+
+  test("(iii) …and the gap NAME reaches stdout in the preview, plus `value.gaps` under --json", async () => {
+    const gapped = "---\nnk-type: card\ntitle: Primer\nstatus: live\n---\n\nProse.\n";
+
+    const human: string[] = [];
+    expect(await runNotekitRead(["render", "n.md", ...CONFIG, "--at", AT], preview(gapped, human))).toBe(0);
+    // An exit code alone tells the human nothing about WHICH field to add. FR-9's whole point.
+    expect(human.join("\n")).toContain("summary");
+
+    const json: string[] = [];
+    expect(await runNotekitRead(["render", "n.md", ...CONFIG, "--at", AT, "--json"], preview(gapped, json))).toBe(0);
+    const env = JSON.parse(json[0]!) as { value: { gaps: string[]; diff: string } };
+    expect(env.value.gaps).toEqual(["summary"]);
+
+    // ⚠ BOTH MODES RENDER FROM THE ONE RESULT OBJECT — the same rule 2.1 applies to `capabilities`.
+    // The JSON `value.diff` (the whole proposed block) and the human preview's block region are the
+    // same bytes; two printers is exactly what drifts.
+    expect(human.join("\n")).toContain(env.value.diff);
+  });
+
+  test("(iii) DELETE THE ADVISORY AND THIS GOES RED — a fully-answered note reports NO gap", async () => {
+    // The falsifiability check: if the advisory were unconditional text it would appear here too.
+    const json: string[] = [];
+    expect(await runNotekitRead(["render", "n.md", ...CONFIG, "--at", AT, "--json"], preview(SEEDABLE, json))).toBe(0);
+    expect((JSON.parse(json[0]!) as { value: { gaps: string[] } }).value.gaps).toEqual([]);
+
+    const human: string[] = [];
+    await runNotekitRead(["render", "n.md", ...CONFIG, "--at", AT], preview(SEEDABLE, human));
+    expect(human.join("\n")).not.toContain("no value for");
+  });
+
+  test("(iv) a WRONG-SHAPE field is UNIT-LEVEL ONLY — it is unreachable from a note", async () => {
+    // `parseFrontmatter` emits only `string | string[]` and filters empty elements, so every derived
+    // array is DENSE. A holed or non-string element can only arrive from a hand-built record — so it
+    // is tested against `validate` directly rather than through a CLI fixture that cannot fire.
+    const holed: string[] = ["a"];
+    delete (holed as unknown as Record<number, string>)[0];
+    holed[1] = "b";
+    const spec = noteToRenderSpec({ title: "T", summary: holed }, rubric, { id: "x", generatedAt: AT });
+    const result = validate(spec);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("nk-missing-field");
+      // The DIFFERENT `field` path under the SAME code — this is what (ii) cannot be confused with.
+      expect(result.error.field).toMatch(/^fields\[\d+\]\.value$/);
+    }
+  });
+
+  test("`nk-unknown-version` is DECLARED UNREACHABLE in author mode", () => {
+    // `RenderSpec.version` is the literal `"nk-v1"` and `noteToRenderSpec` stamps it, so `validate`
+    // dispatches to the only branch there is. The code can arise only through `validate --spec -` with
+    // a foreign spec on stdin — a verb author mode never calls. Of the two `RenderSpecErrorCode`
+    // members, exactly ONE is reachable here. Stated so nobody writes a test that cannot fail.
+    const spec = noteToRenderSpec({ title: "T" }, rubric, { id: "x", generatedAt: AT });
+    expect((spec as { version: string }).version).toBe("nk-v1");
+    expect(validate(spec).ok).toBe(true);
+  });
+
+  test("4 gap paths, 0 NEW error codes — every one is a code 2.1 already ships", () => {
+    // (A `typeof c === "string"` assertion over a literal array stood here and could not fail for any
+    // implementation — deleted after cross-vendor review, F5. The source greps below are the real half.)
+    const src = readFileSync(new URL("./notekit-write.ts", import.meta.url), "utf-8");
+    // The write-code union is 2.2's three, unchanged — 2.5 adds none.
+    expect(src.match(/"nk-(note-changed|write-failed|write-unverified)"/g)!.length).toBeGreaterThan(0);
+    expect(src).not.toContain("nk-author");
+    expect(src).not.toContain("nk-created");
+  });
+});
+
+// ═══ AC #1's MECHANICAL GATE — the derivation happens in exactly one place ════════════════════════
+
+describe("AC #1 — the frontmatter→fence derivation has ONE call site, and the residuals are named", () => {
+  const ROOT = join(import.meta.dir, "..", "..");
+
+  /**
+   * The scope: the slice's non-test sources.
+   *
+   * ⚠ WALKED WITH `Bun.Glob`, NOT BY SPAWNING `rg`. The first version shelled out, passed on this
+   * machine, and failed in CI — the runner has no ripgrep, so the scan returned zero files and four
+   * assertions collapsed. A gate whose scope depends on a binary that may not exist is a gate that
+   * reports whatever the environment happens to allow. `scripts/check-core-purity.ts` already walks
+   * `PURE_GLOBS` this way; this is that idiom, not a new one.
+   *
+   * ⚠ IF YOU RUN THE EQUIVALENT BY HAND, USE RIPGREP'S GLOB FORM AND NOT A SHELL-EXPANDED PATH LIST:
+   * `-g '!*.test.ts'` does NOT filter a file ripgrep was handed explicitly, so
+   * `rg … src/notekit/ src/cli/notekit-*.ts` drags the test files in and this story's own fixtures
+   * count as violations. That trap is why the scope is computed here rather than copied from a
+   * command line.
+   */
+  const SCOPE_GLOBS = ["src/notekit/**/*.ts", "src/cli/notekit-*.ts"] as const;
+
+  function scopeFiles(): string[] {
+    const found = new Set<string>();
+    for (const pattern of SCOPE_GLOBS) {
+      for (const hit of new Bun.Glob(pattern).scanSync({ cwd: ROOT })) {
+        if (!hit.endsWith(".test.ts")) found.add(hit);
+      }
+    }
+    return [...found].sort();
+  }
+
+  /**
+   * Every REAL `parseFrontmatter(` call in scope, with comments and strings masked.
+   *
+   * ⚠ THREE WAYS A NAÏVE GREP GETS THIS WRONG, all of them measured on this tree rather than imagined:
+   *   1. A BARE IDENTIFIER (`\bparseFrontmatter\b`) counts the `import { parseFrontmatter }` line, so
+   *      the very module the story prescribes reads as two hits in a file that must have one. An import
+   *      declares intent; the thing being counted is CALL SITES. This is 2.2's `atomicWrite` trap.
+   *   2. Even the call form counts PROSE — `notekit-read.ts` explains the hazard twice in docblocks,
+   *      writing `serializeFenceBody(parseFrontmatter(text))` as the thing NOT to do. Masking comments
+   *      is what separates a warning from a violation.
+   *   3. A shell-expanded path list is not the same scope as a glob: `-g '!*.test.ts'` does NOT filter
+   *      a file ripgrep was handed explicitly, so `src/cli/notekit-*.ts` drags the test files in and
+   *      this story's own `parseFrontmatter(`-shaped fixtures count as violations. Asserted below.
+   */
+  /**
+   * ⚠ THE MATCHER COVERS BOTH READER NAMES. `parseFrontmatterBlock` is `parseFrontmatter`'s superset —
+   * same match, plus the block's end offset — so a gate that named only the shorter one could be
+   * satisfied by renaming the call. A gate you can pass by importing a different alias is not a gate.
+   */
+  const READS_FRONTMATTER = /\bparseFrontmatter(?:Block)?\s*\(/;
+
+  function callSites(): Array<{ file: string; line: number }> {
+    const hits: Array<{ file: string; line: number }> = [];
+    for (const file of scopeFiles()) {
+      const masked = stripStringsAndComments(readFileSync(join(ROOT, file), "utf-8"));
+      masked.split("\n").forEach((text, i) => {
+        if (READS_FRONTMATTER.test(text)) hits.push({ file, line: i + 1 });
+      });
+    }
+    return hits;
+  }
+
+  test("EXACTLY ONE frontmatter read in the whole slice, and it is named", () => {
+    // ⚠ THIS SHIPPED AT **TWO** FIRST, AND THAT WAS A SOFTENED GATE DEFENDED WITH A TRUE-BUT-IRRELEVANT
+    // FACT. The argument was: 2.1's `nk-type:` opt-in read is sanctioned by NK-1.8 rule 2, therefore
+    // "exactly one" is unreachable on live code. The premise is true and the conclusion did not follow —
+    // rule 2 sanctions CONSULTING the opt-in, it never required a second `parseFrontmatter(` site.
+    // `renderPlan` already holds the whole record when it checks the opt-in, so threading it into
+    // `deriveFenceFields` costs nothing and the slice reads frontmatter ONCE. Cross-vendor review
+    // (grok, 2026-08-06, F3) refused the softening and was right to.
+    //
+    // What the one site now feeds, from one match: the opt-in presence check, the rubric projection
+    // (`deriveFenceFields`, which takes the RECORD), and the fence insertion offset (the block's `end`).
+    const sites = callSites();
+    expect(sites).toHaveLength(1);
+    expect(sites[0]!.file).toBe("src/cli/notekit-read.ts");
+
+    const src = readFileSync(join(ROOT, "src/cli/notekit-read.ts"), "utf-8").split("\n");
+    const enclosing = sites.map((s) => {
+      for (let i = s.line - 1; i >= 0; i--) {
+        // ⚠ `async` IS PART OF THE SHAPE. Without it the walk skips straight past
+        // `export async function renderPlan(` and attributes its call to whatever plain `function`
+        // sits above — which is how this assertion first reported the wrong owner and would have gone
+        // on naming a bystander after any future edit moved the declarations around.
+        const m = /^(?:export )?(?:async )?function (\w+)/.exec(src[i]!);
+        if (m) return m[1];
+      }
+      return "<module>";
+    });
+    expect(enclosing).toEqual(["renderPlan"]);
+  });
+
+  test("`deriveFenceFields` reads NO frontmatter — it projects a record it is handed", () => {
+    // The structural half of the claim above: the derivation cannot re-read even if someone wanted it
+    // to, because it never receives note text. Its signature is the guard.
+    const src = readFileSync(join(ROOT, "src/cli/notekit-read.ts"), "utf-8");
+    const start = src.indexOf("export function deriveFenceFields");
+    expect(start).toBeGreaterThan(-1); // ⚠ a -1 here silently slices to nothing — see the D4 gate below
+    const body = stripStringsAndComments(src.slice(start, src.indexOf("\nexport ", start + 1)));
+    expect(READS_FRONTMATTER.test(body)).toBe(false);
+    expect(body).toContain("frontmatter: Record<string, string | string[]>");
+  });
+
+  test("COUNTERFACTUAL — a planted second call site REDDENS the gate, under EITHER reader name", () => {
+    // Run against text rather than by editing a shipped file, so the gate is proven to move without
+    // leaving the tree dirty. Both plants are the exact convenience the AC warns about.
+    const writer = readFileSync(join(ROOT, "src/cli/notekit-write.ts"), "utf-8");
+    for (const plant of [
+      `function titleShortcut(md: string) { return parseFrontmatter(md)["title"]; }`,
+      `function endShortcut(md: string) { return parseFrontmatterBlock(md).end; }`,
+    ]) {
+      const masked = stripStringsAndComments(`${writer}\n${plant}\n`);
+      expect(masked.split("\n").filter((l) => READS_FRONTMATTER.test(l))).toHaveLength(1);
+    }
+    expect(callSites()).toHaveLength(1); // …and the real tree is unchanged
+  });
+
+  test("COUNTERFACTUAL — an IMPORT is not a call, and PROSE is not a call", () => {
+    // Both of these are present in the real tree right now, and a naïve gate counts both.
+    const raw = readFileSync(join(ROOT, "src/cli/notekit-read.ts"), "utf-8");
+    expect(raw).toContain("  parseFrontmatterBlock,"); // the import — bare-identifier scans count this
+    // …and the docblocks explain the hazard by writing the call form out, which is not a violation.
+    const rawCallForm = raw.split("\n").filter((l) => READS_FRONTMATTER.test(l));
+    expect(rawCallForm.length).toBeGreaterThan(callSites().length);
+  });
+
+  test("THE SCOPE IS NON-EMPTY AND TEST-FREE — a scope that reads nothing is a gate that proves nothing", () => {
+    // Both halves matter and they fail differently. An empty scope is the CI failure this gate already
+    // had once (no ripgrep on the runner → zero files → every assertion below it vacuously true). A
+    // scope that swept the test files in would count this story's own `parseFrontmatter(` fixtures as
+    // violations and could never reach green.
+    const globbed = scopeFiles();
+    expect(globbed.length).toBeGreaterThan(5);
+    expect(globbed.every((f) => !f.endsWith(".test.ts"))).toBe(true);
+    // The two files the derivation and the writer actually live in must BOTH be in scope — a glob that
+    // silently stopped covering one of them would leave the count at one for the wrong reason.
+    expect(globbed).toContain("src/cli/notekit-read.ts");
+    expect(globbed).toContain("src/cli/notekit-write.ts");
+  });
+
+  test("the gate reads REAL bytes — every scoped file exists and is non-empty", () => {
+    // The other half of the CI lesson: the walk must yield paths that resolve. A scope of names that
+    // read as empty strings scans nothing while looking busy.
+    for (const file of scopeFiles()) {
+      expect(readFileSync(join(ROOT, file), "utf-8").length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("🔴 REGRESSION (cross-vendor review F2) — a GLUED closing delimiter must not wreck the note", () => {
+  // The defect, end to end: `parseFrontmatter` accepted `---EXTRA prose` as a closing delimiter and
+  // returned a real record WITH the `nk-type:` opt-in, while a caller-side "where does frontmatter
+  // stop" pattern found no match and reported offset 0. Author mode then inserted the fence BEFORE the
+  // opening `---`. The note stopped being frontmatter-led, its opt-in silently vanished — and every
+  // other check still passed, including the `locateFence` oracle, which happily found the new fence in
+  // the wreckage. Fixed structurally: `parseFrontmatterBlock` reports fields and end from ONE match.
+  const GLUED = "---\nnk-type: card\ntitle: Primer\nstatus: live\n---EXTRA\nProse the human wrote.\n";
+
+  test("the fence lands AFTER the frontmatter, and the opt-in survives", async () => {
+    const h = harness({ readNote: scriptedReads(GLUED, GLUED, null) });
+    await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps);
+    expect(h.writes).toHaveLength(1);
+    const written = h.writes[0]![1];
+
+    // The three properties the old code broke, each asserted separately so a partial regression is
+    // still visible: still frontmatter-led, opt-in still readable, fence after the block.
+    expect(written.startsWith("---\nnk-type: card\n")).toBe(true);
+    expect(parseFrontmatter(written)["nk-type"]).toBe("card");
+    const f = locateFence(written)!;
+    expect(written.slice(0, f.blockStart)).toContain("---EXTRA");
+    expect(parseFenceBody(f.body)).toEqual({ title: "Primer", status: "live" });
+  });
+
+  test("…and the note is re-renderable: the round trip finds the fence it just wrote", async () => {
+    // The sharpest form of the claim. Under the defect this failed at the FIRST row — the note had no
+    // opt-in any more, so a second `render` exited `nk-no-opt-in` on a note author mode had authored.
+    const h = harness({ readNote: scriptedReads(GLUED, GLUED, null) });
+    await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps);
+    const written = h.writes[0]![1];
+
+    const second: string[] = [];
+    const code = await runNotekitRead(["render", "n.md", ...CONFIG, "--at", AT, "--json"], {
+      log: (l) => second.push(l), err: () => {},
+      loadRegistry: async () => REGISTRY, readNote: () => written,
+    });
+    expect(code).toBe(0);
+    const env = JSON.parse(second[0]!) as { ok: boolean; value: Record<string, unknown> };
+    expect(env.ok).toBe(true);
+    expect(env.value).not.toHaveProperty("gaps"); // the TRANSFORM arm — the note now has a fence
+  });
+
+  test("prose after the glued delimiter is byte-identical", async () => {
+    const h = harness({ readNote: scriptedReads(GLUED, GLUED, null) });
+    await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps);
+    const written = h.writes[0]![1];
+    const f = locateFence(written)!;
+    expect(written.slice(0, f.blockStart) + written.slice(f.blockEnd)).toBe(
+      GLUED.slice(0, GLUED.indexOf("Prose")) + "\n" + "\n" + GLUED.slice(GLUED.indexOf("Prose")),
+    );
+  });
+});
+
+describe("the two nk-no-fence refusal arms are DISTINGUISHABLE by message (review F4)", () => {
+  test("an unterminated fence and an unseedable note carry the same code, different sentences", async () => {
+    // A second CODE would be a widening SM-C2 counts against, and 2.3's/2.4's inventories pin the
+    // count — so the code stays `nk-no-fence` and the MESSAGE answers "why".
+    const torn = harness({ readNote: () => "---\nnk-type: card\ntitle: T\n---\n\n```nk-card\ntitle: T\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--json"], torn.deps)).toBe(1);
+    const tornEnv = envelope(torn.out);
+
+    const bare = harness({ readNote: () => "---\nnk-type: card\n---\n\njust prose\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--json"], bare.deps)).toBe(1);
+    const bareEnv = envelope(bare.out);
+
+    expect(tornEnv.error!.code).toBe("nk-no-fence");
+    expect(bareEnv.error!.code).toBe("nk-no-fence");
+    expect(tornEnv.error!.message).not.toBe(bareEnv.error!.message);
+    expect(String(tornEnv.error!.message)).toContain("never closed");
+    expect(String(bareEnv.error!.message)).toContain("nothing to seed");
   });
 });

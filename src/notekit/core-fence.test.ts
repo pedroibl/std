@@ -3,6 +3,7 @@ import {
   locateFence,
   parseFenceBody,
   serializeFenceBody,
+  createFence,
   spliceFence,
   type FenceFields,
   type LocatedFence,
@@ -573,5 +574,141 @@ describe("the newline contract — 2.1 owns it, the codec does not", () => {
     const fixed = spliceFence(md, locateFence(md)!, serializeFenceBody({ a: "2" }) + "\n");
     expect(fixed).toBe("```nk-card\na: 2\n```\n");
     expect(locateFence(fixed)!.body).toBe("a: 2\n");
+  });
+});
+
+// ── createFence (Story 2.5) ─────────────────────────────────────────────────────────────────────
+
+describe("createFence — the one allowed structural add (NK-4 rule 2)", () => {
+  // Every fixture is run through `locateFence`, never through a prefix/suffix compare of
+  // `createFence`'s output against its own inputs. That compare is the tautology 2.2's AC #1 bans; it
+  // is named here so nobody adds it back believing it proves something. The LOCATOR is the oracle:
+  // an off-by-one in the delimiter framing goes red because the locator cannot find the body back.
+
+  /** The offset just past the frontmatter block's closing `---` line — the pinned insertion point. */
+  function afterFrontmatter(md: string): number {
+    if (!md.startsWith("---")) return 0;
+    const close = md.indexOf("\n---", 3);
+    if (close === -1) return 0;
+    const nl = md.indexOf("\n", close + 1);
+    return nl === -1 ? md.length : nl + 1;
+  }
+
+  const CANONICAL = "---\ntitle: T\nnk-type: card\n---\n\nProse here.\n";
+
+  test("THE ORACLE — locateFence(createFence(...)) reads the body back EXACTLY, for every fixture", () => {
+    const fixtures: Array<{ md: string; type: string; body: string }> = [
+      { md: CANONICAL, type: "card", body: "title: T\n" },
+      { md: CANONICAL, type: "card", body: "title: T\nrole: r\ntags: [a, b]\n" },
+      { md: "---\nnk-type: card\n---\n", type: "card", body: "title: X\n" },
+      { md: "---\na: 1\n---\nno blank line before prose\n", type: "card", body: "title: Y\n" },
+      { md: CANONICAL, type: "primer", body: "title: T\n" },
+      // A colon-bearing value: only the FIRST colon splits (rule 7), so it survives whole.
+      { md: CANONICAL, type: "card", body: "url: https://x.y/z:1\n" },
+    ];
+    for (const { md, type, body } of fixtures) {
+      const out = createFence(md, type, body, afterFrontmatter(md));
+      const found = locateFence(out);
+      expect(found).not.toBeNull();
+      expect(found!.body).toBe(body);
+      expect(found!.type).toBe(type);
+    }
+  });
+
+  test("the created fence is the ONLY nk-fence in the note", () => {
+    const out = createFence(CANONICAL, "card", "title: T\n", afterFrontmatter(CANONICAL));
+    const f = locateFence(out)!;
+    expect(locateFence(out.slice(f.blockEnd))).toBeNull();
+    expect(out.match(/^```nk-[a-z]+$/gm)!.length).toBe(1);
+  });
+
+  test("the block lands immediately after the frontmatter, with exactly one \\n each side", () => {
+    const at = afterFrontmatter(CANONICAL);
+    const out = createFence(CANONICAL, "card", "title: T\n", at);
+    expect(out).toBe(
+      CANONICAL.slice(0, at) + "\n```nk-card\ntitle: T\n```\n" + "\n" + CANONICAL.slice(at),
+    );
+    // ⚠ THE INVARIANT IS INSERTED NEWLINES, NOT RENDERED BLANK LINES. On this fixture the result
+    // reads ONE blank line above the fence and TWO below, because the note already carried the blank
+    // line separating its frontmatter from its prose. That is correct and must not be "fixed" with a
+    // look-behind: the subtraction assertion below is written against the insertion form, so it holds
+    // whatever the surrounding prose contributes.
+    expect(out.startsWith("---\ntitle: T\nnk-type: card\n---\n\n```nk-card\n")).toBe(true);
+  });
+
+  test("AC #5 SUBTRACTION — deleting [blockStart, blockEnd) leaves the pre-note plus the two \\n", () => {
+    // ⚠ CONTENT, not offsets. An "differs only between bodyStart and bodyEnd" assertion is FALSE BY
+    // CONSTRUCTION here: creation inserts a whole block, so EVERY offset after the insertion point
+    // shifts. NK-4 rule 2 says the invariant lives on the fence AST, not on byte offsets.
+    for (const md of [CANONICAL, "---\nnk-type: card\n---\nprose\n", "---\na: 1\n---\n"]) {
+      const at = afterFrontmatter(md);
+      const out = createFence(md, "card", "title: T\n", at);
+      const f = locateFence(out)!;
+      const remainder = out.slice(0, f.blockStart) + out.slice(f.blockEnd);
+      expect(remainder).toBe(md.slice(0, at) + "\n" + "\n" + md.slice(at));
+    }
+  });
+
+  test("an EMPTY body composes to adjacent delimiters — bodyStart === bodyEnd", () => {
+    const out = createFence(CANONICAL, "card", "", afterFrontmatter(CANONICAL));
+    expect(out).toContain("```nk-card\n```\n");
+    const f = locateFence(out)!;
+    expect(f.body).toBe("");
+    expect(f.bodyStart).toBe(f.bodyEnd);
+  });
+
+  test("at === 0 (the no-frontmatter branch) — total, and the leading blank line is DECLARED", () => {
+    // Unreachable from the CLI: a note with no `---` block has no `nk-type:` opt-in, so 2.2's row 3
+    // (`nk-no-opt-in`) fires first and creation is never reached. Tested directly for the same reason
+    // 2.2 unit-tests `spliceFence`'s unreachable throw — an untested arm rots.
+    const out = createFence("prose only\n", "card", "title: T\n", 0);
+    expect(out).toBe("\n```nk-card\ntitle: T\n```\n\nprose only\n");
+    expect(locateFence(out)!.body).toBe("title: T\n");
+  });
+
+  test("a CRLF note keeps its prose bytes; the created block is LF-only (normalization rule 1)", () => {
+    const crlf = "---\r\ntitle: T\r\nnk-type: card\r\n---\r\nProse\r\n";
+    const at = crlf.length; // append after the whole note — the container is what is under test
+    const out = createFence(crlf, "card", "title: T\n", at);
+    expect(out.startsWith(crlf)).toBe(true); // prose bytes byte-for-byte, CRLF intact
+    expect(out.slice(crlf.length)).toBe("\n```nk-card\ntitle: T\n```\n\n");
+    expect(locateFence(out)!.body).toBe("title: T\n");
+  });
+
+  describe("PURE BUT NOT TOTAL — a caller bug throws, the same call cardTree makes", () => {
+    test("an info-string type outside /^[a-z]+$/ throws", () => {
+      for (const bad of ["nk-card", "Card", "card1", "", "ca rd", "card-x", "CARD"]) {
+        expect(() => createFence(CANONICAL, bad, "title: T\n", 0)).toThrow(
+          /info-string type must match/,
+        );
+      }
+      expect(() => createFence(CANONICAL, "card", "title: T\n", 0)).not.toThrow();
+    });
+
+    test("🔴 THE `at` GUARD — an unguarded offset destroys the note SILENTLY", () => {
+      // `String.prototype.slice` coerces and clamps rather than failing, so the two-slice form has no
+      // natural bottom. Each of these returned a plausible-looking string with the guard removed
+      // (counterfactual run + recorded in the Debug Log): NaN put the block BEFORE the opening `---`
+      // (no opt-in, unrenderable); 1.5 split `---` mid-delimiter; -1 duplicated the last byte on both
+      // sides of the block. None threw. `at` is computed from a frontmatter scan that can return -1,
+      // so this is a REACHABLE caller bug, not a hypothetical one.
+      for (const bad of [NaN, 1.5, -1, Infinity, CANONICAL.length + 1]) {
+        expect(() => createFence(CANONICAL, "card", "title: T\n", bad)).toThrow(
+          /insertion offset must be an integer/,
+        );
+      }
+      expect(() => createFence(CANONICAL, "card", "title: T\n", 0)).not.toThrow();
+      expect(() => createFence(CANONICAL, "card", "title: T\n", CANONICAL.length)).not.toThrow();
+    });
+  });
+
+  test("FR-16 parity holds on a fence this story just created", () => {
+    // A second `\n` after `body` would put a blank line inside the fence, which `parseFenceBody` then
+    // drops (rule 2) — making `serialize(parse(body)) !== body` on a fence 2.5 authored, and failing
+    // Story 3.1's gate.
+    const body = "title: T\nrole: r\ntags: [a, b]\n";
+    const out = createFence(CANONICAL, "card", body, afterFrontmatter(CANONICAL));
+    const found = locateFence(out)!;
+    expect(`${serializeFenceBody(parseFenceBody(found.body))}\n`).toBe(found.body);
   });
 });

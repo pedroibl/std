@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { extractJson, parseFrontmatter, parseNdjson } from "./parse";
+import { extractJson, parseFrontmatter, parseFrontmatterBlock, parseNdjson } from "./parse";
 
 describe("parseNdjson", () => {
   test("parses one object per non-blank line", () => {
@@ -110,5 +110,88 @@ describe("extractJson", () => {
   test("carries the caller's type", () => {
     const v = extractJson<{ n: number }>('{"n":42}');
     expect(v?.n).toBe(42);
+  });
+});
+
+// ── parseFrontmatterBlock — the block's END, from the same match as its fields (Story 2.5) ────────
+
+describe("parseFrontmatterBlock — one match, one answer", () => {
+  test("`parseFrontmatter` is exactly the fields half — no behaviour change for existing callers", () => {
+    for (const text of [
+      "---\na: 1\nb: [x, y]\n---\nprose\n",
+      "---\r\na: 1\r\n---\r\nprose\r\n",
+      "no frontmatter at all\n",
+      "",
+      "---\n---\n",
+      "---\ntitle: \"Some: Thing\"\n---\n",
+    ]) {
+      expect(parseFrontmatter(text)).toEqual(parseFrontmatterBlock(text).fields);
+    }
+  });
+
+  test("`end` lands just past the closing delimiter's line, for LF, CRLF and EOF", () => {
+    const cases: Array<[string, string]> = [
+      ["---\na: 1\n---\nprose\n", "prose\n"],
+      ["---\na: 1\n---\n\nprose\n", "\nprose\n"],
+      ["---\r\na: 1\r\n---\r\nprose\r\n", "prose\r\n"],
+      ["---\na: 1\n---", ""],                    // EOF with no terminator
+      ["---\na: 1\n---   \nprose\n", "prose\n"], // trailing whitespace on the closing line
+    ];
+    for (const [text, rest] of cases) {
+      expect(text.slice(parseFrontmatterBlock(text).end)).toBe(rest);
+    }
+  });
+
+  test("⚠ A LONE-CR note has NO block at all, and `end` agrees with that rather than guessing", () => {
+    // The opening pattern requires `---\n` (`/^---\r?\n/`), so a lone-CR document is not frontmatter to
+    // this parser — it never was, and that is inherited behaviour, not something the `end` half
+    // introduced. What matters is that BOTH halves say so: no fields, and offset 0. An `end` that
+    // pointed past a "block" the fields half did not see is exactly the disagreement this type exists
+    // to make impossible.
+    const loneCr = "---\ra: 1\r---\rprose\r";
+    expect(parseFrontmatterBlock(loneCr)).toEqual({ fields: {}, end: 0 });
+  });
+
+  test("no block ⇒ `end` is 0, so a caller inserts at the very start", () => {
+    expect(parseFrontmatterBlock("just prose\n").end).toBe(0);
+    expect(parseFrontmatterBlock("").end).toBe(0);
+    // An UNTERMINATED block is not a block: there is no closing `---` to end after.
+    expect(parseFrontmatterBlock("---\na: 1\nprose with no close\n").end).toBe(0);
+  });
+
+  test("🔴 REGRESSION — a GLUED closing delimiter: fields and `end` cannot disagree", () => {
+    // This is the case that made a caller-side "where does frontmatter stop" pattern corrupt a note.
+    // `parseFrontmatter` treats `---EXTRA prose` as the closing delimiter and returns real fields; a
+    // separate `/^---\r?\n[\s\S]*?\r?\n---[ \t]*(\r\n|\r|\n|$)/` found NO match and reported offset 0,
+    // so the caller inserted BEFORE the opening `---`, the note stopped being frontmatter-led, and the
+    // `nk-type:` opt-in it carried silently vanished. Measured 2026-08-06; found in cross-vendor review.
+    const glued = "---\ntitle: Hello\nnk-type: card\n---EXTRA prose\n";
+    const block = parseFrontmatterBlock(glued);
+
+    expect(block.fields).toEqual({ title: "Hello", "nk-type": "card" }); // a block, with an opt-in
+    expect(block.end).toBeGreaterThan(0);                                 // …and it is NOT offset 0
+
+    // The end runs past the WHOLE closing line, glue included — inserting there splits no line the
+    // author wrote, and leaves the frontmatter intact and still leading. On this fixture the glued
+    // line is the last one, so `end` is the whole document.
+    expect(block.end).toBe(glued.length);
+    expect(glued.slice(block.end)).toBe("");
+
+    // …and with prose after it, `end` stops at the line boundary rather than swallowing the note.
+    const withProse = "---\ntitle: Hello\nnk-type: card\n---EXTRA\nreal prose\n";
+    expect(withProse.slice(parseFrontmatterBlock(withProse).end)).toBe("real prose\n");
+
+    // The property that matters: inserting at `end` keeps the note frontmatter-led and the opt-in alive.
+    const inserted = glued.slice(0, block.end) + "INSERTED\n" + glued.slice(block.end);
+    expect(inserted.startsWith("---\n")).toBe(true);
+    expect(parseFrontmatter(inserted)).toEqual({ title: "Hello", "nk-type": "card" });
+
+    // COUNTERFACTUAL — the pattern that shipped first, at offset 0, and what it did to this note.
+    const OLD = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(\r\n|\r|\n|$)/;
+    const oldEnd = OLD.exec(glued) === null ? 0 : OLD.exec(glued)![0].length;
+    expect(oldEnd).toBe(0);
+    const wrecked = "INSERTED\n" + glued;
+    expect(wrecked.startsWith("---")).toBe(false);
+    expect(parseFrontmatter(wrecked)).toEqual({}); // the opt-in is GONE, silently
   });
 });

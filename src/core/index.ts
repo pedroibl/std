@@ -10,7 +10,8 @@ export { emptyCounts, statusLine, type Counts } from "./status";
 export { classify, toResult, type Classified, type Result } from "./result";
 export { configValue, tryParse } from "./config";
 export { dateParts, type DateParts, daysSince, isoDate, isoOffset } from "./date";
-export { extractJson, parseFrontmatter, parseNdjson } from "./parse";
+export { extractJson, parseFrontmatter, parseFrontmatterBlock, parseNdjson } from "./parse";
+export type { FrontmatterBlock } from "./parse";
 export {
   type PluginContractEntry,
   type PluginFinding,
