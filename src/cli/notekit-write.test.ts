@@ -2103,20 +2103,18 @@ describe("2.7 ⚠️-2 (RULED) — a fenceless note honours --body -, and the te
     expect(written.match(/^```nk-[a-z]+$/gm)!.length).toBe(1); // exactly ONE fence, never two
   });
 
-  test("the gap advisory is measured against the FINAL fields, not the frontmatter", async () => {
-    // The reroute this story owes: with a stdin body the frontmatter is no longer the field source, so a
-    // frontmatter-keyed advisory would name keys the written fence does not reflect. `summary` is
-    // answered by the frontmatter and OMITTED by the stdin body — so it must be reported as a gap.
-    const h = harness({ readNote: scriptedReads(FENCELESS, FENCELESS, "unused"), readBody: async () => "title: T\n" });
-    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", "--at", AT, ...BODY_FLAG], h.deps)).toBe(1);
-    // The row-9 failure envelope carries no value, so the advisory is read off the preview run instead.
-    const p = harness({ readNote: () => FENCELESS });
-    await runNotekitRead(["render", "n.md", ...CONFIG, "--json", "--at", AT], p.deps);
-    expect(JSON.parse(p.out[0]!).value.gaps).toEqual(["status"]); // frontmatter answers title + summary
-  });
-
-  test("…and with the SAME note the stdin body's own omissions are what get reported", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "nk-27-seed-"));
+  test("🔴 the gap advisory is measured against the FINAL fields, and the CONTROL proves it", async () => {
+    // 🔴 THIS TEST REPLACES A VACUOUS ONE, AND THE STORY OF THAT IS THE POINT. The first version
+    // asserted the advisory off a SEPARATE `runNotekitRead` preview with no `--body` — which reports
+    // the frontmatter derivation whether or not the reroute happened, so it passed over a `seedPlan`
+    // rewired to take gaps from the frontmatter. Cross-vendor review caught it (grok, 2026-08-06) and
+    // the mutation was reproduced before the fix. A test whose NAME claims the coverage its BODY does
+    // not provide is worse than no test: it is how a later refactor lands green while the comment lies.
+    //
+    // The property, stated so it can only be satisfied by the reroute: `FENCELESS`'s frontmatter
+    // answers `title` AND `summary`; the stdin body answers `title` only. So the two origins DISAGREE
+    // about `summary`, and which one the advisory names is the whole question.
+    const dir = mkdtempSync(join(tmpdir(), "nk-27-gaps-"));
     const note = join(dir, "n.md");
     writeFileSync(note, FENCELESS);
     try {
@@ -2126,8 +2124,16 @@ describe("2.7 ⚠️-2 (RULED) — a fenceless note honours --body -, and the te
         loadRegistry: async () => REGISTRY, readBody: async () => "title: T\n",
       };
       expect(await runNotekitApply(["render", note, ...CONFIG, "--json", "--at", AT, ...BODY_FLAG], deps)).toBe(0);
-      // `summary` AND `status` are both gaps now: the stdin body answered neither.
+      // THE ASSERTION: `summary` is a gap, though the FRONTMATTER answers it — because the stdin body
+      // did not. Under a frontmatter-keyed advisory this reads `["status"]` and goes red.
       expect(envelope(out).value!.gaps).toEqual(["summary", "status"]);
+
+      // THE CONTROL, on the same note, same registry: with NO `--body`, the advisory is the frontmatter
+      // derivation and `summary` is NOT a gap. The two runs differing is the proof; either alone is a
+      // number with nothing to compare it to.
+      const p = harness({ readNote: () => FENCELESS });
+      await runNotekitRead(["render", note, ...CONFIG, "--json", "--at", AT], p.deps);
+      expect(JSON.parse(p.out[0]!).value.gaps).toEqual(["status"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2138,6 +2144,39 @@ describe("2.7 ⚠️-2 (RULED) — a fenceless note honours --body -, and the te
     const h = harness({ readNote: () => FENCELESS, readBody: async () => "" });
     expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", ...BODY_FLAG], h.deps)).toBe(1);
     expect(envelope(h.out).error).toMatchObject({ code: "nk-no-fence" });
+    expect(h.writes).toEqual([]);
+  });
+
+  test("🔴 …and the refusal names STDIN as the cause, because the frontmatter is not the one at fault", async () => {
+    // 🔴 THE CODE-ONLY ASSERTION ABOVE PASSED OVER A FALSE MESSAGE, which is why this exists. Found by
+    // cross-vendor review (grok, 2026-08-06) and reproduced: `FENCELESS`'s frontmatter answers `title`
+    // and `summary`, yet the refusal read "its frontmatter answers no key of the note type's rubric".
+    // An operator told that would edit frontmatter forever while the real repair is to pipe a body.
+    // ⚠ ASSERTED ON THE MESSAGE, not only the code — a message is exactly what a code-only assertion
+    // cannot see, and this story already documents that class for JSON-on-stdin one layer up.
+    const h = harness({ readNote: () => FENCELESS, readBody: async () => "" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", ...BODY_FLAG], h.deps)).toBe(1);
+    const message = String((envelope(h.out).error as { message: string }).message);
+    expect(message).toContain("stdin");
+    expect(message).not.toContain("frontmatter"); // the false cause, pinned ABSENT
+
+    // …and the no-override arm keeps 2.5's wording verbatim, so the fix narrowed rather than replaced.
+    const bare = harness({ readNote: () => "---\nnk-type: card\n---\n\njust prose\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json"], bare.deps)).toBe(1);
+    expect(String((envelope(bare.out).error as { message: string }).message)).toContain(
+      "its frontmatter answers no key",
+    );
+  });
+
+  test("…and an UNTERMINATED fence outranks the body arm: it is a fact about the NOTE", async () => {
+    // Ordering, pinned. A torn note refuses for the torn-note reason even under `--body -`, because
+    // creating a second opening run over an unclosed one is the corruption NK-4 rule 2 exists to stop.
+    const torn = "---\nnk-type: card\n---\n\n```nk-card\ntitle: Primer\n";
+    const h = harness({ readNote: () => torn, readBody: async () => "" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--json", ...BODY_FLAG], h.deps)).toBe(1);
+    const message = String((envelope(h.out).error as { message: string }).message);
+    expect(message).toContain("never closed");
+    expect(message).not.toContain("stdin");
     expect(h.writes).toEqual([]);
   });
 });

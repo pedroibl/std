@@ -655,18 +655,29 @@ export async function renderPlan(
       bodyOverride,
     );
     if (seed !== null) return seed;
-    // ⚠ THE MESSAGE DISTINGUISHES THE TWO REFUSAL ARMS; THE CODE DOES NOT, DELIBERATELY. A second code
+    // ⚠ THE MESSAGE DISTINGUISHES THE REFUSAL ARMS; THE CODE DOES NOT, DELIBERATELY. A second code
     // would be a widening SM-C2 counts against, and 2.3's/2.4's error-code inventories pin the count.
     // But "note has no nk-fence" alone is a dead end for the arm author mode declined: the reader needs
     // to know whether the note is malformed or simply has nothing to seed from. Message text is not in
     // any sibling's inventory, so this costs nothing and answers the question.
+    //
+    // 🔴 THE THIRD ARM IS STORY 2.7'S, AND IT EXISTS BECAUSE THE TWO-ARM FORM STATED A FALSE CAUSE —
+    // cross-vendor review finding (grok, 2026-08-06), reproduced before it was believed. With
+    // `--body -` the seed's field source is STDIN, so condition 3 fails when the STDIN BODY answered no
+    // rubric key. The frontmatter wording then blamed a frontmatter that may answer every key it has,
+    // and an operator (or an agent) following it would "fix" the frontmatter forever while the real
+    // repair is to pipe a body or drop the flag. That is the exact class this story's own apply-skill
+    // text warns about for JSON-on-stdin — a refusal that names the wrong thing — reproduced one layer
+    // down. ⚠ The unterminated-fence arm still wins: it is a fact about the NOTE and outranks both.
     return {
       kind: "error",
       error: {
         code: "nk-no-fence",
         message: FENCE_OPENING_LINE.test(source)
           ? "note has no nk-fence — an opening delimiter is present but never closed, so nothing was created over it"
-          : "note has no nk-fence, and its frontmatter answers no key of the note type's rubric — nothing to seed one from",
+          : bodyOverride !== undefined
+            ? "note has no nk-fence, and the fence body read from stdin answers no key of the note type's rubric — nothing to seed one from"
+            : "note has no nk-fence, and its frontmatter answers no key of the note type's rubric — nothing to seed one from",
       },
     };
   }

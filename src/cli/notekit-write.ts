@@ -274,10 +274,11 @@ export async function runNotekitApply(
     // load, no "read it and ignore it if unused" — `notekit-write.test.ts` asserts the negative with a
     // `readBody` double that THROWS, which proves nothing was even attempted rather than merely that
     // nothing was written.
-    // ⚠ THE PREDICATE IS THE SHARED TWO-FORM ONE, never a local bare-form read: that form is blind to
-    // the equals spelling and would degrade this flag into a silent no-op at exit `0`. The single-read
-    // gate in `main.test.ts` greps for the reader call WITHOUT masking comments, so naming the banned
-    // form literally here would turn that gate red against correct code — hence the paraphrase.
+    // ⚠ THE PREDICATE IS THE SHARED TWO-FORM ONE, never a local `hasFlag(argv, "body")`: that form is
+    // blind to `--body=-` and would degrade this flag into a silent no-op at exit `0`.
+    // (This comment names the banned form on purpose. It could not, until the single-read gate in
+    // `main.test.ts` was taught to mask comments — a cross-vendor review finding, and the right fix:
+    // a gate that bans a CODE token must not count prose.)
     let body: string | undefined;
     if (bodyFromStdinRequested(argv)) {
       const read = await (deps.readBody ?? readStdinText)();

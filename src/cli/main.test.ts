@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { CN_PLUGIN_CONTRACT } from "../cn/plugins";
 import { HELP, globalReposPath, runMain } from "./main";
 import { makeVaultFixture } from "./vault-fixture";
+import { stripComments, stripStringsAndComments } from "../../scripts/lib/specifiers";
 
 /** Write a temp repos.ts (a RepoConfig default export) and return its path. */
 function tempRepos(body: string): { dir: string; path: string } {
@@ -831,20 +832,58 @@ describe("2.7 AC #2 — the --body grammar, through main.ts's notekit arm", () =
 
   test("2.2's single-`--apply`-read gate is still at exactly one, and `--body` adds no second read", () => {
     // ⚠ THE GLOB FORM, never a shell-expanded path list (2.5 AC #4's correction to 2.2 — `rg` honours
-    // an explicit path over a `-g '!…'` exclusion).
-    for (const [flag, expected] of [["apply", 1], ["body", 1]] as const) {
-      const proc = Bun.spawnSync({
-        cmd: [
-          "rg", "-n", `hasFlag\\([^)]*"${flag}"`, "src/",
-          "-g", "src/cli/main.ts", "-g", "src/cli/notekit-*.ts", "-g", "src/notekit/**/*.ts", "-g", "!*.test.ts",
-        ],
-        cwd: join(import.meta.dir, "..", ".."),
-        stdout: "pipe",
+    // an explicit path over a `-g '!…'` exclusion). The globs stay the enumeration of scope; only the
+    // COUNTING moved off `rg`.
+    //
+    // 🔴 MASKED WITH `stripComments`, AND THE FIRST DRAFT WAS NOT MASKED AT ALL — cross-vendor review
+    // finding (grok, 2026-08-06), confirmed by probe. A raw `rg` counts a token wherever it appears, so
+    // a COMMENT naming the banned form (`never a local hasFlag(argv, "body")`) turned this gate red
+    // against a tree whose production code had exactly one reader. The first response was to paraphrase
+    // the comment, which is a workaround that hands the next editor a trap: "restore clarity" in prose
+    // and CI fails for prose. This gate bans a CODE token, so comments are masked and it counts code.
+    //
+    // ⚠ `stripComments`, NOT `stripStringsAndComments` — and the difference is load-bearing rather than
+    // a preference. The stronger helper blanks string CONTENT too, so `hasFlag(argv, "body")` becomes
+    // `hasFlag(argv, "    ")` and this gate would match NOTHING, reporting a green zero for every flag.
+    // That is why `sole-writer.test.ts` can use the stronger one and this cannot: it bans a CALL token
+    // (`atomicWrite(`), while the name this gate counts lives INSIDE the string argument.
+    const repo = join(import.meta.dir, "..", "..");
+    const files = Bun.spawnSync({
+      cmd: [
+        "rg", "--files", "src/",
+        "-g", "src/cli/main.ts", "-g", "src/cli/notekit-*.ts", "-g", "src/notekit/**/*.ts", "-g", "!*.test.ts",
+      ],
+      cwd: repo,
+      stdout: "pipe",
+    }).stdout.toString().trim().split("\n").filter(Boolean);
+    // The scope is non-empty, or every count below is a vacuous zero.
+    expect(files.length).toBeGreaterThan(0);
+
+    for (const [flag, expected, owner] of [["apply", 1, "main.ts"], ["body", 1, "notekit-write.ts"]] as const) {
+      const pattern = new RegExp(`hasFlag\\([^)]*"${flag}"`, "g");
+      const hits = files.flatMap((f) => {
+        const clean = stripComments(readFileSync(join(repo, f), "utf-8"));
+        return (clean.match(pattern) ?? []).map(() => f);
       });
-      const hits = proc.stdout.toString().trim().split("\n").filter(Boolean);
       expect(hits).toHaveLength(expected);
-      // …and the ONE `body` read lives inside the shared predicate, not in a caller.
-      if (flag === "body") expect(hits[0]).toContain("notekit-write.ts");
+      // …and the ONE read lives where it is supposed to — for `body`, inside the shared predicate.
+      expect(hits[0]).toContain(owner);
     }
+  });
+
+  test("COUNTERFACTUAL — the masked gate no longer reddens on a COMMENT, but still does on CODE", () => {
+    // Both halves, because a mask that swallowed the real reads too would be a gate that cannot fail.
+    const pattern = /hasFlag\([^)]*"body"/;
+
+    // A line comment naming the banned form no longer counts…
+    expect(pattern.test(stripComments(`// never a local hasFlag(argv, "body") here\nconst x = 1;\n`))).toBe(false);
+    // …nor does a block comment…
+    expect(pattern.test(stripComments(`/* hasFlag(argv, "body") */\nconst y = 2;\n`))).toBe(false);
+    // …and the REAL reader still does. Without this half a mask that swallowed everything would look
+    // like a passing gate, which is the failure mode the mask itself introduces.
+    expect(pattern.test(stripComments(`const p = hasFlag(argv, "body");\n`))).toBe(true);
+    // And the reason the STRONGER helper is wrong here, asserted rather than asserted-in-prose: it
+    // blanks the string the flag name lives in, so the gate would count zero and look green.
+    expect(pattern.test(stripStringsAndComments(`const p = hasFlag(argv, "body");\n`))).toBe(false);
   });
 });
