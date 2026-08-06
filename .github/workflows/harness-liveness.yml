@@ -80,7 +80,37 @@ jobs:
       # branch and the opt-in skip both unreachable, so this is the one place where a probe cannot skip.
       # That property is what makes the whole arrangement honest — opt-in alone would be a probe that
       # never runs, which is the green-by-construction failure NK-10 r4 forbids (NK-12 r4).
+      #
+      # 🔴 SETTING THE FLAG IS NOT ENOUGH, AND ASSUMING IT WAS IS THE BUG THIS STEP EXISTS TO PREVENT.
+      # Cross-vendor review caught the first draft of this workflow doing exactly that: it exported the
+      # variable and trusted the probes to run. But every skip path in the suite is `console.warn` +
+      # `expect(true).toBe(true)` — a SKIP is GREEN. So a binary that vanished, a renamed env var, a
+      # moved test file, or a `bun test` that matched nothing would all produce a passing canary that
+      # proved nothing. The output is therefore ASSERTED against, not merely produced: the job fails if
+      # any skip marker appears, and fails if the probe count is not what it must be. A canary that can
+      # be green while silent is not a canary.
       - name: Liveness probes (the only place they cannot skip)
         env:
           STD_HARNESS_PROBES: "1"
-        run: bun test src/notekit/notewright-apply-gate.test.ts src/notekit/notewright-dispatch.test.ts
+        run: |
+          set -o pipefail
+          bun test \
+            src/notekit/notewright-apply-gate.test.ts \
+            src/notekit/notewright-dispatch.test.ts 2>&1 | tee probe-output.txt
+
+          echo "── asserting the probes actually RAN ──"
+          if grep -q "STD_HARNESS_PROBES=1" probe-output.txt; then
+            echo "::error::the opt-in skip fired WITH the flag set — the flag is not reaching the suite"
+            exit 1
+          fi
+          if grep -qi "SKIP: .claude. is not on PATH" probe-output.txt; then
+            echo "::error::a probe skipped for an absent binary AFTER the install step verified one"
+            exit 1
+          fi
+          PASSED=$(grep -oE "^ *[0-9]+ pass" probe-output.txt | grep -oE "[0-9]+" | head -1)
+          echo "tests passed: ${PASSED:-none}"
+          if [ -z "${PASSED:-}" ] || [ "$PASSED" -lt 100 ]; then
+            echo "::error::expected the full gate suite (100+ tests); got '${PASSED:-none}'."
+            echo "::error::A canary that runs almost nothing is green for the wrong reason."
+            exit 1
+          fi

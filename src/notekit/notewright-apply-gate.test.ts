@@ -322,8 +322,18 @@ function resolveBinary(): string | null {
  * first and the failure names the spawn that hung.
  */
 const CLI_SPAWN_TIMEOUT_MS = 30_000;
-/** The per-test bound for any test spawning a child, kept above `*_SPAWN_TIMEOUT_MS`. */
-const SPAWNING_TEST_TIMEOUT_MS = 60_000;
+/**
+ * The per-test bound for any test spawning a child, kept above the TOTAL of the children it spawns.
+ *
+ * ⚠ `n × CLI_SPAWN_TIMEOUT_MS + slack`, NOT simply "more than one child". Cross-vendor review 2026-08-06
+ * found the first value (60_000) was exactly 2 × 30_000 — so in the two tests that spawn TWICE in
+ * sequence (gate (b) `--version` then `strings`; gate (e)'s `--json` pair of `runCli` calls) two hung
+ * children would consume the entire test budget and the runner could reap the group at the same instant
+ * the second child was killed. That is a race between the two bounds, and it lands back on the failure
+ * the child bound was introduced to remove: an assertion failing for a reason unrelated to the gate.
+ * Max children in any one test here is 2, so 2 × 30_000 + 30_000 slack.
+ */
+const SPAWNING_TEST_TIMEOUT_MS = 90_000;
 
 /** A cold `std` subprocess through THIS checkout. */
 function runCli(args: string[]): { exitCode: number; stdout: string; stderr: string } {
@@ -437,10 +447,19 @@ const DOCTOR_SPAWN_TIMEOUT_MS = 30_000;
  * is precisely the green-by-construction failure NK-10 r4 exists to forbid. Do not adopt one half.
  */
 const HARNESS_PROBES = process.env.STD_HARNESS_PROBES === "1";
-/** The reason string, so a skipped run says WHY rather than vanishing. */
+/**
+ * The reason string, so a skipped run says WHY rather than vanishing.
+ *
+ * ⚠ IT NAMES WHAT THE SKIP COSTS, and it does not overstate its own remedy. An earlier draft ended
+ * "the scheduled harness-liveness workflow always does" — present tense, about a workflow that did not
+ * exist in the tree yet. Cross-vendor review flagged the operator-facing string asserting a false
+ * present fact, which is worse than saying nothing: it tells the reader the coverage is handled.
+ */
 const HARNESS_PROBES_SKIP =
-  "[apply-gate g] SKIP: spawns the real `claude` binary, which WRITES to the macOS login keychain " +
-  "(NK-12). Set STD_HARNESS_PROBES=1 to run; the scheduled harness-liveness workflow always does.";
+  "[apply-gate g] SKIP: this probe spawns the real `claude` binary, which WRITES to the macOS login " +
+  "keychain (NK-12). UNPROVEN while skipped: that the harness still PARSES our deny entry — the one " +
+  "claim no `strings` scan reaches. Run it with STD_HARNESS_PROBES=1, or via .github/workflows/" +
+  "harness-liveness.yml, which sets the flag and fails if these probes skip.";
 
 /**
  * Gate (g)'s BEHAVIOURAL step: hand a settings file to the harness's OWN permission-rule parser and read
@@ -477,9 +496,17 @@ const HARNESS_PROBES_SKIP =
  * session rather than to `$HOME` alone, so that containment would be unverifiable without triggering the
  * dialog it is meant to avoid — the same error one layer down. Routing is the fix.
  *
- * SO: skipped unless `STD_HARNESS_PROBES=1`, and run unconditionally in the scheduled
- * `harness-liveness.yml` (NK-11 r3) where the runner is ephemeral. Opt-in ALONE would be a probe that
- * never runs; the canary is what keeps this honest, and NK-12 r4 makes the pair the invariant.
+ * SO: skipped unless `STD_HARNESS_PROBES=1`, and run in `.github/workflows/harness-liveness.yml`
+ * (NK-11 r3) on `ubuntu-latest`, where there is no macOS keychain to write to and no operator. That
+ * workflow sets the flag AND fails if these probes skip anyway — a canary that can be green while
+ * silent is not a canary. Opt-in ALONE would be a probe that never runs; NK-12 r4 makes the pair the
+ * invariant, and shipping either half by itself is the failure it forbids.
+ *
+ * ⚠ WHAT IS NOT YET TRUE, stated because the alternative is a comment that quietly overstates itself:
+ * that workflow has **never executed**. GitHub only registers a `workflow_dispatch` trigger once the
+ * file is on the default branch, so it cannot run until this lands. At merge the pair is satisfied
+ * STRUCTURALLY — the consumer exists — but not DEMONSTRABLY. Dispatching it is the first act after
+ * merge, not a nicety, and until it goes green this probe's coverage is owed rather than restored.
  */
 function doctorVerdict(bin: string, settingsJson: string): DoctorVerdict {
   const dir = mkdtempSync(join(tmpdir(), "nk-doctor-"));
@@ -861,10 +888,24 @@ describe("apply gate (b) — the gate key is still spelled the way the INSTALLED
 // hazard gate (b) covers for the frontmatter key, one layer over. The primitive disappearing SILENTLY is
 // the whole risk: nothing in this repo would notice.
 //
-// 🔴 SAME SKIP DISCIPLINE AS (b), AND IT MUST NOT BE WIDENED. An absent binary is the ONLY skip
-// condition. A binary that RESOLVES but whose anchor the probe cannot find is RED — that state IS the
-// regression. A skip that also covered "inconclusive" is how a SKIP = 0 gate becomes green by
-// construction and stops being a gate.
+// 🔴 SKIP DISCIPLINE — TWO PATHS, AND THE DIFFERENCE BETWEEN THEM IS THE WHOLE POINT. This header used
+// to read "an absent binary is the ONLY skip condition", and that stopped being true the moment NK-12
+// added the opt-in below. Cross-vendor review caught the contradiction still standing here after the
+// spine clause had been amended — a file asserting one rule while implementing another. Stated properly:
+//
+//   1. ABSENT BINARY (`bin === null`) — the LEXICAL probes skip. Leaves upstream-anchor liveness
+//      unproven. A binary that RESOLVES but whose anchor the probe cannot find is RED, never SKIP:
+//      that state IS the regression, and a skip covering "inconclusive" is how a SKIP = 0 gate goes
+//      green by construction and stops being a gate. UNCHANGED and must not be widened.
+//   2. `STD_HARNESS_PROBES` UNSET — the three BEHAVIOURAL probes skip, because they spawn `claude
+//      doctor`, which writes to the operator's real macOS login keychain (NK-12). Leaves the harness's
+//      own rule-PARSER acceptance unproven — the one claim no `strings` scan can reach.
+//
+// ⚠ WHAT PATH 2 COSTS, SAID PLAINLY RATHER THAN BURIED: on the default path the behavioural half of
+// gate (g) does not run. The lexical anchors and gate (f) still do, and they DO NOT REPLACE IT — this
+// file's own docstring says so. That coverage is restored in exactly one place, `harness-liveness.yml`,
+// which sets the flag and FAILS if the probes skip anyway. Opt-in without that forced consumer would be
+// a probe that never runs, which is the failure path 1 exists to forbid (NK-12 r4).
 
 describe("apply gate (g) — the harness still HAS the machinery the deny rule relies on", () => {
   test("AC #3g — both upstream anchors are present in the installed binary", () => {
