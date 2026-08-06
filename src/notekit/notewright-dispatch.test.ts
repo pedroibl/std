@@ -927,6 +927,12 @@ describe("notewright dispatch — AC #4c: nothing under src/ or scripts/ moved",
     "src/cli/notekit-read.ts",
     "src/cli/notekit-write.ts",
     "src/cli/notekit-write.test.ts",
+    // ⚠ AMENDMENT 3, Story 2.5 review follow-up (cross-vendor F2). The insertion offset moved into
+    // `core` as `parseFrontmatterBlock`, so the fields and the block END come from ONE match — a
+    // caller-side second pattern silently wrecked a note with a glued closing delimiter.
+    "src/core/parse.ts",
+    "src/core/parse.test.ts",
+    "src/core/index.ts",
   ];
 
   test("COUNTERFACTUAL 12 — a rename parses to BOTH its paths, not to `old -> new`", () => {

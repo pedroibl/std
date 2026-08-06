@@ -712,7 +712,7 @@ describe("deriveFenceFields — the rubric projection (AC #1)", () => {
   }
 
   test("the output key set is EXACTLY the rubric's keys ∩ the frontmatter's own keys", () => {
-    const { fields } = deriveFenceFields(note("title: T", "role: r", "org: o", "stray: s"), RUBRIC);
+    const { fields } = deriveFenceFields(parseFrontmatter(note("title: T", "role: r", "org: o", "stray: s")), RUBRIC);
     expect(Object.keys(fields)).toEqual(["title", "role", "org"]);
     expect(fields).toEqual({ title: "T", role: "r", org: "o" });
     // `stray` is in the frontmatter and NOT in the rubric — the projection drops it.
@@ -720,7 +720,7 @@ describe("deriveFenceFields — the rubric projection (AC #1)", () => {
   });
 
   test("a rubric key absent from the frontmatter yields NO key at all — not an empty one", () => {
-    const { fields } = deriveFenceFields(note("title: T"), RUBRIC);
+    const { fields } = deriveFenceFields(parseFrontmatter(note("title: T")), RUBRIC);
     expect(Object.keys(fields)).toEqual(["title"]);
     // The distinction matters downstream: `noteToRenderSpec` omits an absent key (no row) and writes
     // an EMPTY row for a present-but-empty one. Conflating them changes what the card renders.
@@ -732,11 +732,11 @@ describe("deriveFenceFields — the rubric projection (AC #1)", () => {
     // `serializeFenceBody(parseFrontmatter(text))` writes `nk-type: card` into the body, duplicating
     // the signal into a region the dispatcher never reads and polluting the rubric field set.
     const withOptIn = note("title: T", "nk-type: card", "role: r");
-    expect(Object.keys(deriveFenceFields(withOptIn, RUBRIC).fields)).toEqual(["title", "role"]);
+    expect(Object.keys(deriveFenceFields(parseFrontmatter(withOptIn), RUBRIC).fields)).toEqual(["title", "role"]);
 
     const pathological = { kind: "card" as const, titleField: "nk-type", fields: [{ key: "nk-type" }] };
-    expect(deriveFenceFields(withOptIn, pathological).fields).toEqual({});
-    expect(serializeFenceBody(deriveFenceFields(withOptIn, pathological).fields)).toBe("");
+    expect(deriveFenceFields(parseFrontmatter(withOptIn), pathological).fields).toEqual({});
+    expect(serializeFenceBody(deriveFenceFields(parseFrontmatter(withOptIn), pathological).fields)).toBe("");
   });
 
   test("an empty rubric key is SKIPPED — ⚠️-3 row 5, and FR-16 parity is why", () => {
@@ -745,7 +745,7 @@ describe("deriveFenceFields — the rubric projection (AC #1)", () => {
     // `serialize(parse(body)) !== body` on a fence this story just created, failing Story 3.1's gate.
     const orphan = note("title: T", " : orphan");
     const empties = { kind: "card" as const, titleField: "", fields: [{ key: "" }, { key: "title" }] };
-    expect(Object.keys(deriveFenceFields(orphan, empties).fields)).toEqual(["title"]);
+    expect(Object.keys(deriveFenceFields(parseFrontmatter(orphan), empties).fields)).toEqual(["title"]);
   });
 
   test("COUNTERFACTUAL — WITHOUT the empty-key skip, FR-16 parity is FALSE on the created body", () => {
@@ -755,7 +755,7 @@ describe("deriveFenceFields — the rubric projection (AC #1)", () => {
     expect(body).toBe(": orphan\ntitle: T\n");
     expect(`${serializeFenceBody(parseFenceBody(body))}\n`).not.toBe(body); // parity FALSE
     // …and with the skip, parity holds.
-    const { fields: skipped } = deriveFenceFields(note("title: T", " : orphan"), {
+    const { fields: skipped } = deriveFenceFields(parseFrontmatter(note("title: T", " : orphan")), {
       kind: "card" as const, titleField: "", fields: [{ key: "" }, { key: "title" }],
     });
     const good = `${serializeFenceBody(skipped)}\n`;
@@ -766,7 +766,7 @@ describe("deriveFenceFields — the rubric projection (AC #1)", () => {
     test("a colon-bearing quoted scalar SURVIVES the round trip", () => {
       // `parseFrontmatter` strips the quotes; `parseFenceBody` re-reads the literal, and only the
       // FIRST colon splits (rule 7) — so the value comes back whole.
-      const { fields } = deriveFenceFields(note('title: "Some: Thing"'), RUBRIC);
+      const { fields } = deriveFenceFields(parseFrontmatter(note('title: "Some: Thing"')), RUBRIC);
       expect(fields).toEqual({ title: "Some: Thing" });
       const body = `${serializeFenceBody(fields)}\n`;
       expect(body).toBe("title: Some: Thing\n");
@@ -777,7 +777,7 @@ describe("deriveFenceFields — the rubric projection (AC #1)", () => {
       // `parseFrontmatter` unquotes `'[a, b]'` to the literal string `[a, b]`; `parseFenceBody` then
       // reads that back as a two-element list. It is NOT "fixed" by re-quoting on the way out — that
       // would make the fence body non-canonical and break FR-16 parity, which Story 3.1 enforces.
-      const { fields } = deriveFenceFields(note("title: '[a, b]'"), RUBRIC);
+      const { fields } = deriveFenceFields(parseFrontmatter(note("title: '[a, b]'")), RUBRIC);
       expect(fields).toEqual({ title: "[a, b]" }); // still a STRING here
       const body = `${serializeFenceBody(fields)}\n`;
       expect(body).toBe("title: [a, b]\n");
@@ -787,7 +787,7 @@ describe("deriveFenceFields — the rubric projection (AC #1)", () => {
 
   test("array-index keys VANISH one layer down, by design (rule 8) — inherited, not a bug here", () => {
     const indexed = { kind: "card" as const, titleField: "title", fields: [{ key: "1" }] };
-    const { fields } = deriveFenceFields(note("title: T", "1: one"), indexed);
+    const { fields } = deriveFenceFields(parseFrontmatter(note("title: T", "1: one")), indexed);
     expect(Object.prototype.hasOwnProperty.call(fields, "1")).toBe(true); // derive KEEPS it…
     expect(serializeFenceBody(fields)).toBe("title: T"); // …and the codec drops it
   });
@@ -800,15 +800,15 @@ describe("deriveFenceFields — the rubric projection (AC #1)", () => {
       expect(Object.keys(parseFrontmatter("---\n__proto__: x\n---\n"))).toEqual([]);
 
       const proto = { kind: "card" as const, titleField: "title", fields: [{ key: "__proto__" }] };
-      const { fields: derived } = deriveFenceFields(note("title: T", "__proto__: x"), proto);
+      const { fields: derived } = deriveFenceFields(parseFrontmatter(note("title: T", "__proto__: x")), proto);
       expect(Object.prototype.hasOwnProperty.call(derived, "__proto__")).toBe(false);
 
       const inherited = { kind: "card" as const, titleField: "title", fields: [{ key: "toString" }, { key: "constructor" }, { key: "valueOf" }] };
       // `toString` is NOT in the frontmatter — a truthiness check would find the inherited FUNCTION.
-      const { fields: noneWritten } = deriveFenceFields(note("title: T"), inherited);
+      const { fields: noneWritten } = deriveFenceFields(parseFrontmatter(note("title: T")), inherited);
       expect(Object.keys(noneWritten)).toEqual(["title"]);
       // …and when they ARE written, they survive as ordinary own fields.
-      const { fields: written } = deriveFenceFields(note("title: T", "constructor: c", "valueOf: v"), inherited);
+      const { fields: written } = deriveFenceFields(parseFrontmatter(note("title: T", "constructor: c", "valueOf: v")), inherited);
       expect(Object.keys(written)).toEqual(["title", "constructor", "valueOf"]);
       // Read through an index rather than `written.constructor` — the property NAME collides with
       // `Object`'s, and tsc resolves the dotted form to `Function` even on a null-prototype record.
@@ -817,13 +817,13 @@ describe("deriveFenceFields — the rubric projection (AC #1)", () => {
     });
 
     test("(a) the OUTPUT is null-prototype too, mirroring parseFenceBody", () => {
-      const { fields } = deriveFenceFields(note("title: T"), RUBRIC);
+      const { fields } = deriveFenceFields(parseFrontmatter(note("title: T")), RUBRIC);
       expect(Object.getPrototypeOf(fields)).toBeNull();
     });
 
     test("(b) sparse/holed arrays — the derived list is DENSE, no undefined/null reaches the note", () => {
       const tagged = { kind: "card" as const, titleField: "title", fields: [{ key: "tags" }] };
-      const { fields } = deriveFenceFields(note("title: T", "tags: [a, , b]"), tagged);
+      const { fields } = deriveFenceFields(parseFrontmatter(note("title: T", "tags: [a, , b]")), tagged);
       expect(fields.tags).toEqual(["a", "b"]); // `parseFrontmatter` filters empties
       const body = serializeFenceBody(fields);
       expect(body).toContain("tags: [a, b]");
@@ -835,24 +835,24 @@ describe("deriveFenceFields — the rubric projection (AC #1)", () => {
     });
 
     test("(c) an empty value derives to an empty field — reported as a gap, never a silent blank", () => {
-      const { fields } = deriveFenceFields(note("title: T", "role:", "org: o"), RUBRIC);
+      const { fields } = deriveFenceFields(parseFrontmatter(note("title: T", "role:", "org: o")), RUBRIC);
       expect(fields).toEqual({ title: "T", role: "", org: "o" });
       // PRESENT-BUT-EMPTY is a gap on the same footing as absent — the human still has to fill it in,
       // and `validate` will not tell them (a non-title empty is `ok:true`, value `""`).
-      expect(deriveFenceFields(note("title: T", "role:", "org: o"), RUBRIC).gaps).toEqual(["role"]);
+      expect(deriveFenceFields(parseFrontmatter(note("title: T", "role:", "org: o")), RUBRIC).gaps).toEqual(["role"]);
     });
 
     test("(d) non-objects — TOTAL on markdown, LOUD on a bad rubric", () => {
       // Total on its `markdown: string` input: no `---` block ⇒ `parseFrontmatter` returns `{}`.
-      expect(deriveFenceFields("just prose, no frontmatter\n", RUBRIC).fields).toEqual({});
-      expect(deriveFenceFields("", RUBRIC).fields).toEqual({});
-      expect(deriveFenceFields("---\n---\n", RUBRIC).fields).toEqual({});
+      expect(deriveFenceFields(parseFrontmatter("just prose, no frontmatter\n"), RUBRIC).fields).toEqual({});
+      expect(deriveFenceFields(parseFrontmatter(""), RUBRIC).fields).toEqual({});
+      expect(deriveFenceFields(parseFrontmatter("---\n---\n"), RUBRIC).fields).toEqual({});
 
       // ⚠ THE RUBRIC GUARD IS A RUNTIME GUARD, NOT A COMPILER ONE. The rubric arrives from
       // `resolveTemplate` over a `--config` module the CLI `await import`s, so tsc's `Rubric` type is
       // a claim about a value it never saw.
       for (const bad of [null, 7, "str", [], undefined, { titleField: "t" }]) {
-        expect(() => deriveFenceFields(note("title: T"), bad as never)).toThrow(
+        expect(() => deriveFenceFields(parseFrontmatter(note("title: T")), bad as never)).toThrow(
           /rubric must be an object with a fields array/,
         );
       }
@@ -860,10 +860,30 @@ describe("deriveFenceFields — the rubric projection (AC #1)", () => {
   });
 
   test("IDENTITY-FREE (D4/NFR3) — the derivation names no vault, no path and no note type", () => {
-    const src = readFileSync(new URL("./notekit-write.ts", import.meta.url), "utf-8");
-    const derivation = src.slice(src.indexOf("export function deriveFenceFields"));
-    for (const banned of ["note-report", "zDrafts", "primer", "protocol", "pattern", "/Users/"]) {
-      expect(derivation).not.toContain(banned);
+    // 🔴 THIS GATE WAS VACUOUS WHEN FIRST SHIPPED, AND THE WAY IT FAILED IS THE LESSON. It opened
+    // `notekit-write.ts` and sliced from `indexOf("export function deriveFenceFields")`. Story 2.5
+    // MOVED that function to `notekit-read.ts`, so `indexOf` returned **-1**, `slice(-1)` yielded the
+    // file's last character — `"\n"` — and every banned-string check passed forever, on one newline.
+    // The suite reported green while guarding nothing. Found by cross-vendor review (grok, 2026-08-06,
+    // F1); it is the exact class the Epic-1 retrospective already recorded once.
+    //
+    // Two fixes, because pointing it at the right file is only half of it:
+    //   1. the slice is BOUNDED at the next top-level export, so it cannot silently swallow the module;
+    //   2. `start` is ASSERTED non-negative, so a future move reddens this test instead of neutering it.
+    const src = readFileSync(new URL("./notekit-read.ts", import.meta.url), "utf-8");
+    const start = src.indexOf("export function deriveFenceFields");
+    expect(start).toBeGreaterThan(-1);
+    const end = src.indexOf("\nexport ", start + 1);
+    expect(end).toBeGreaterThan(start);
+    const derivation = src.slice(start, end);
+    expect(derivation.length).toBeGreaterThan(200); // a slice too small to contain the function is not a scan
+
+    const BANNED = ["note-report", "zDrafts", "primer", "protocol", "pattern", "/Users/"];
+    for (const banned of BANNED) expect(derivation).not.toContain(banned);
+
+    // COUNTERFACTUAL — the scan bites on planted identity, which the -1 version could never have done.
+    for (const banned of BANNED) {
+      expect(`${derivation}\nconst home = "${banned}";`).toContain(banned);
     }
   });
 });
@@ -873,17 +893,17 @@ describe("the gap advisory — ONE notion of `the rubric's keys`, not two (AC #6
   const note = (...fm: string[]) => ["---", ...fm, "---", "", "Prose."].join("\n");
 
   test("a missing key and an EMPTY key are both gaps", () => {
-    expect(deriveFenceFields(note("title: T", "role: r", "org: o"), RUBRIC).gaps).toEqual([]);
-    expect(deriveFenceFields(note("title: T", "role: r"), RUBRIC).gaps).toEqual(["org"]);
-    expect(deriveFenceFields(note("title: T", "role:", "org: o"), RUBRIC).gaps).toEqual(["role"]);
-    expect(deriveFenceFields(note("prose: p"), RUBRIC).gaps).toEqual(["title", "role", "org"]);
+    expect(deriveFenceFields(parseFrontmatter(note("title: T", "role: r", "org: o")), RUBRIC).gaps).toEqual([]);
+    expect(deriveFenceFields(parseFrontmatter(note("title: T", "role: r")), RUBRIC).gaps).toEqual(["org"]);
+    expect(deriveFenceFields(parseFrontmatter(note("title: T", "role:", "org: o")), RUBRIC).gaps).toEqual(["role"]);
+    expect(deriveFenceFields(parseFrontmatter(note("prose: p")), RUBRIC).gaps).toEqual(["title", "role", "org"]);
   });
 
   test("the gap set and the derived key set are COMPLEMENTS over the rubric's keys", () => {
     // This is the anti-drift property: two notions of "the rubric's keys" would let them disagree.
     for (const fm of [["title: T"], ["title: T", "role: r"], ["role: r", "org: o"], ["title:", "org: o"]]) {
       const md = note(...fm);
-      const { fields, gaps } = deriveFenceFields(md, RUBRIC);
+      const { fields, gaps } = deriveFenceFields(parseFrontmatter(md), RUBRIC);
       const derived = Object.keys(fields);
       const wanted = ["title", "role", "org"];
       // A key is either derived-and-non-empty, or a gap. An empty value is BOTH derived and a gap,
@@ -895,21 +915,21 @@ describe("the gap advisory — ONE notion of `the rubric's keys`, not two (AC #6
 
   test("`nk-type` and an empty key are excluded from the gap set too — same skips, one owner", () => {
     const weird = { kind: "card" as const, titleField: "", fields: [{ key: "nk-type" }, { key: "role" }] };
-    expect(deriveFenceFields(note("nk-type: card"), weird).gaps).toEqual(["role"]);
+    expect(deriveFenceFields(parseFrontmatter(note("nk-type: card")), weird).gaps).toEqual(["role"]);
   });
 
   test("`__proto__` is a GAP, not a silent success (AC #6)", () => {
     // `fm["__proto__"]` is TRUTHY (the inherited prototype object) on a record that never carried the
     // key, so only the `hasOwnProperty` read of AC #1(a) makes this detectable at all.
     const proto = { kind: "card" as const, titleField: "title", fields: [{ key: "__proto__" }] };
-    expect(deriveFenceFields(note("title: T", "__proto__: x"), proto).gaps).toEqual(["__proto__"]);
+    expect(deriveFenceFields(parseFrontmatter(note("title: T", "__proto__: x")), proto).gaps).toEqual(["__proto__"]);
     const asTitle = { kind: "card" as const, titleField: "__proto__", fields: [] };
-    expect(deriveFenceFields(note("__proto__: x"), asTitle).gaps).toEqual(["__proto__"]);
+    expect(deriveFenceFields(parseFrontmatter(note("__proto__: x")), asTitle).gaps).toEqual(["__proto__"]);
   });
 
   test("a bad rubric fails LOUD here too — one guard, not two postures", () => {
     for (const bad of [null, 7, "str", []]) {
-      expect(() => deriveFenceFields(note("title: T"), bad as never)).toThrow(/rubric must be an object/);
+      expect(() => deriveFenceFields(parseFrontmatter(note("title: T")), bad as never)).toThrow(/rubric must be an object/);
     }
   });
 });
@@ -1075,7 +1095,7 @@ describe("AC #3 — validation PRECEDES the write, and the absence of a fence is
     // Demonstrated on the pieces rather than by mutating the shipped order, because the shipped order
     // is what the fixtures above assert. This is what the write WOULD have carried: `createFence`
     // composes happily from a title-less record, so nothing but the ORDER stops it landing.
-    const { fields } = deriveFenceFields(TITLE_GAP, REGISTRY.templates["catalog-card"]!.rubric);
+    const { fields } = deriveFenceFields(parseFrontmatter(TITLE_GAP), REGISTRY.templates["catalog-card"]!.rubric);
     expect(Object.keys(fields)).toEqual(["summary", "status"]); // no title — the gap
     const wouldHaveBeen = createFence(TITLE_GAP, "card", composeBody(fields), 0);
     expect(locateFence(wouldHaveBeen)).not.toBeNull(); // a fence WAS composable
@@ -1294,7 +1314,8 @@ describe("AC #6 — the required-field gap, on EVERY gap path", () => {
   });
 
   test("4 gap paths, 0 NEW error codes — every one is a code 2.1 already ships", () => {
-    expect(["nk-unknown-type", "nk-missing-field"].every((c) => typeof c === "string")).toBe(true);
+    // (A `typeof c === "string"` assertion over a literal array stood here and could not fail for any
+    // implementation — deleted after cross-vendor review, F5. The source greps below are the real half.)
     const src = readFileSync(new URL("./notekit-write.ts", import.meta.url), "utf-8");
     // The write-code union is 2.2's three, unchanged — 2.5 adds none.
     expect(src.match(/"nk-(note-changed|write-failed|write-unverified)"/g)!.length).toBeGreaterThan(0);
@@ -1330,32 +1351,38 @@ describe("AC #1 — the frontmatter→fence derivation has ONE call site, and th
    *      a file ripgrep was handed explicitly, so `src/cli/notekit-*.ts` drags the test files in and
    *      this story's own `parseFrontmatter(`-shaped fixtures count as violations. Asserted below.
    */
+  /**
+   * ⚠ THE MATCHER COVERS BOTH READER NAMES. `parseFrontmatterBlock` is `parseFrontmatter`'s superset —
+   * same match, plus the block's end offset — so a gate that named only the shorter one could be
+   * satisfied by renaming the call. A gate you can pass by importing a different alias is not a gate.
+   */
+  const READS_FRONTMATTER = /\bparseFrontmatter(?:Block)?\s*\(/;
+
   function callSites(): Array<{ file: string; line: number }> {
     const hits: Array<{ file: string; line: number }> = [];
     for (const file of scopeFiles()) {
       const masked = stripStringsAndComments(readFileSync(join(ROOT, file), "utf-8"));
       masked.split("\n").forEach((text, i) => {
-        if (/\bparseFrontmatter\s*\(/.test(text)) hits.push({ file, line: i + 1 });
+        if (READS_FRONTMATTER.test(text)) hits.push({ file, line: i + 1 });
       });
     }
     return hits;
   }
 
-  test("EXACTLY TWO call sites, and both are named — a third is a finding", () => {
-    // ⚠ THE STORY SAYS "EXACTLY ONE", AND ON LIVE CODE THAT IS UNREACHABLE. It was measured at a commit
-    // BEFORE Story 2.1 landed, where the count in this scope was 0 → 1. 2.1 then shipped `renderPlan`'s
-    // `nk-type:` OPT-IN read, which NK-1.8 rule 2 sanctions by name and which 2.1's tests pin. Live code
-    // governs, so the gate is stated at its true value with each residual named and justified:
+  test("EXACTLY ONE frontmatter read in the whole slice, and it is named", () => {
+    // ⚠ THIS SHIPPED AT **TWO** FIRST, AND THAT WAS A SOFTENED GATE DEFENDED WITH A TRUE-BUT-IRRELEVANT
+    // FACT. The argument was: 2.1's `nk-type:` opt-in read is sanctioned by NK-1.8 rule 2, therefore
+    // "exactly one" is unreachable on live code. The premise is true and the conclusion did not follow —
+    // rule 2 sanctions CONSULTING the opt-in, it never required a second `parseFrontmatter(` site.
+    // `renderPlan` already holds the whole record when it checks the opt-in, so threading it into
+    // `deriveFenceFields` costs nothing and the slice reads frontmatter ONCE. Cross-vendor review
+    // (grok, 2026-08-06, F3) refused the softening and was right to.
     //
-    //   `deriveFenceFields` — THE derivation. The only place frontmatter influences what a fence SAYS.
-    //   `renderPlan`        — the OPT-IN presence check. It reads whether `nk-type:` is there, never a
-    //                         card field value, so it does not fork the seam rule 1 keeps single.
-    //
-    // The AC's semantic claim is intact and still falsifiable: a THIRD call — an "also read the
-    // frontmatter for the title" convenience, or a copy inside the preview printer — reddens this.
+    // What the one site now feeds, from one match: the opt-in presence check, the rubric projection
+    // (`deriveFenceFields`, which takes the RECORD), and the fence insertion offset (the block's `end`).
     const sites = callSites();
-    expect(sites).toHaveLength(2);
-    expect(sites.every((s) => s.file === "src/cli/notekit-read.ts")).toBe(true);
+    expect(sites).toHaveLength(1);
+    expect(sites[0]!.file).toBe("src/cli/notekit-read.ts");
 
     const src = readFileSync(join(ROOT, "src/cli/notekit-read.ts"), "utf-8").split("\n");
     const enclosing = sites.map((s) => {
@@ -1369,27 +1396,40 @@ describe("AC #1 — the frontmatter→fence derivation has ONE call site, and th
       }
       return "<module>";
     });
-    expect(enclosing.sort()).toEqual(["deriveFenceFields", "renderPlan"]);
+    expect(enclosing).toEqual(["renderPlan"]);
   });
 
-  test("COUNTERFACTUAL — a planted third call site REDDENS the gate", () => {
+  test("`deriveFenceFields` reads NO frontmatter — it projects a record it is handed", () => {
+    // The structural half of the claim above: the derivation cannot re-read even if someone wanted it
+    // to, because it never receives note text. Its signature is the guard.
+    const src = readFileSync(join(ROOT, "src/cli/notekit-read.ts"), "utf-8");
+    const start = src.indexOf("export function deriveFenceFields");
+    expect(start).toBeGreaterThan(-1); // ⚠ a -1 here silently slices to nothing — see the D4 gate below
+    const body = stripStringsAndComments(src.slice(start, src.indexOf("\nexport ", start + 1)));
+    expect(READS_FRONTMATTER.test(body)).toBe(false);
+    expect(body).toContain("frontmatter: Record<string, string | string[]>");
+  });
+
+  test("COUNTERFACTUAL — a planted second call site REDDENS the gate, under EITHER reader name", () => {
     // Run against text rather than by editing a shipped file, so the gate is proven to move without
-    // leaving the tree dirty. The planted line is the exact convenience the AC warns about.
-    const planted = stripStringsAndComments(
-      `${readFileSync(join(ROOT, "src/cli/notekit-write.ts"), "utf-8")}\nfunction titleShortcut(md: string) { return parseFrontmatter(md)["title"]; }\n`,
-    );
-    const extra = planted.split("\n").filter((l) => /\bparseFrontmatter\s*\(/.test(l));
-    expect(extra).toHaveLength(1); // the writer has ZERO today; the plant takes it to one
-    expect(callSites()).toHaveLength(2); // …and the real tree is unchanged
+    // leaving the tree dirty. Both plants are the exact convenience the AC warns about.
+    const writer = readFileSync(join(ROOT, "src/cli/notekit-write.ts"), "utf-8");
+    for (const plant of [
+      `function titleShortcut(md: string) { return parseFrontmatter(md)["title"]; }`,
+      `function endShortcut(md: string) { return parseFrontmatterBlock(md).end; }`,
+    ]) {
+      const masked = stripStringsAndComments(`${writer}\n${plant}\n`);
+      expect(masked.split("\n").filter((l) => READS_FRONTMATTER.test(l))).toHaveLength(1);
+    }
+    expect(callSites()).toHaveLength(1); // …and the real tree is unchanged
   });
 
   test("COUNTERFACTUAL — an IMPORT is not a call, and PROSE is not a call", () => {
     // Both of these are present in the real tree right now, and a naïve gate counts both.
     const raw = readFileSync(join(ROOT, "src/cli/notekit-read.ts"), "utf-8");
-    expect(raw).toContain("  parseFrontmatter,"); // the import — bare-identifier scans count this
-    expect(/\bparseFrontmatter\s*\(/.test(raw.split("\n").find((l) => l.includes("naïve"))!)).toBe(true);
-    // …and the masked scan counts neither: 4 raw call-form lines, 2 real call sites.
-    const rawCallForm = raw.split("\n").filter((l) => /\bparseFrontmatter\s*\(/.test(l));
+    expect(raw).toContain("  parseFrontmatterBlock,"); // the import — bare-identifier scans count this
+    // …and the docblocks explain the hazard by writing the call form out, which is not a violation.
+    const rawCallForm = raw.split("\n").filter((l) => READS_FRONTMATTER.test(l));
     expect(rawCallForm.length).toBeGreaterThan(callSites().length);
   });
 
@@ -1405,5 +1445,78 @@ describe("AC #1 — the frontmatter→fence derivation has ONE call site, and th
     }).stdout.toString();
     // The explicitly-handed test file survives the ignore glob — which is the whole trap.
     expect(expanded).toContain("src/cli/notekit-read.test.ts");
+  });
+});
+
+describe("🔴 REGRESSION (cross-vendor review F2) — a GLUED closing delimiter must not wreck the note", () => {
+  // The defect, end to end: `parseFrontmatter` accepted `---EXTRA prose` as a closing delimiter and
+  // returned a real record WITH the `nk-type:` opt-in, while a caller-side "where does frontmatter
+  // stop" pattern found no match and reported offset 0. Author mode then inserted the fence BEFORE the
+  // opening `---`. The note stopped being frontmatter-led, its opt-in silently vanished — and every
+  // other check still passed, including the `locateFence` oracle, which happily found the new fence in
+  // the wreckage. Fixed structurally: `parseFrontmatterBlock` reports fields and end from ONE match.
+  const GLUED = "---\nnk-type: card\ntitle: Primer\nstatus: live\n---EXTRA\nProse the human wrote.\n";
+
+  test("the fence lands AFTER the frontmatter, and the opt-in survives", async () => {
+    const h = harness({ readNote: scriptedReads(GLUED, GLUED, null) });
+    await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps);
+    expect(h.writes).toHaveLength(1);
+    const written = h.writes[0]![1];
+
+    // The three properties the old code broke, each asserted separately so a partial regression is
+    // still visible: still frontmatter-led, opt-in still readable, fence after the block.
+    expect(written.startsWith("---\nnk-type: card\n")).toBe(true);
+    expect(parseFrontmatter(written)["nk-type"]).toBe("card");
+    const f = locateFence(written)!;
+    expect(written.slice(0, f.blockStart)).toContain("---EXTRA");
+    expect(parseFenceBody(f.body)).toEqual({ title: "Primer", status: "live" });
+  });
+
+  test("…and the note is re-renderable: the round trip finds the fence it just wrote", async () => {
+    // The sharpest form of the claim. Under the defect this failed at the FIRST row — the note had no
+    // opt-in any more, so a second `render` exited `nk-no-opt-in` on a note author mode had authored.
+    const h = harness({ readNote: scriptedReads(GLUED, GLUED, null) });
+    await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps);
+    const written = h.writes[0]![1];
+
+    const second: string[] = [];
+    const code = await runNotekitRead(["render", "n.md", ...CONFIG, "--at", AT, "--json"], {
+      log: (l) => second.push(l), err: () => {},
+      loadRegistry: async () => REGISTRY, readNote: () => written,
+    });
+    expect(code).toBe(0);
+    const env = JSON.parse(second[0]!) as { ok: boolean; value: Record<string, unknown> };
+    expect(env.ok).toBe(true);
+    expect(env.value).not.toHaveProperty("gaps"); // the TRANSFORM arm — the note now has a fence
+  });
+
+  test("prose after the glued delimiter is byte-identical", async () => {
+    const h = harness({ readNote: scriptedReads(GLUED, GLUED, null) });
+    await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--at", AT], h.deps);
+    const written = h.writes[0]![1];
+    const f = locateFence(written)!;
+    expect(written.slice(0, f.blockStart) + written.slice(f.blockEnd)).toBe(
+      GLUED.slice(0, GLUED.indexOf("Prose")) + "\n" + "\n" + GLUED.slice(GLUED.indexOf("Prose")),
+    );
+  });
+});
+
+describe("the two nk-no-fence refusal arms are DISTINGUISHABLE by message (review F4)", () => {
+  test("an unterminated fence and an unseedable note carry the same code, different sentences", async () => {
+    // A second CODE would be a widening SM-C2 counts against, and 2.3's/2.4's inventories pin the
+    // count — so the code stays `nk-no-fence` and the MESSAGE answers "why".
+    const torn = harness({ readNote: () => "---\nnk-type: card\ntitle: T\n---\n\n```nk-card\ntitle: T\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--json"], torn.deps)).toBe(1);
+    const tornEnv = envelope(torn.out);
+
+    const bare = harness({ readNote: () => "---\nnk-type: card\n---\n\njust prose\n" });
+    expect(await runNotekitApply(["render", "n.md", ...CONFIG, "--apply", "--json"], bare.deps)).toBe(1);
+    const bareEnv = envelope(bare.out);
+
+    expect(tornEnv.error!.code).toBe("nk-no-fence");
+    expect(bareEnv.error!.code).toBe("nk-no-fence");
+    expect(tornEnv.error!.message).not.toBe(bareEnv.error!.message);
+    expect(String(tornEnv.error!.message)).toContain("never closed");
+    expect(String(bareEnv.error!.message)).toContain("nothing to seed");
   });
 });

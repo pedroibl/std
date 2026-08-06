@@ -32,7 +32,7 @@ import {
   dispatchAsync,
   flagValue,
   hasFlag,
-  parseFrontmatter,
+  parseFrontmatterBlock,
   slugify,
 } from "../core/index";
 import {
@@ -367,6 +367,14 @@ function rubricKeys(rubric: Rubric): string[] {
  * `renderCardHtml`. A second frontmatter read in the render or write path forks the seam rule 1 exists
  * to keep single — "`core` never reads frontmatter for card field VALUES".
  *
+ * ⚠ IT TAKES THE PARSED RECORD, NOT THE MARKDOWN, and that is what makes AC #1's gate reach its stated
+ * value rather than a softened one. The first shape took `markdown: string` and parsed it here — which
+ * put a SECOND `parseFrontmatter(` call in the slice beside `renderPlan`'s opt-in read, and the gate
+ * was then written to accept two "because the opt-in read is sanctioned". It is sanctioned, but that
+ * was never the argument: `renderPlan` already holds the whole record when it checks the opt-in, so
+ * threading it costs nothing and the slice reads frontmatter EXACTLY ONCE. A projection over a record
+ * is also the more honest signature — nothing about this function needs note text.
+ *
  * ⚠ IT LIVES AT THE EDGE, AND THAT IS A SOURCE CONSTRAINT RATHER THAN TASTE. `core-fence.ts` states its
  * own scope in terms: the lines inside the fence, NEVER the note's YAML frontmatter, and
  * `parseFrontmatter` "stays the CALLER's tool … outside core". NK-1.8 rule 3 puts only
@@ -405,9 +413,11 @@ function rubricKeys(rubric: Rubric): string[] {
  * a parsed one behave identically downstream. A plain `{}` would reintroduce hazard 3 one layer later
  * and harder to see.
  */
-export function deriveFenceFields(markdown: string, rubric: Rubric): DerivedFields {
+export function deriveFenceFields(
+  frontmatter: Record<string, string | string[]>,
+  rubric: Rubric,
+): DerivedFields {
   const wanted = rubricKeys(rubric);
-  const frontmatter = parseFrontmatter(markdown);
   const fields: FenceFields = Object.create(null);
   const gaps: string[] = [];
   for (const key of wanted) {
@@ -488,27 +498,6 @@ function describeNonRecord(value: unknown): string {
   return typeof value;
 }
 
-/**
- * The offset just past the frontmatter block's closing `---` line — where a created fence is inserted.
- *
- * ⚠ IT READS THE BLOCK WITH `parseFrontmatter`'S OWN REGEX, deliberately. Two different notions of
- * "where the frontmatter ends" is how an insertion point and the record it was derived from stop
- * agreeing; the shared shape means a note the parser saw no block in gets offset `0` here, and that is
- * the same `0` the (CLI-unreachable, opt-in-less) no-frontmatter branch already declares.
- *
- * ⚠ THE INSERTION POINT IS A DECISION THIS STORY MAKES BECAUSE NO SOURCE MAKES ONE — the spine, the PRD
- * and the epic are all silent. Rationale, in order: it is deterministic and testable regardless of
- * prose content; it puts an identity card where UJ-1 says the reader wants it; and it makes the
- * prose/fence separability check positional rather than heuristic. An architect may overturn it;
- * overturning it changes only this function and the separability assertion.
- */
-const FRONTMATTER_BLOCK = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(\r\n|\r|\n|$)/;
-
-function fenceInsertionPoint(markdown: string): number {
-  const match = FRONTMATTER_BLOCK.exec(markdown);
-  return match === null ? 0 : match[0].length;
-}
-
 /** An nk-fence OPENING line, anywhere in the note — the check `locateFence`'s `null` cannot make. */
 const FENCE_OPENING_LINE = /^[ \t]*`{3,}[ \t]*nk-[a-z]+[ \t]*$/m;
 
@@ -577,7 +566,13 @@ export async function renderPlan(
 
   // PRESENCE of a non-empty `nk-type` string, nothing more — the routing type comes from the fence, so
   // a disagreement between the two is not an error (NK-1.8 rule 2, the edge's `hasOptIn` rule).
-  const frontmatter = parseFrontmatter(source);
+  //
+  // 🔴 THE SLICE'S ONLY FRONTMATTER READ. The record threads from here to the opt-in check AND to
+  // `deriveFenceFields`; the block's `end` threads to the insertion point. Every other notion of "what
+  // the frontmatter says" or "where it stops" is derived from THIS ONE MATCH — a second read is what
+  // AC #1 forbids, and a second end-of-block pattern is what silently wrecked a note (see
+  // `parseFrontmatterBlock`).
+  const { fields: frontmatter, end: frontmatterEnd } = parseFrontmatterBlock(source);
   const optIn = Object.prototype.hasOwnProperty.call(frontmatter, OPT_IN_KEY)
     ? frontmatter[OPT_IN_KEY]
     : undefined;
@@ -593,9 +588,30 @@ export async function renderPlan(
   if (fence === null) {
     // row 4 — FORKED at Story 2.5. `seedPlan` returns `null` for every case that is NOT authorable,
     // and each of those falls through to 2.1's refusal below, byte for byte.
-    const seed = seedPlan(notePath, source, optIn, registry, at.value ?? deps.now?.() ?? new Date().toISOString());
+    const seed = seedPlan(
+      notePath,
+      source,
+      optIn,
+      frontmatter,
+      frontmatterEnd,
+      registry,
+      at.value ?? deps.now?.() ?? new Date().toISOString(),
+    );
     if (seed !== null) return seed;
-    return { kind: "error", error: { code: "nk-no-fence", message: "note has no nk-fence" } };
+    // ⚠ THE MESSAGE DISTINGUISHES THE TWO REFUSAL ARMS; THE CODE DOES NOT, DELIBERATELY. A second code
+    // would be a widening SM-C2 counts against, and 2.3's/2.4's error-code inventories pin the count.
+    // But "note has no nk-fence" alone is a dead end for the arm author mode declined: the reader needs
+    // to know whether the note is malformed or simply has nothing to seed from. Message text is not in
+    // any sibling's inventory, so this costs nothing and answers the question.
+    return {
+      kind: "error",
+      error: {
+        code: "nk-no-fence",
+        message: FENCE_OPENING_LINE.test(source)
+          ? "note has no nk-fence — an opening delimiter is present but never closed, so nothing was created over it"
+          : "note has no nk-fence, and its frontmatter answers no key of the note type's rubric — nothing to seed one from",
+      },
+    };
   }
 
   const template = resolveTemplate(fence.type, registry);
@@ -687,6 +703,8 @@ function seedPlan(
   notePath: string,
   source: string,
   optIn: string,
+  frontmatter: Record<string, string | string[]>,
+  frontmatterEnd: number,
   registry: NoteTypeRegistry,
   generatedAt: string,
 ): PlanOutcome | null {
@@ -701,7 +719,7 @@ function seedPlan(
     };
   }
 
-  const { fields, gaps } = deriveFenceFields(source, template.rubric);
+  const { fields, gaps } = deriveFenceFields(frontmatter, template.rubric);
   if (Object.keys(fields).length === 0) return null; // 3 — nothing to seed from
 
   const spec = noteToRenderSpec(fields, template.rubric, {
@@ -715,7 +733,11 @@ function seedPlan(
     return { kind: "error", error: checked.error };
   }
 
-  const insertAt = fenceInsertionPoint(source);
+  // THE INSERTION POINT IS THE PARSER'S OWN BLOCK END, threaded from the one match `renderPlan` made.
+  // It is never recomputed here: a caller-side pattern for "where the frontmatter stops" disagreed with
+  // the parser on a glued closing delimiter and put the fence BEFORE the opening `---`, destroying the
+  // opt-in on a note every other check had passed. See `parseFrontmatterBlock`.
+  const insertAt = frontmatterEnd;
   const seeded = createFence(source, optIn, composeBody(fields), insertAt);
   const located = locateFence(seeded)!;
 

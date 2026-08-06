@@ -1548,6 +1548,10 @@ describe("apply gate — AC #6: the working tree holds only this story's own fil
     "src/cli/notekit-read.ts",
     "src/cli/notekit-write.ts",
     "src/cli/notekit-write.test.ts",
+    // Review follow-up (cross-vendor F2) — the shared frontmatter-block locator in `core`.
+    "src/core/parse.ts",
+    "src/core/parse.test.ts",
+    "src/core/index.ts",
   ];
 
   // `porcelainPaths` is IMPORTED, not redefined here — see the header's rule against a copied probe.
