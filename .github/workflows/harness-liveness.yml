@@ -1,0 +1,86 @@
+# std — harness liveness canary (NK-11 r3, NK-12 r3/r6).
+#
+# NOT A MERGE GATE, AND DELIBERATELY NOT ON `pull_request`. Every probe here asserts a fact about an
+# artifact upstream ships and this repo neither owns nor pins — the installed `claude` binary. Those are
+# CANARIES about the world, not gates about a diff. On the PR path they would fail every open PR in the
+# repo the day upstream renames a primitive, including PRs nowhere near notekit, and a gate that fails
+# the innocent is the kind that gets switched off (NK-11 r2).
+#
+# A RED HERE IS AN ARCHITECTURE ALARM, not a broken build: restate the affected NK-10 clause and open a
+# story. Nothing here can block a merge.
+#
+# ⚠ `runs-on: ubuntu-latest` IS LOAD-BEARING — it is not a default and must not be "upgraded" to macOS.
+# These probes spawn `claude doctor`, which on macOS performs SecKeychainItemModifyContent against the
+# operator's real login keychain (NK-12, found by an operator's credential dialog). This runner is the
+# one place `STD_HARNESS_PROBES=1` is admissible, and the reason is a PROPERTY, not an OS name (NK-12 r6):
+#   · no operator credential store — macOS Keychain Services is an Apple-only API and does not exist here
+#   · no interactive session — headless, no window server, so no modal can block an unattended run
+# If a macOS job is ever added to this workflow for a good reason, IT MUST NOT SET THAT FLAG. A scheduled
+# unattended run is a WORSE place for a keychain write than an interactive one, not a safer one: nobody
+# is present to see what the machine asks for, and a blocking modal reports as a timeout.
+
+name: Harness liveness
+
+on:
+  schedule:
+    # Daily. The point is bounded detection latency — a primitive disappearing upstream is noticed within
+    # a day rather than whenever someone next runs the suite on a machine that happens to have the binary.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: harness-liveness
+  cancel-in-progress: true
+
+jobs:
+  liveness:
+    name: Upstream primitive liveness
+    runs-on: ubuntu-latest          # ⚠ see the header — NOT a default, and not macOS. NK-12 r6.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Install claude (native installer)
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # ⚠ THIS STEP EXISTS BECAUSE THE PROBES CANNOT TELL THE TWO FAILURES APART. Gates (b)/(g) read the
+      # binary with `strings -a` and are RED when an anchor is missing — which is correct when upstream
+      # dropped the anchor, and WRONG when the install produced a script shim with no strings in it at
+      # all. Both look identical to the assertion. So the shape of the artifact is checked HERE, where a
+      # failure reads as "the install is wrong" instead of as "upstream removed the primitive".
+      - name: Verify the installed artifact is a native executable, not a shim
+        run: |
+          BIN="$(command -v claude)" || { echo "::error::claude not on PATH after install"; exit 1; }
+          REAL="$(readlink -f "$BIN")"
+          echo "resolved: $BIN -> $REAL"
+          file "$REAL"
+          claude --version
+          if ! file "$REAL" | grep -qi "ELF"; then
+            echo "::error::resolved claude is not a native ELF binary — \`strings\` probes would go RED"
+            echo "::error::for the wrong reason. Fix the install step; do NOT relax the probes."
+            exit 1
+          fi
+          COUNT="$(strings -a "$REAL" | wc -l)"
+          echo "strings readable: $COUNT lines"
+          if [ "$COUNT" -lt 1000 ]; then
+            echo "::error::strings returned $COUNT lines — the probe would read an empty haystack"; exit 1
+          fi
+
+      # The canary proper. STD_HARNESS_PROBES=1 is set ONLY here (NK-12 r3): it makes the `bin === null`
+      # branch and the opt-in skip both unreachable, so this is the one place where a probe cannot skip.
+      # That property is what makes the whole arrangement honest — opt-in alone would be a probe that
+      # never runs, which is the green-by-construction failure NK-10 r4 forbids (NK-12 r4).
+      - name: Liveness probes (the only place they cannot skip)
+        env:
+          STD_HARNESS_PROBES: "1"
+        run: bun test src/notekit/notewright-apply-gate.test.ts src/notekit/notewright-dispatch.test.ts
